@@ -218,6 +218,7 @@ fn iosBundle(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.Reso
     const adhoc = b.option(bool, "ios-adhoc", "Device build signed ad hoc: a compile check that won't install") orelse false;
     const distribution = b.option(bool, "ios-distribution", "App Store / TestFlight signing (production push)") orelse false;
     const widgets = b.option([]const u8, "ios-widgets-appex", "A signed HarnessWidgets.appex from Xcode, embedded in PlugIns/");
+    const watch = b.option([]const u8, "ios-watch-app", "A signed HarnessWatch.app from Xcode, embedded in Watch/");
 
     const ipa_step = b.step("ipa", "Package a signed device build as zig-out/ios/Harness.ipa");
     const bundle_id = rules.bundleId(id_option) catch {
@@ -273,7 +274,10 @@ fn iosBundle(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.Reso
     const wf = b.addWriteFiles();
     _ = wf.add("Harness.app/Info.plist", info);
     _ = wf.addCopyFile(ios.executable(b, exe), b.fmt("Harness.app/{s}", .{exe.name}));
+    // Xcode's own builds, signed with their own profiles: finish.sh keeps a
+    // nested signature that verifies and signs the app around it.
     if (widgets) |appex| _ = wf.addCopyDirectory(.{ .cwd_relative = appex }, "Harness.app/PlugIns/HarnessWidgets.appex", .{});
+    if (watch) |app| _ = wf.addCopyDirectory(.{ .cwd_relative = app }, "Harness.app/Watch/HarnessWatch.app", .{});
     const made = wf.getDirectory().path(b, "Harness.app");
     const entitlements = b.addWriteFiles().add("Harness.entitlements", rules.entitlementsPlist(b.allocator, signing, bundle_id) catch @panic("OOM"));
 

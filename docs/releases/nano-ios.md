@@ -165,6 +165,67 @@ the `altool` upload and App Store Connect's processing of a Zig-built binary
 need the real key; everything before them (bundle, entitlements, ipa layout,
 DT keys) was checked locally with ad hoc signatures.
 
+## Widgets, Live Activities and the Watch app
+
+These stay SwiftUI targets in `apps/ios` (nanoui draws none of them). The
+Zig app embeds what Xcode builds, through two build options that copy a
+signed bundle into the app before it is signed around it (nanoui's
+`finish.sh` keeps a nested signature that verifies):
+
+```sh
+# 1. Build the extension (or the Watch app) with Xcode, named after the Zig app:
+xcodebuild -project apps/ios/Harness.xcodeproj -target HarnessWidgets \
+  -sdk iphoneos -configuration Release \
+  HARNESS_APP_BUNDLE_ID=harness.codegraff.ios.nano \
+  MARKETING_VERSION=<the Zig app's version> CURRENT_PROJECT_VERSION=<its build number> \
+  SYMROOT=/tmp/widgets build            # signed with the extension's own profile
+# 2. Embed it:
+sh apps/nano/scripts/ios.sh device --identity … --profile … \
+  -Dios-widgets-appex=/tmp/widgets/Release-iphoneos/HarnessWidgets.appex \
+  -Dios-watch-app=<HarnessWatch.app>
+```
+
+`-Dios-widgets-appex` also sets `NSSupportsLiveActivities`. The targets'
+bundle ids follow `HARNESS_APP_BUNDLE_ID` (`<app>.widgets`,
+`<app>.watchkitapp`, `<app>.watchkitapp.widgets`), so they nest under
+whichever id the Zig app has.
+
+Verified (Simulator, 2026-11-12): `HarnessWidgets` built unsigned for the
+Simulator with `HARNESS_APP_BUNDLE_ID=harness.codegraff.ios.nano`, embedded
+with `-Dios-widgets-appex`; the app's and the extension's signatures verify,
+`NSSupportsLiveActivities` is set, the app installs and launches, and the
+Simulator's `pluginkit` lists `harness.codegraff.ios.nano.widgets` from the
+app's `PlugIns/`.
+
+Not verified, and known gaps:
+
+- A device build with Xcode-signed extensions, and App Store validation of
+  it. The extension's `CFBundleShortVersionString` and `CFBundleVersion`
+  must equal the app's, hence the `MARKETING_VERSION` and
+  `CURRENT_PROJECT_VERSION` overrides above; the workflow doesn't build or
+  embed extensions yet, and each needs its own App ID and profile.
+- Live Activities are started by the app through ActivityKit
+  (`apps/ios/Harness/App/LiveActivities.swift`), which has no Objective-C
+  API, so the Zig app can't start them through the runtime. It needs a small
+  Swift shim linked into the app, or activities started by the edge with
+  push-to-start (whose token API is Swift-only too). Until then the embedded
+  widget shows home-screen widgets only.
+- The Watch app (`-Dios-watch-app`) was not built or embedded. Its bridge
+  (`WatchBridge.swift`, WatchConnectivity) has an Objective-C API, so a Zig
+  port is possible but not written.
+
+## What remains
+
+- No dSYM: crash and hang reports from Zig builds can't be symbolicated yet
+  (`ios.executable` strips local symbols; keeping an unstripped copy for
+  `dsymutil` is the fix).
+- `codegraff-key.json` is still a file on iOS (`auth_host.zig`).
+- The Settings and onboarding screens must call `ios_push.runtime.setEnabled`,
+  `setKind`, `requestPermission`, and write `crashReports.send`.
+- A tapped notification and the APNs token were not exercised on a device or
+  the Simulator: `simctl` can't grant notification permission without a tap
+  on the system prompt, which this work didn't automate.
+
 ## The cutover
 
 1. Parity: the Zig app does what the Swift app does (screens are tracked
