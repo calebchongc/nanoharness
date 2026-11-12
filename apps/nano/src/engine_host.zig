@@ -2171,9 +2171,6 @@ pub const EngineHost = struct {
             .CompleteAgentLogin,
             .CancelAgentLogin,
             .McpServerAction,
-            .CodegraffSandboxAction,
-            .CodegraffCreateSandbox,
-            .CodegraffCreateTemporarySandbox,
             .CodegraffGithubRunnerAction,
             .CreateWorktree,
             .DeleteWorktree,
@@ -2258,10 +2255,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"harness\":null,\"model\":null}") };
             },
             .CodegraffSandboxes => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"enabled\":true,\"sandboxes\":[],\"sizes\":[{\"id\":\"standard\",\"cpu\":4,\"memoryGiB\":8,\"diskGiB\":20,\"pricePerHourMicroUsd\":120000,\"default\":true}]}",
-                ) };
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .list, params));
+            },
+            .CodegraffCreateSandbox => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .create, params));
+            },
+            .CodegraffCreateTemporarySandbox => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .create_temporary, params));
+            },
+            .CodegraffSandboxAction => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .action, params));
             },
             .CodegraffGithubRunners => {
                 return .{ .unary_json = try self.gpa.dupe(

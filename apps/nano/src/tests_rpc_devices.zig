@@ -48,3 +48,26 @@ test "rpc devices: simulator methods answer through the engine host" {
         try testing.expectEqualStrings("not a simulator id: \"booted\"", bad.err.exec_error);
     }
 }
+
+test "rpc devices: sandbox methods answer through the engine host" {
+    var host = try engine_host.EngineHost.init(testing.allocator, "dev-test", "Test Mac");
+    defer host.deinit();
+
+    var missing = try call(&host, "CodegraffSandboxAction", "{\"action\":\"stop\"}");
+    defer freeOutcome(&missing);
+    try testing.expectEqualStrings("missing sandbox id", missing.err.exec_error);
+
+    var unknown = try call(&host, "CodegraffSandboxAction", "{\"id\":\"cnd_1\",\"action\":\"explode\"}");
+    defer freeOutcome(&unknown);
+    try testing.expectEqualStrings("unknown sandbox action", unknown.err.exec_error);
+
+    if (@import("proc_seam.zig").getenv("CODEGRAFF_API_KEY") == null) {
+        // Signed out: `Option<CodegraffSandboxes>` is null, and nothing is called.
+        var list = try call(&host, "CodegraffSandboxes", "{}");
+        defer freeOutcome(&list);
+        try testing.expectEqualStrings("null", list.unary_json);
+        var create = try call(&host, "CodegraffCreateTemporarySandbox", "{}");
+        defer freeOutcome(&create);
+        try testing.expectEqualStrings("Sign in with Codegraff first.", create.err.exec_error);
+    }
+}
