@@ -54,6 +54,8 @@ pub fn main(init: std.process.Init) !void {
     const dark = flag(scene, "dark");
     a.dark = dark;
     a.offscreen = true;
+    // `"mobile": true`: the phone's screens (view_mobile.zig).
+    a.mobile_preview = flag(scene, "mobile");
     if (str(scene, "surface")) |s| a.settings.setText("surface", s);
     inline for (.{ .{ "spaces", &a.spaces }, .{ "chats", &a.chats }, .{ "devices", &a.devices }, .{ "sessions", &a.sessions } }) |l| {
         if (scene.get(l[0])) |v| try l[1].replace(v);

@@ -1,0 +1,12 @@
+{"mobile": true, "width": 402, "height": 874, "scale": 2, "dark": false,
+ "devices": [{"id":"dev-box","name":"Build Box","platform":"macos"}],
+ "spaces": [{"id":"sp-1","deviceId":"dev-box","path":"/work/sample","name":"sample"}],
+ "chats": [{"id":"chat-r","spaceId":"sp-1","deviceId":"dev-box","title":"Run the sample suite","archived":false,"cwd":"/work/sample","config":{"harness":"codex","model":"gpt-5.4"}}],
+ "open": "chat-r",
+ "replies": {"AuthStatus":{"$items":[{"state":"signedIn","user":{"id":"u","email":"sam@example.com","name":"Sam Rivera"}}]},
+   "StartAgentLogin":{"loginId":"login-1","url":"https://auth.openai.com/codex/device","mode":"device-code","code":"ABCD-1234"},
+   "PollAgentLogin":{"status":"pending"}},
+ "transcripts": {"chat-r": [
+   {"id":"u1","role":"user","parts":[{"kind":"text","id":"t1","text":"Run the sample test suite and summarise failures."}]},
+   {"id":"m1","role":"assistant","parts":[{"kind":"error","id":"e1","message":"Codex needs you to sign in again.","reauth":"codex"}]}]},
+ "steps": [{"snap":"reauth-row"},{"click":"Reconnect ChatGPT"},{"wait":0.3},{"snap":"reauth-sheet"}]}

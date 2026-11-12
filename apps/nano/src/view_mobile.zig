@@ -56,6 +56,7 @@ pub const Sheet = enum {
     settings,
     session_switcher,
     profile,
+    reauth,
 };
 
 pub const State = struct {
@@ -91,6 +92,8 @@ pub const State = struct {
     demo: bool = false,
     /// The question panel's height as last laid out (it sits above the safe area).
     question_h: f32 = 0,
+    /// The error row whose agent sign-in sheet is open (view_mobile_reauth.zig).
+    reauth: @import("view_mobile_reauth.zig").Open = .{},
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         @import("text_buffer.zig").deinit(&s.search_query);
@@ -1037,10 +1040,14 @@ fn renderTranscriptEntry(a: *App, c: *ui.Context, k: theme.Colors, entry: *const
                 }
             },
             .@"error" => {
-                const ebox = ui.div(c).row().wFull().p(10).gap(8).rounded(12).bg(k.danger.alpha(0.14)).border(k.danger.alpha(0.4)).borderW(1);
-                defer ebox.end();
-                icons.icon(c, .@"danger-triangle", 15, k.danger, 0);
-                ui.text(c, p.text.items, .{ .size = 13.5, .wrap = true, .color = k.danger });
+                {
+                    const ebox = ui.div(c).row().wFull().p(10).gap(8).rounded(12).bg(k.danger.alpha(0.14)).border(k.danger.alpha(0.4)).borderW(1);
+                    defer ebox.end();
+                    icons.icon(c, .@"danger-triangle", 15, k.danger, 0);
+                    ui.text(c, p.text.items, .{ .size = 13.5, .wrap = true, .color = k.danger });
+                }
+                // A typed sign-in error: reconnect the agent on the chat's computer.
+                @import("view_mobile_reauth.zig").rowControls(a, c, k, entry, p, e_idx);
             },
             else => {},
         }
@@ -1173,6 +1180,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
             .settings => "Settings & Telemetry",
             .session_switcher => "Switch Session",
             .profile => "Profile",
+            .reauth => "Reconnect ChatGPT",
             .none => "",
         };
         ui.text(c, title, .{ .size = 17, .weight = .bold, .color = k.text });
@@ -1187,6 +1195,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
         .settings => renderSettingsSheet(a, c, k, rt),
         .session_switcher => renderSwitcherSheet(a, c, k),
         .profile => @import("view_mobile_profile.zig").render(a, c, k),
+        .reauth => @import("view_mobile_reauth.zig").sheet(a, c, k),
         .none => {},
     }
 }

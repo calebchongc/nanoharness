@@ -9,4 +9,5 @@ test {
     _ = @import("view_mobile_profile.zig");
     _ = @import("mobile_question.zig");
     _ = @import("view_mobile_question.zig");
+    _ = @import("view_mobile_reauth.zig");
 }
