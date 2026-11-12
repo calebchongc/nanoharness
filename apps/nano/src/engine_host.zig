@@ -4672,7 +4672,7 @@ pub const EngineHost = struct {
             } else if (std.mem.eql(u8, kind, "chats")) {
                 if (self.upsertSyncedChatIndexed(row_id, f, &chat_idx)) |_| {
                     dirty_chats = true;
-                    @import("remote_tail.zig").rowChanged(self, row_id);
+                    if (persist_disk) @import("remote_tail.zig").rowChanged(self, row_id);
                 } else |_| {}
             } else if (std.mem.eql(u8, kind, "sidebarPins")) {
                 if (chat_idx.get(row_id)) |c_i| {
@@ -4699,7 +4699,7 @@ pub const EngineHost = struct {
 
             const cid = regOptStr(f, "chatId") orelse row_id;
             if (chat_idx.get(cid)) |c_i| {
-                @import("remote_tail.zig").rowChanged(self, cid);
+                if (persist_disk) @import("remote_tail.zig").rowChanged(self, cid);
                 const c = &self.chats.items[c_i];
                 const status = regOptStr(f, "status") orelse "idle";
                 const started_ms = regOptEpochMs(f, "startedAt");

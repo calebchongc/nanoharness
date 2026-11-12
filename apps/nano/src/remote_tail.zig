@@ -13,8 +13,9 @@
 const std = @import("std");
 const engine_host = @import("engine_host.zig");
 
-/// A registry row for `chat_id` arrived: drop its cached tail when another
-/// device hosts it.
+/// A registry row for `chat_id` arrived from the edge (not the saved copy an
+/// engine replays at start, whose tail is as old as the row): drop its
+/// cached tail when another device hosts it.
 pub fn rowChanged(host: *engine_host.EngineHost, chat_id: []const u8) void {
     for (host.chats.items) |c| if (std.mem.eql(u8, c.id, chat_id)) {
         if (c.device_id.len > 0 and !std.mem.eql(u8, c.device_id, host.device_id)) host.invalidateCachedTail(chat_id);
@@ -49,14 +50,14 @@ test "remote tail: a changed row of another device's chat drops its cached tail;
     for ([_][2][]const u8{ .{ "chat-remote", "dev-host" }, .{ "chat-own", "dev-reader" } }) |c| {
         const body = try chatRow(c[0], c[1], "first");
         defer gpa.free(body);
-        _ = host.applyRegistryResponseJson("org-synthetic", body, false);
+        _ = host.applyRegistryResponseJson("org-synthetic", body, true);
         _ = host.storeCachedTailInMemoryOwned(c[0], try gpa.dupe(u8, "[{\"id\":\"m1\",\"role\":\"user\",\"parts\":[]}]"), false);
         try testing.expect(host.lookupCachedTailJson(c[0]) != null);
     }
     for ([_][2][]const u8{ .{ "chat-remote", "dev-host" }, .{ "chat-own", "dev-reader" } }) |c| {
         const body = try chatRow(c[0], c[1], "second turn");
         defer gpa.free(body);
-        _ = host.applyRegistryResponseJson("org-synthetic", body, false);
+        _ = host.applyRegistryResponseJson("org-synthetic", body, true);
     }
     // The host's transcript moved on: fetch it again.
     try testing.expect(host.lookupCachedTailJson("chat-remote") == null);
