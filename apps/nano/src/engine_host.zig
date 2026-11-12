@@ -2084,7 +2084,7 @@ pub const EngineHost = struct {
                 ) };
             },
             .FetchToolBlob => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"content\":\"\",\"found\":false}") };
+                return @import("rpcw_tool_blob.zig").fetchToolBlob(self, params);
             },
             .ListHarnesses => return @import("rpcw_harnesses.zig").listHarnesses(self),
             .ListModels => {

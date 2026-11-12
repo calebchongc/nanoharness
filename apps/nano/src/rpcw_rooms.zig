@@ -189,8 +189,9 @@ test "rpcw_rooms replyJson passes the edge's JSON and nulls anything else" {
 }
 
 /// A loopback edge: answers every request with `status`/`body` and records
-/// the request line, authorization header and body of the last one.
-const FakeEdge = struct {
+/// the request line, authorization header and body of the last one. Shared
+/// by the other edge-backed RPC tests.
+pub const FakeEdge = struct {
     server: net.Server = undefined,
     port: u16 = 0,
     status: u16 = 200,
@@ -201,7 +202,7 @@ const FakeEdge = struct {
     hits: std.atomic.Value(u32) = .init(0),
     thread: ?std.Thread = null,
 
-    fn start(self: *FakeEdge) !void {
+    pub fn start(self: *FakeEdge) !void {
         const addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
         self.server = try addr.listen(testing.io, .{ .reuse_address = true });
         self.port = self.server.socket.address.getPort();
@@ -243,7 +244,7 @@ const FakeEdge = struct {
         }
     }
 
-    fn shutdown(self: *FakeEdge) void {
+    pub fn shutdown(self: *FakeEdge) void {
         self.stop.store(true, .release);
         if (net.IpAddress.parseIp4("127.0.0.1", self.port)) |addr| {
             if (addr.connect(testing.io, .{ .mode = .stream })) |s| s.close(testing.io) else |_| {}
@@ -252,16 +253,17 @@ const FakeEdge = struct {
         self.server.deinit(testing.io);
     }
 
-    fn lastRequest(self: *FakeEdge) []const u8 {
+    pub fn lastRequest(self: *FakeEdge) []const u8 {
         return self.last[0..self.last_len];
     }
 };
 
-const Fx = struct {
+/// An engine signed in to a `FakeEdge` (shared by the other edge-backed tests).
+pub const Fx = struct {
     host: engine_host.EngineHost,
     edge: FakeEdge = .{},
 
-    fn init(signed_in: bool) !*Fx {
+    pub fn init(signed_in: bool) !*Fx {
         const gpa = testing.allocator;
         const f = try gpa.create(Fx);
         f.* = .{ .host = try engine_host.EngineHost.init(gpa, "dev-synthetic", "Synthetic") };
@@ -278,20 +280,24 @@ const Fx = struct {
         return f;
     }
 
-    fn deinit(f: *Fx) void {
+    pub fn deinit(f: *Fx) void {
         f.edge.shutdown();
         f.host.deinit();
         testing.allocator.destroy(f);
     }
 
     fn call(f: *Fx, params_text: []const u8) !RpcOutcome {
+        return f.callMethod("RoomRequest", params_text);
+    }
+
+    pub fn callMethod(f: *Fx, method: []const u8, params_text: []const u8) !RpcOutcome {
         var p = try json.parseFromSlice(json.Value, testing.allocator, params_text, .{});
         defer p.deinit();
-        return f.host.handle("RoomRequest", p.value);
+        return f.host.handle(method, p.value);
     }
 };
 
-fn expectErr(outcome: RpcOutcome, comptime kind: std.meta.Tag(engine_host.RpcError), expected: []const u8) !void {
+pub fn expectErr(outcome: RpcOutcome, comptime kind: std.meta.Tag(engine_host.RpcError), expected: []const u8) !void {
     switch (outcome) {
         .err => |e| {
             try testing.expectEqual(kind, std.meta.activeTag(e));
