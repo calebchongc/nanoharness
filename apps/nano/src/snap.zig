@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     const acct = @import("app_account.zig");
     a.account.scope = acct.readScope(scene);
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
+    if (scene.get("auth")) |v| @import("app_workspace_gate.zig").authItem(&a, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     if (str(scene, "open")) |id| a.openChat(id, null);
     // Bots: a `BotsState` reply as "bots", the clock its times are read

@@ -174,6 +174,7 @@ pub fn watch(a: *App) void {
 fn onAuth(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
         .item => |v| {
+            @import("app_workspace_gate.zig").authItem(a, v);
             const user = readUser(a.gpa, v) catch return;
             const became_signed_in = (a.account.user == null and user != null);
             if (a.account.user) |*u| u.deinit(a.gpa);

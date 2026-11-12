@@ -7,9 +7,11 @@ const App = @import("app.zig").App;
 pub const State = struct {
     preview: @import("app_image_preview.zig").State = .{},
     notes: @import("app_annotate.zig").Notes = .{},
+    gate: @import("app_workspace_gate.zig").State = .{},
 
     pub fn deinit(s: *State, a: *App) void {
         s.preview.deinit(a);
         s.notes.deinit(a.gpa);
+        s.gate.deinit(a.gpa);
     }
 };

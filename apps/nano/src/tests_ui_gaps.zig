@@ -6,4 +6,6 @@ test {
     _ = @import("app_annotate.zig");
     _ = @import("view_image_preview.zig");
     _ = @import("view_annotate.zig");
+    _ = @import("app_workspace_gate.zig");
+    _ = @import("view_workspace_gate.zig");
 }
