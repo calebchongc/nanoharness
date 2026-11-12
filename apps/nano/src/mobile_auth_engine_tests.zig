@@ -196,7 +196,7 @@ test "mobile sign-in: random PKCE to the iOS redirect, callback, exchange, org c
     try testing.expect(host.auth.refresh_token == null);
 }
 
-test "Graff compaction: the engine keeps the `pct` the apps send, and null is graff's default" {
+test "Graff compaction: the engine keeps the `pct` the apps send, and null hands the choice back to graff" {
     const gpa = testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -208,5 +208,5 @@ test "Graff compaction: the engine keeps the `pct` the apps send, and null is gr
     try testing.expectEqualStrings("70", set70.unary_json);
     const reset = try call(&host, a, "SetGraffCompactAt", "{\"pct\":null}");
     defer gpa.free(reset.unary_json);
-    try testing.expectEqualStrings("80", reset.unary_json);
+    try testing.expectEqualStrings("null", reset.unary_json); // Rust: `None`, graff picks its own default (`registry.rs`)
 }
