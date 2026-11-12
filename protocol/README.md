@@ -46,3 +46,28 @@ not any one implementation.
 
 The Rust client also holds the cursor when a row's import reports missing causal dependencies, and asks for a
 checkpoint. The Swift client doesn't check the import result for that, so the rule isn't pinned here yet.
+
+# Device-room relay frame vectors
+
+`device-frame-vectors.json` pins the device relay's frame codec: `uleb128(header length) ‖ UTF-8 JSON header ‖
+payload`, header `{s, k, to?, from?}`, spoken by a host engine, a client link and the edge's `DeviceRoom`.
+
+| Implementation | Side | Runner | Run it |
+| --- | --- | --- | --- |
+| Zig (`apps/nano/src/device_frame.zig`) | host relay | `apps/nano/src/device_frame.zig` | `cd apps/nano && zig build test -Dtest-filter="device frame vectors"` |
+| TypeScript (`edge/src/device-room.ts`) | relay | `edge/src/device-frame.vectors.test.ts` | `cd edge && npx vitest run src/device-frame.vectors.test.ts` |
+
+The Rust implementation (`crates/rpc/src/device_room.rs`) is frozen while the engine moves to Zig, so it has no
+runner; the vectors were checked against its encoder's rules (`JSON.stringify` key order and escaping, which
+`serde_json` matches for these inputs) and its unit tests' fixtures.
+
+- **`kinds`, `relayErrors`:** frame kinds (the relay kind has a leading space) and relay control error codes.
+- **`encode`:** exact bytes for a header and payload, including relay control, nudge, nudge ACK and echo frames.
+- **`decodeRejects`, `decodeAccepts`:** inputs every decoder rejects or reads back. A case marked `typedOnly` is
+  rejected by decoders that read a typed header (string `s` and `k`, valid UTF-8) and passed through by the relay,
+  which treats the header as opaque.
+- **`relayErrorCode`:** the code read from a relay control payload, or `null`.
+- **`wsUrl`, `hostUrlSuffix`, `bearerFromQuery`:** the device-room socket URL, the host's `&nudgeAck=1`, and the
+  dialer moving `token` from the query into an `Authorization: Bearer` header. Dialer rules; the relay skips them.
+
+Not covered: socket timing (the 10 s ping, 25 s silence lease, reconnect backoff) and RPC payloads.
