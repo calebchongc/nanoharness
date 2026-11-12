@@ -8,4 +8,6 @@ test {
     _ = @import("view_annotate.zig");
     _ = @import("app_workspace_gate.zig");
     _ = @import("view_workspace_gate.zig");
+    _ = @import("app_keep_awake.zig");
+    _ = @import("view_settings_keep_awake.zig");
 }
