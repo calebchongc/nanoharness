@@ -654,6 +654,86 @@ test "mcp protocol: a 1 MiB request line is answered; a line over the cap is ref
     try testing.expect(u.get(lines[2], "result") != null);
 }
 
+/// Stdin that hands over one line at a time, each only after every
+/// earlier request was answered, and notes how many were still in flight.
+const PacedInput = struct {
+    interface: std.Io.Reader,
+    lines: []const []const u8,
+    next: usize = 0,
+    offset: usize = 0,
+    server: *mcp.Server = undefined,
+    out: *std.Io.Writer.Allocating = undefined,
+    max_in_flight_between: usize = 0,
+    waited_too_long: bool = false,
+
+    fn init(buffer: []u8, lines: []const []const u8) PacedInput {
+        return .{ .lines = lines, .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 } };
+    }
+
+    fn answered(self: *PacedInput) usize {
+        self.server.out_lock.lockUncancelable(testing.io);
+        defer self.server.out_lock.unlock(testing.io);
+        return std.mem.count(u8, self.out.written(), "\n");
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *PacedInput = @alignCast(@fieldParentPtr("interface", r));
+        if (self.next == self.lines.len) return error.EndOfStream;
+        if (self.offset == 0 and self.next > 0) {
+            var waited: u32 = 0;
+            while (self.answered() < self.next) : (waited += 5) {
+                if (waited >= 5000) {
+                    self.waited_too_long = true;
+                    return error.EndOfStream;
+                }
+                std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+            }
+            // A worker retires right after writing its reply.
+            if (@hasDecl(mcp.Server, "inFlight")) {
+                var retired: u32 = 0;
+                while (self.server.inFlight() != 0) : (retired += 5) {
+                    if (retired >= 2000) {
+                        self.max_in_flight_between = @max(self.max_in_flight_between, self.server.inFlight());
+                        break;
+                    }
+                    std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+                }
+            }
+        }
+        const line = self.lines[self.next];
+        const n = try w.write(limit.sliceConst(line[self.offset..]));
+        self.offset += n;
+        if (self.offset == line.len) {
+            self.next += 1;
+            self.offset = 0;
+        }
+        return n;
+    }
+};
+
+test "mcp protocol: a finished request leaves no thread or record behind during a long session" {
+    // Serving keeps a count of requests in flight, not a list of threads
+    // that only EOF would join.
+    try testing.expect(!@hasField(mcp.Server, "workers"));
+    const f = try WorldFixture.create(.{});
+    defer f.destroy();
+    const a = f.arena.allocator();
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (0..25) |k| try lines.append(a, try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"ping\"}}\n", .{k + 1}));
+    var buf: [256]u8 = undefined;
+    var input = PacedInput.init(&buf, lines.items);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var server: mcp.Server = .{ .gpa = testing.allocator, .io = testing.io, .tools = f.t, .out = &out.writer };
+    input.server = &server;
+    input.out = &out;
+    try server.serve(&input.interface);
+    try testing.expect(!input.waited_too_long);
+    try testing.expectEqual(@as(usize, 25), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(usize, 0), input.max_in_flight_between);
+    if (@hasDecl(mcp.Server, "inFlight")) try testing.expectEqual(@as(usize, 0), server.inFlight());
+}
+
 test "mcp protocol: line reading keeps a line of exactly the cap and refuses one byte more" {
     const gpa = testing.allocator;
     var buf: std.Io.Writer.Allocating = .init(gpa);

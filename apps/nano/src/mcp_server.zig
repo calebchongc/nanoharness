@@ -248,8 +248,10 @@ pub const Server = struct {
     out: *std.Io.Writer,
     out_lock: Io.Mutex = .init,
     max_line: usize = max_line_bytes,
-    workers: std.ArrayList(std.Thread) = .empty,
-    workers_lock: Io.Mutex = .init,
+    /// Requests being answered on their own (detached) threads.
+    in_flight: usize = 0,
+    flight_lock: Io.Mutex = .init,
+    idle: Io.Condition = .init,
 
     fn write(self: *Server, line: []const u8) void {
         self.out_lock.lockUncancelable(self.io);
@@ -276,12 +278,40 @@ pub const Server = struct {
         }
     }
 
+    /// Answers `raw` on a thread of its own, counted until it finishes; a
+    /// finished request leaves nothing behind.
+    fn dispatch(self: *Server, raw: []u8) void {
+        self.flight_lock.lockUncancelable(self.io);
+        self.in_flight += 1;
+        self.flight_lock.unlock(self.io);
+        const t = std.Thread.spawn(.{}, work, .{ self, raw }) catch return self.work(raw);
+        t.detach();
+    }
+
+    fn work(self: *Server, raw: []u8) void {
+        self.answer(raw);
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        self.in_flight -= 1;
+        if (self.in_flight == 0) self.idle.broadcast(self.io);
+    }
+
+    /// Requests still being answered.
+    pub fn inFlight(self: *Server) usize {
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        return self.in_flight;
+    }
+
+    fn waitIdle(self: *Server) void {
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        while (self.in_flight > 0) self.idle.waitUncancelable(self.io, &self.flight_lock);
+    }
+
     /// Reads requests until stdin closes, then lets in-flight ones finish.
     pub fn serve(self: *Server, in: *std.Io.Reader) !void {
-        defer {
-            for (self.workers.items) |t| t.join();
-            self.workers.deinit(self.gpa);
-        }
+        defer self.waitIdle();
         var buf: std.Io.Writer.Allocating = .init(self.gpa);
         defer buf.deinit();
         while (true) {
@@ -303,14 +333,7 @@ pub const Server = struct {
                 },
                 .line => |line| {
                     if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
-                    const copy = try self.gpa.dupe(u8, line);
-                    const t = std.Thread.spawn(.{}, answer, .{ self, copy }) catch {
-                        self.answer(copy);
-                        continue;
-                    };
-                    self.workers_lock.lockUncancelable(self.io);
-                    defer self.workers_lock.unlock(self.io);
-                    try self.workers.append(self.gpa, t);
+                    self.dispatch(try self.gpa.dupe(u8, line));
                 },
             }
         }
