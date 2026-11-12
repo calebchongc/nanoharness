@@ -25,6 +25,10 @@ pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
     const map = .{
         .{ "claude-code", &@import("agent_claude.zig").adapter },
         .{ "codex", &@import("agent_codex.zig").adapter },
+        .{ "graff", &@import("agent_acp.zig").graff },
+        .{ "devin", &@import("agent_acp.zig").devin },
+        .{ "grok", &@import("agent_acp.zig").grok },
+        .{ "hermes", &@import("agent_acp.zig").hermes },
     };
     inline for (map) |e| if (std.mem.eql(u8, harness, e[0])) return e[1];
     return null;

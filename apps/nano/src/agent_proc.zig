@@ -543,6 +543,12 @@ pub const AgentProc = struct {
         self.startWatchdog();
     }
 
+    /// Drop pending TERM/KILL deadlines (a handshake finished in time).
+    pub fn clearDeadline(self: *AgentProc) void {
+        self.term_at.store(0, .release);
+        self.kill_at.store(0, .release);
+    }
+
     fn startWatchdog(self: *AgentProc) void {
         self.write_mutex.lockUncancelable(self.io);
         defer self.write_mutex.unlock(self.io);
