@@ -299,6 +299,7 @@ pub fn prompt(a: *App, text: []const u8) !?[]u8 {
     var out: std.Io.Writer.Allocating = .init(a.gpa);
     errdefer out.deinit();
     try out.writer.writeAll(if (text.len > 0) text else "See the attached image(s).");
+    try @import("app_annotate.zig").appendNotes(a, &out.writer);
     try out.writer.writeAll("\n\nAttached images (local files — open them to view):");
     for (a.attachments.items.items) |item| if (item.active(a)) {
         try out.writer.print("\n- {s}", .{item.path.?});

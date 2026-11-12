@@ -48,13 +48,13 @@ test "setup starts on Graff, picked and recommended, with the extras as this dev
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    setup.open(&h.a, 0);
+    setup.open(&h.a, 1);
     h.t.settle(1);
     try testing.expect(h.t.hasText("Start with Graff"));
     try testing.expect(h.t.hasText("Recommended"));
     try testing.expect(h.t.hasText("Optional, ready"));
     try testing.expect(h.t.hasText("Not installed. Install it from Settings > Agents"));
-    try testing.expect(h.t.hasText("1 of 4"));
+    try testing.expect(h.t.hasText("2 of 6"));
 }
 
 test "Return walks the questions; Escape goes back; the answers land" {
@@ -63,6 +63,9 @@ test "Return walks the questions; Escape goes back; the answers land" {
     defer h.deinit();
     setup.open(&h.a, 0);
     h.t.settle(1);
+    try testing.expect(h.t.hasText("Sign in to CodeGraff"));
+    h.press(.{ .key = S.enter });
+    try testing.expect(h.t.hasText("Start with Graff"));
     h.press(.{ .key = S.enter });
     try testing.expect(h.t.hasText("How hard should it think?"));
     h.press(.{ .key = S.escape });
@@ -77,6 +80,8 @@ test "Return walks the questions; Escape goes back; the answers land" {
     try testing.expect(h.t.hasText("Ping you when it needs you?"));
     try h.t.clickText("No, I'll check in");
     h.t.settle(1);
+    h.press(.{ .key = S.enter });
+    try testing.expect(h.t.hasText("Pick your first project"));
     h.press(.{ .key = S.enter });
     try testing.expect(h.t.hasText("Your first agent is ready"));
     try testing.expect(h.t.hasText("Read only"));

@@ -1,0 +1,124 @@
+{
+ "width": 1200,
+ "height": 780,
+ "scale": 2,
+ "devices": [
+  {
+   "id": "d",
+   "name": "Studio",
+   "platform": "macos"
+  }
+ ],
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "d",
+   "path": "/work/fieldnotes",
+   "name": "fieldnotes"
+  },
+  {
+   "id": "s2",
+   "deviceId": "d",
+   "path": "/work/garden-planner",
+   "name": "garden-planner"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "d",
+   "title": "Polish the billing page",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "lastMessageAt": "2026-11-10T00:00:00Z",
+   "config": {
+    "harness": "graff",
+    "model": "m1"
+   }
+  }
+ ],
+ "dark": true,
+ "replies": {
+  "ListHarnesses": [
+   {
+    "id": "graff",
+    "name": "Graff",
+    "installed": true,
+    "enabled": true,
+    "reasoningLevels": [
+     "low",
+     "medium",
+     "high"
+    ]
+   },
+   {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "installed": true,
+    "enabled": false
+   },
+   {
+    "id": "codex",
+    "name": "Codex",
+    "installed": false,
+    "enabled": false
+   }
+  ],
+  "ListModels": [
+   {
+    "id": "m1",
+    "label": "Graff Fast"
+   },
+   {
+    "id": "m2",
+    "label": "Graff Pro"
+   },
+   {
+    "id": "m3",
+    "label": "Graff Max"
+   }
+  ],
+  "EngineInfo": {
+   "workspaceScope": "local"
+  },
+  "ListCommands": {
+   "$err": "agent offline"
+  },
+  "ListSkills": [
+   {
+    "name": "release-notes",
+    "path": "/work/fieldnotes/.agents/skills/release-notes",
+    "description": "Draft release notes from merged changes",
+    "enabled": true
+   }
+  ]
+ },
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {
+    "id": "u",
+    "role": "user",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "Make the upgrade button stand out more.\n\nAttached images (local files \u2014 open them to view):\n- /up/ui.png"
+     }
+    ]
+   }
+  ]
+ },
+ "steps": [
+  {
+   "type": "/"
+  },
+  {
+   "expect": "Couldn't load"
+  },
+  {
+   "snap": "slash-error"
+  }
+ ]
+}

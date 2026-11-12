@@ -37,6 +37,13 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
                     icons.icon(c, if (item.status == .failed) .refresh else .@"clock-circle", 12, if (item.status == .failed) k.danger else k.muted, 0);
                 }
                 if (item.status == .failed and thumb.clicked()) item.start();
+                // A picture opens the preview, where Annotate is.
+                if (item.status != .failed and attachments.isImageName(item.name) and thumb.clicked()) @import("app_image_preview.zig").openStaged(a, item);
+                if (@import("app_annotate.zig").annotated(a, &item.id)) {
+                    const pen = ui.div(c).row().absolute().offset(2, 38).size(16, 16).center().roundedFull().bg(k.composer);
+                    defer pen.end();
+                    icons.icon(c, .pen, 10, k.muted, 0);
+                }
             }
             kit.ellipsisText(c, item.name, .{ .size = 10, .line_height = 12, .color = k.muted }, 56);
             const remove = ui.div(c).row().absolute().offset(40, 0).size(16, 16).center().roundedFull().bg(k.composer).hover(k.hover);

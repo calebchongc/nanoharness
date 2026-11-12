@@ -181,6 +181,9 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         }
         separator(c, a, w);
     }
+    if (@import("app_workspace_gate.zig").phase(acc.scope, a.ui_gaps.gate.auth, true) == .switcher) {
+        if (menuRow(c, k, .@"folder-with-files", k.muted, "Switch workspace…", 1)) @import("app_workspace_gate.zig").openSwitcher(a);
+    }
     if (menuRow(c, k, .@"settings-minimalistic", k.muted, "Settings", 1)) @import("view_settings.zig").open(a);
 }
 

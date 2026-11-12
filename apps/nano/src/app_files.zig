@@ -183,6 +183,7 @@ fn onSearched(a: *App, id: u64, r: rpc.Reply) void {
 
 /// Opens `path` in a file tab (or the tab already showing it).
 pub fn openFile(a: *App, path: []const u8) void {
+    if (@import("app_image_preview.zig").openWorkspace(a, path)) return;
     const p = &a.panels;
     p.selected = p.arena.allocator().dupe(u8, path) catch null;
     a.view.strip.focused = .host;

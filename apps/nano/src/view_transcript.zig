@@ -366,7 +366,7 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
                     sentAttachment(c, a, k, chat_id, path);
                 }
             },
-            .image => attachment(c, k, .document, p.text.items),
+            .image => @import("view_image_preview.zig").partTile(c, a, k, chat_id, p.text.items, p.path),
             else => {},
         };
     }
@@ -381,8 +381,10 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
     const bytes: []const u8 = if (image) |loaded| attachment_images.tileBytes(loaded) else "";
     const tile = ui.div(c).column().w(56).gap(2).control();
     defer tile.end();
+    const it = c.interact(tile.index, .{ .focusable = @import("app_attachments.zig").isImageName(name) });
+    if (it.clicked and @import("app_attachments.zig").isImageName(name)) @import("app_image_preview.zig").openFromTranscript(a, chat_id, path);
     {
-        const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
+        const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(if (it.focused) k.accent else k.border).bg(k.hover).clip();
         defer thumb.end();
         tiles.picture(c, k, c.print("{s}:{s}", .{ chat_id orelse "", path }), name, bytes);
     }
@@ -552,7 +554,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         },
         .tool => treeRow(c, a, k, e, p, true, at.chat_id),
         .@"error" => errorPart(c, a, k, e, p, at),
-        .image => attachment(c, k, .document, p.text.items),
+        .image => @import("view_image_preview.zig").partTile(c, a, k, at.chat_id, p.text.items, p.path),
         .visual => attachment(c, k, .widget, p.text.items),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {

@@ -99,7 +99,8 @@ pub const Engine = struct {
     }
 
     /// A call a scene answers: its reply (under `$items`, each item and the
-    /// end; `$err`, that error; `$seq`, the next of several, the last kept)
+    /// end; `$err`, that error; `$seq`, the next of several, the last kept;
+    /// `$pending`, none)
     /// queued as the engine would send it; else "isn't in this scene".
     fn sceneCall(e: *Engine, method: []const u8, params: anytype, handler: rpc.Handler) ?u64 {
         const req = e.mux.call(method, params, handler) catch return null;
@@ -117,6 +118,8 @@ pub const Engine = struct {
         const Frame = struct { id: u64, ok: ?std.json.Value = null, item: ?std.json.Value = null, err: ?[]const u8 = null, done: ?bool = null };
         var frames: std.ArrayList(Frame) = .empty;
         defer frames.deinit(e.gpa);
+        // `$pending`: never answered, for a scene's loading state.
+        if (reply) |r| if (r == .object and r.object.get("$pending") != null) return req.id;
         if (reply) |r| {
             const items = if (r == .object) r.object.get("$items") else null;
             const failure = if (r == .object) r.object.get("$err") else null;

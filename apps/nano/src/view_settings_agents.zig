@@ -596,6 +596,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Above the list: a missing grant breaks every agent's screenshots.
     cards.screenAccess(c, a, k);
     if (@import("view_setup.zig").enabled) cards.autonomyCard(c, a, k);
+    @import("view_settings_keep_awake.zig").card(c, a, k);
     switch (p.phase) {
         .idle, .loading => {
             const cd = set.card(c, k);

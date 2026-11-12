@@ -1,0 +1,80 @@
+{
+ "width": 1200,
+ "height": 780,
+ "scale": 2,
+ "devices": [
+  {
+   "id": "d",
+   "name": "Studio",
+   "platform": "macos"
+  }
+ ],
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "d",
+   "path": "/work/fieldnotes",
+   "name": "fieldnotes"
+  },
+  {
+   "id": "s2",
+   "deviceId": "d",
+   "path": "/work/garden-planner",
+   "name": "garden-planner"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "d",
+   "title": "Polish the billing page",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "lastMessageAt": "2026-11-10T00:00:00Z",
+   "config": {
+    "harness": "graff",
+    "model": "m1"
+   }
+  }
+ ],
+ "dark": false,
+ "replies": {
+  "ListHarnesses": {
+   "$err": "engine busy"
+  },
+  "ListModels": [
+   {
+    "id": "m1",
+    "label": "Graff Fast"
+   },
+   {
+    "id": "m2",
+    "label": "Graff Pro"
+   },
+   {
+    "id": "m3",
+    "label": "Graff Max"
+   }
+  ],
+  "EngineInfo": {
+   "workspaceScope": "local"
+  },
+  "GetAutonomy": {
+   "autonomy": "full-access",
+   "chosen": false
+  },
+  "CodegraffAuthStatus": {
+   "signedIn": false
+  }
+ },
+ "setupStep": 1,
+ "steps": [
+  {
+   "expect": "Couldn't check"
+  },
+  {
+   "snap": "agents-failed"
+  }
+ ]
+}
