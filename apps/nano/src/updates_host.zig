@@ -584,13 +584,18 @@ fn exists(io: std.Io, path: []const u8) bool {
 pub const Reply = union(enum) { ok: []u8, failed: []const u8, bad_params: []const u8 };
 pub const Method = enum { status, check, queue, apply };
 
-/// `targetDeviceId` names another device: this engine has no relay link to forward over.
+threadlocal var target_err_buf: [256]u8 = undefined;
+
+/// `targetDeviceId` names another device. The Rust engine forwards the call
+/// over its device relay; this engine has no relay client yet, so it answers
+/// as the Rust engine does when no relay link is available (`forward`).
 pub fn targetProblem(params: json.Value, local_device: []const u8) ?[]const u8 {
     if (params != .object) return null;
     const t = params.object.get("targetDeviceId") orelse return null;
     if (t != .string) return "invalid type for `targetDeviceId`, expected a string";
     if (std.mem.eql(u8, t.string, local_device)) return null;
-    return "target device not connected";
+    return std.fmt.bufPrint(&target_err_buf, "cannot reach device {s}: remote routing unavailable (offline)", .{t.string}) catch
+        "cannot reach device: remote routing unavailable (offline)";
 }
 
 pub fn handle(u: *Updater, reply_gpa: Allocator, method: Method) !Reply {
@@ -1422,7 +1427,7 @@ test "updates: a queued update waits for idle, then applies and restarts" {
 test "updates: a target device this engine can't reach is refused" {
     const p = try json.parseFromSlice(json.Value, testing.allocator, "{\"targetDeviceId\":\"other\"}", .{});
     defer p.deinit();
-    try testing.expectEqualStrings("target device not connected", targetProblem(p.value, "dev-local").?);
+    try testing.expectEqualStrings("cannot reach device other: remote routing unavailable (offline)", targetProblem(p.value, "dev-local").?);
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(p.value, "other"));
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(.{ .object = .empty }, "dev-local"));
 }
