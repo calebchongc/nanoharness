@@ -1696,8 +1696,9 @@ pub const EngineHost = struct {
                 if (doc.local_seq > 0 or self.store.loadSnapshot(kv.key) != null) {
                     if (doc.exportSnapshot(self.gpa)) |snap| {
                         defer self.gpa.free(snap);
-                        self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch {};
-                    } else |_| {}
+                        self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch |err|
+                            std.log.warn("snapshot save failed: chat={s} error={s}", .{ kv.key, @errorName(err) });
+                    } else |err| std.log.warn("snapshot export failed: chat={s} error={s}", .{ kv.key, @errorName(err) });
                 }
                 self.evicted_docs_total += 1;
             } else {
