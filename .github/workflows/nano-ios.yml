@@ -1,0 +1,334 @@
+name: Nano iOS TestFlight
+
+# The Zig iOS app (apps/nano, nanoui) to TestFlight, modelled on
+# testflight.yml (the Swift app's). Manual only. The Zig app is built by Zig
+# and Apple's linker, not xcodebuild, so it can't use Xcode's automatic
+# signing: this run makes an Apple Distribution certificate and an App Store
+# profile through the App Store Connect API with the same Admin key, signs
+# with them, and revokes and deletes both at the end, whatever happened.
+# docs/releases/nano-ios.md has the cutover from the Swift app.
+
+run-name: Nano iOS TestFlight (${{ inputs.audience || 'internal' }}, ${{ inputs.bundle_id || 'harness.codegraff.ios.nano' }}) from ${{ github.ref_name }} by @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      audience:
+        description: 'TestFlight audience'
+        type: choice
+        options:
+          - internal
+          - external
+        default: internal
+      bundle_id:
+        description: >-
+          Bundle id: the Zig app's own record until the cutover, then the
+          Swift app's (harness.codegraff.ios). Its App Store Connect app
+          record must already exist.
+        type: choice
+        options:
+          - harness.codegraff.ios.nano
+          - harness.codegraff.ios
+        default: harness.codegraff.ios.nano
+      version:
+        description: >-
+          Marketing version (CFBundleShortVersionString); empty for
+          build.zig.zon's. The cutover build must be above the Swift app's.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # The cutover build shares the Swift app's record, so its run queues
+  # behind testflight.yml's (build numbers); the Zig app's own runs apart.
+  group: ${{ inputs.bundle_id == 'harness.codegraff.ios' && 'testflight-release' || 'nano-ios-testflight' }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/zig/')
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      # The same iOS team Admin key testflight.yml uses (secret names too).
+      AC_API_KEY_P8: ${{ secrets.IOS_AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.IOS_AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.IOS_AC_API_ISSUER_ID }}
+      AUDIENCE: ${{ inputs.audience || 'internal' }}
+      BUNDLE_ID: ${{ inputs.bundle_id || 'harness.codegraff.ios.nano' }}
+      # Public already, in testflight.yml.
+      TEAM_ID: WWP9DLJ27P
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Xcode version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          case "$sdk" in
+            2[7-9].[1-9]*|2[8-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::iOS SDK $sdk predates iPhone Duo (27.1)"; exit 1 ;;
+          esac
+
+      - name: App Store Connect credentials, app record and build number
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Required repository secret IOS_$name is not configured." >&2
+              exit 2
+            fi
+          done
+          keys="$RUNNER_TEMP/private_keys"
+          mkdir -p "$keys"
+          key_path="$keys/AuthKey_$AC_API_KEY_ID.p8"
+          printf '%s' "$AC_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          python -m pip install --quiet 'PyJWT[crypto]'
+          # A fresh 20-minute token per step: `python $RUNNER_TEMP/asc_token.py`.
+          cat > "$RUNNER_TEMP/asc_token.py" <<'PY'
+          import os
+          import time
+          import jwt
+
+          key_id = os.environ["AC_API_KEY_ID"]
+          with open(os.environ["AC_KEY_PATH"], "rb") as key_file:
+              private_key = key_file.read()
+          now = int(time.time())
+          print(jwt.encode(
+              {"iss": os.environ["AC_API_ISSUER_ID"], "iat": now, "exp": now + 1199, "aud": "appstoreconnect-v1"},
+              private_key,
+              algorithm="ES256",
+              headers={"kid": key_id, "typ": "JWT"},
+          ))
+          PY
+          export AC_KEY_PATH="$key_path"
+          token="$(python "$RUNNER_TEMP/asc_token.py")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+
+          # The app record: App Store Connect's API can't create one, so a
+          # person makes it once (docs/releases/nano-ios.md).
+          apps="$RUNNER_TEMP/apps.json"
+          api "https://api.appstoreconnect.apple.com/v1/apps?filter[bundleId]=$BUNDLE_ID&fields[apps]=name,bundleId&limit=10" > "$apps"
+          app_count="$(jq '.data | length' "$apps")"
+          if [ "$app_count" -ne 1 ]; then
+            echo "Expected exactly one App Store Connect app for $BUNDLE_ID; found $app_count." >&2
+            exit 3
+          fi
+          app_id="$(jq -r '.data[0].id' "$apps")"
+          builds="$RUNNER_TEMP/builds.json"
+          api "https://api.appstoreconnect.apple.com/v1/builds?filter[app]=$app_id&fields[builds]=version&limit=200" > "$builds"
+          latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
+          build_number="$((latest_build + 1))"
+
+          # The App ID, with Push Notifications (session notifications).
+          bundle_ids="$RUNNER_TEMP/bundle-ids.json"
+          api "https://api.appstoreconnect.apple.com/v1/bundleIds?filter[identifier]=$BUNDLE_ID&fields[bundleIds]=identifier&limit=10" > "$bundle_ids"
+          bundle_ref="$(jq -r --arg id "$BUNDLE_ID" '[.data[] | select(.attributes.identifier == $id)][0].id // empty' "$bundle_ids")"
+          if [ -z "$bundle_ref" ]; then
+            echo "No App ID for $BUNDLE_ID." >&2
+            exit 3
+          fi
+          caps="$RUNNER_TEMP/capabilities.json"
+          api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_ref/bundleIdCapabilities" > "$caps"
+          if ! jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
+            push_reply="$RUNNER_TEMP/push-capability.json"
+            if ! api -X POST 'https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities' \
+              --data "$(jq -n --arg id "$bundle_ref" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')" \
+              -o "$push_reply"; then
+              echo "::error::Couldn't enable Push Notifications on $BUNDLE_ID:"
+              jq -r '.errors[]? | "\(.status) \(.code): \(.title) — \(.detail)"' "$push_reply" 2>/dev/null || cat "$push_reply"
+              exit 4
+            fi
+            echo "Enabled Push Notifications on $BUNDLE_ID."
+          fi
+
+          {
+            echo "AC_KEY_PATH=$key_path"
+            echo "API_PRIVATE_KEYS_DIR=$keys"
+            echo "ASC_APP_ID=$app_id"
+            echo "ASC_BUNDLE_REF=$bundle_ref"
+            echo "BUILD_NUMBER=$build_number"
+          } >> "$GITHUB_ENV"
+          echo "Preparing $AUDIENCE TestFlight build $build_number of $BUNDLE_ID from $GITHUB_SHA."
+
+      # Created for this run and removed in the last steps: a distribution
+      # certificate left behind counts against the team's small limit.
+      - name: Distribution certificate and App Store profile for this run
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(python "$RUNNER_TEMP/asc_token.py")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          signing="$RUNNER_TEMP/signing"
+          mkdir -p "$signing"
+          chmod 700 "$signing"
+          openssl req -new -newkey rsa:2048 -nodes -keyout "$signing/key.pem" \
+            -subj "/CN=Harness Nano CI/O=CI" -out "$signing/request.csr" 2>/dev/null
+          csr="$(openssl req -in "$signing/request.csr" -outform DER | base64 | tr -d '\n')"
+          cert_reply="$signing/certificate.json"
+          api -X POST 'https://api.appstoreconnect.apple.com/v1/certificates' \
+            --data "$(jq -n --arg csr "$csr" '{data: {type: "certificates", attributes: {certificateType: "DISTRIBUTION", csrContent: $csr}}}')" \
+            > "$cert_reply"
+          cert_id="$(jq -r '.data.id' "$cert_reply")"
+          echo "CERT_ID=$cert_id" >> "$GITHUB_ENV"
+          jq -r '.data.attributes.certificateContent' "$cert_reply" | base64 --decode > "$signing/cert.der"
+          openssl x509 -inform DER -in "$signing/cert.der" -out "$signing/cert.pem"
+          identity="$(openssl x509 -in "$signing/cert.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
+
+          # A keychain of its own, searched first, unlocked for codesign.
+          keychain="$RUNNER_TEMP/nano-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          p12_password="$(openssl rand -hex 24)"
+          openssl pkcs12 -export -legacy -inkey "$signing/key.pem" -in "$signing/cert.pem" \
+            -out "$signing/identity.p12" -passout "pass:$p12_password"
+          security import "$signing/identity.p12" -k "$keychain" -P "$p12_password" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$signing/key.pem" "$signing/identity.p12"
+
+          profile_reply="$signing/profile.json"
+          api -X POST 'https://api.appstoreconnect.apple.com/v1/profiles' \
+            --data "$(jq -n --arg name "Nano CI $GITHUB_RUN_ID" --arg bundle "$ASC_BUNDLE_REF" --arg cert "$cert_id" \
+              '{data: {type: "profiles", attributes: {name: $name, profileType: "IOS_APP_STORE"}, relationships: {bundleId: {data: {type: "bundleIds", id: $bundle}}, certificates: {data: [{type: "certificates", id: $cert}]}}}}')" \
+            > "$profile_reply"
+          echo "PROFILE_ID=$(jq -r '.data.id' "$profile_reply")" >> "$GITHUB_ENV"
+          jq -r '.data.attributes.profileContent' "$profile_reply" | base64 --decode > "$signing/store.mobileprovision"
+          {
+            echo "SIGN_IDENTITY=$identity"
+            echo "SIGN_PROFILE=$signing/store.mobileprovision"
+            echo "SIGN_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+
+      - name: Nano tests
+        working-directory: apps/nano
+        run: zig build test --summary all
+
+      - name: Build, sign and package the app
+        working-directory: apps/nano
+        env:
+          HARNESS_IOS_SIGN_IDENTITY: ${{ env.SIGN_IDENTITY }}
+          HARNESS_IOS_PROFILE: ${{ env.SIGN_PROFILE }}
+          HARNESS_IOS_TEAM_ID: ${{ env.TEAM_ID }}
+          HARNESS_IOS_BUNDLE_ID: ${{ env.BUNDLE_ID }}
+          HARNESS_IOS_BUILD_NUMBER: ${{ env.BUILD_NUMBER }}
+          HARNESS_IOS_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          sh scripts/ios.sh ipa --distribution
+          ipa=zig-out/ios/Harness.ipa
+          unzip -q -o "$ipa" -d "$RUNNER_TEMP/ipa-check"
+          app="$RUNNER_TEMP/ipa-check/Payload/Harness.app"
+          codesign --verify --strict --deep --verbose=2 "$app"
+          codesign -d --entitlements - "$app" 2>/dev/null | grep -q '<string>production</string>' \
+            || { echo "::error::the app isn't signed for production push"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :CFBundleVersion' -c 'Print :DTXcode' "$app/Info.plist"
+          echo "IPA_PATH=$PWD/$ipa" >> "$GITHUB_ENV"
+
+      - name: Upload to TestFlight
+        run: |
+          xcrun altool --upload-app --type ios --file "$IPA_PATH" \
+            --apiKey "$AC_API_KEY_ID" --apiIssuer "$AC_API_ISSUER_ID"
+
+      - name: Verify App Store Connect processing
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(python "$RUNNER_TEMP/asc_token.py")"
+          builds="$RUNNER_TEMP/processing-builds.json"
+          for attempt in $(seq 1 40); do
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' \
+              "https://api.appstoreconnect.apple.com/v1/builds?filter[app]=$ASC_APP_ID&fields[builds]=version,uploadedDate,processingState,expired,minOsVersion&sort=-uploadedDate&limit=20" \
+              > "$builds"
+            state="$(jq -r --arg version "$BUILD_NUMBER" '[.data[] | select(.attributes.version == $version)][0].attributes.processingState // "NOT_FOUND"' "$builds")"
+            echo "Build $BUILD_NUMBER processing state: $state"
+            case "$state" in
+              VALID)
+                build_id="$(jq -r --arg version "$BUILD_NUMBER" '[.data[] | select(.attributes.version == $version)][0].id' "$builds")"
+                echo "ASC_BUILD_ID=$build_id" >> "$GITHUB_ENV"
+                exit 0
+                ;;
+              FAILED|INVALID)
+                echo "App Store Connect rejected build $BUILD_NUMBER with state $state." >&2
+                exit 4
+                ;;
+            esac
+            sleep 15
+          done
+          echo "Build $BUILD_NUMBER did not finish processing within ten minutes." >&2
+          exit 5
+
+      # An internal build needs nothing more: an upload is available to the
+      # app's internal testers once processed (ITSAppUsesNonExemptEncryption
+      # answers export compliance in the Info.plist).
+      - name: Distribute to external testers
+        if: inputs.audience == 'external'
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(python "$RUNNER_TEMP/asc_token.py")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          groups="$RUNNER_TEMP/beta-groups.json"
+          api "https://api.appstoreconnect.apple.com/v1/betaGroups?filter[app]=$ASC_APP_ID&fields[betaGroups]=name,isInternalGroup&limit=200" > "$groups"
+          external_count="$(jq '[.data[] | select(.attributes.isInternalGroup == false)] | length' "$groups")"
+          if [ "$external_count" -ne 1 ]; then
+            echo "Found $external_count external beta groups for $BUNDLE_ID; expected exactly one." >&2
+            exit 6
+          fi
+          group_id="$(jq -r '[.data[] | select(.attributes.isInternalGroup == false)][0].id' "$groups")"
+          api -X POST "https://api.appstoreconnect.apple.com/v1/betaGroups/$group_id/relationships/builds" \
+            --data "$(jq -n --arg build "$ASC_BUILD_ID" '{data: [{type: "builds", id: $build}]}')"
+          api -X POST 'https://api.appstoreconnect.apple.com/v1/betaAppReviewSubmissions' \
+            --data "$(jq -n --arg build "$ASC_BUILD_ID" '{data: {type: "betaAppReviewSubmissions", relationships: {build: {data: {type: "builds", id: $build}}}}}')" > /dev/null
+          echo "Added build $BUNDLE_ID $BUILD_NUMBER to group $group_id and submitted it for beta review."
+
+      - name: Revoke this run's certificate and delete its profile
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          [ -s "${AC_KEY_PATH:-}" ] || { echo "No App Store Connect key; nothing to remove."; exit 0; }
+          token="$(python "$RUNNER_TEMP/asc_token.py")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          if [ -n "${PROFILE_ID:-}" ] && [ "$PROFILE_ID" != null ]; then
+            api -X DELETE "https://api.appstoreconnect.apple.com/v1/profiles/$PROFILE_ID" && echo "Deleted this run's profile."
+          fi
+          if [ -n "${CERT_ID:-}" ] && [ "$CERT_ID" != null ]; then
+            api -X DELETE "https://api.appstoreconnect.apple.com/v1/certificates/$CERT_ID" && echo "Revoked this run's distribution certificate."
+          fi
+
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          [ -z "${SIGN_KEYCHAIN:-}" ] || security delete-keychain "$SIGN_KEYCHAIN" || true
+          rm -rf "$RUNNER_TEMP/private_keys" "$RUNNER_TEMP/signing" "$RUNNER_TEMP/asc_token.py"

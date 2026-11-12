@@ -645,7 +645,7 @@ pub const AuthManager = struct {
         // 2. Restore Harness sync `session.json` if present.
         const sess_path = std.fmt.allocPrint(self.gpa, "{s}/session.json", .{dir}) catch return false;
         defer self.gpa.free(sess_path);
-        const sess_raw = std.Io.Dir.cwd().readFileAlloc(io, sess_path, self.gpa, .limited(64 * 1024)) catch return false;
+        const sess_raw = @import("session_store.zig").read(self.gpa, io, sess_path) orelse return false;
         defer self.gpa.free(sess_raw);
         var parsed = json.parseFromSlice(json.Value, self.gpa, sess_raw, .{}) catch return false;
         defer parsed.deinit();
@@ -788,7 +788,7 @@ pub const AuthManager = struct {
             ) catch return;
         defer self.gpa.free(body);
 
-        writePrivateFile(io, path, body);
+        if (!@import("session_store.zig").write(io, path, body)) writePrivateFile(io, path, body);
     }
 
     fn persistCodegraffKeyFile(self: *const AuthManager, io: std.Io) void {
@@ -816,7 +816,7 @@ pub const AuthManager = struct {
         const dir = self.data_dir orelse return;
         const path = std.fmt.allocPrint(self.gpa, "{s}/session.json", .{dir}) catch return;
         defer self.gpa.free(path);
-        std.Io.Dir.cwd().deleteFile(rio, path) catch {};
+        @import("session_store.zig").delete(rio, path);
     }
 
     fn removeCodegraffKeyFile(self: *const AuthManager, io: ?std.Io) void {
@@ -1773,6 +1773,7 @@ pub const AuthManager = struct {
     }
 
     pub fn signOutWithIo(self: *AuthManager, io: ?std.Io) void {
+        if (comptime builtin.os.tag == .ios) @import("ios_push.zig").runtime.signingOut(self, io);
         self.generation +%= 1;
         if (self.api_key) |old| {
             self.gpa.free(old);

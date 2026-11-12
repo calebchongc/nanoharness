@@ -22,6 +22,7 @@ test {
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
     _ = @import("build_indep_tests.zig");
+    _ = @import("ios_ship_tests.zig");
     _ = @import("app_files.zig");
     _ = @import("queue.zig");
     _ = @import("app_queue.zig");
