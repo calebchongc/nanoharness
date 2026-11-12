@@ -524,6 +524,8 @@ pub fn dispatchClientLineWithArena(
 ) !void {
     if (host.io) |io| host.mutex.lockUncancelable(io);
     defer if (host.io) |io| host.mutex.unlock(io);
+    if (host.io != null) host.held_for_dispatch = true;
+    defer host.held_for_dispatch = false;
 
     const parsed_val = json.parseFromSliceLeaky(json.Value, scratch, line, .{}) catch return;
     if (parsed_val != .object) return;
@@ -609,4 +611,63 @@ pub fn dispatchClientLineWithArena(
         },
     }
     try flushPushedWatchFrames(gpa, host, w);
+}
+
+/// A simctl that blocks until the test lets it go (5 s at most), then fails.
+const BlockingSimctl = struct {
+    entered: Io.Event = .unset,
+    release: Io.Event = .unset,
+
+    fn runner(self: *BlockingSimctl) @import("proc_seam.zig").Runner {
+        return .{ .ctx = self, .run_fn = run };
+    }
+
+    fn run(ctx: ?*anyopaque, a: Allocator, _: @import("proc_seam.zig").Request) Allocator.Error!@import("proc_seam.zig").Output {
+        const self: *BlockingSimctl = @ptrCast(@alignCast(ctx.?));
+        self.entered.set(std.testing.io);
+        self.release.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {};
+        return .{ .term = .exited, .code = 1, .stdout = try a.dupe(u8, ""), .stderr = try a.dupe(u8, "synthetic simctl failure") };
+    }
+};
+
+fn dispatchOne(host: *engine_host.EngineHost, line: []const u8, out: *Io.Writer.Allocating, done: *Io.Event) void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    dispatchClientLineWithArena(std.testing.allocator, arena.allocator(), host, &out.writer, line) catch {};
+    done.set(std.testing.io);
+}
+
+test "a simulator boot runs outside the engine lock: other requests are answered meanwhile" {
+    const sims = @import("simulators_host.zig");
+    const io = std.testing.io;
+    var simctl: BlockingSimctl = .{};
+    sims.setSharedForTests(try sims.Simulators.init(std.testing.allocator, io, simctl.runner(), .{ .supported = true, .system_tool_dirs = false }));
+    defer sims.setSharedForTests(null);
+    var host = try engine_host.EngineHost.init(std.testing.allocator, "dev-lock", "Synthetic");
+    defer host.deinit();
+    host.io = io;
+
+    var boot_out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer boot_out.deinit();
+    var boot_done: Io.Event = .unset;
+    const boot = try std.Thread.spawn(.{}, dispatchOne, .{ &host, "{\"id\":1,\"method\":\"BootSimulator\",\"params\":{\"simulatorId\":\"00000000-0000-0000-0000-000000000001\"}}", &boot_out, &boot_done });
+    try simctl.entered.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+
+    // simctl is still running: another client's request must not wait for it.
+    var quick_out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer quick_out.deinit();
+    var quick_done: Io.Event = .unset;
+    const quick = try std.Thread.spawn(.{}, dispatchOne, .{ &host, "{\"id\":2,\"method\":\"GetAutonomy\",\"params\":{}}", &quick_out, &quick_done });
+    const answered = if (quick_done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } })) true else |_| false;
+    simctl.release.set(io);
+    quick.join();
+    boot.join();
+    try std.testing.expect(answered);
+    try std.testing.expect(boot_done.isSet());
+    try std.testing.expect(std.mem.indexOf(u8, quick_out.written(), "\"id\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, boot_out.written(), "\"id\":1") != null);
+    // The lock is back with nobody: a direct call can take it.
+    host.mutex.lockUncancelable(io);
+    host.mutex.unlock(io);
+    try std.testing.expect(!host.held_for_dispatch);
 }

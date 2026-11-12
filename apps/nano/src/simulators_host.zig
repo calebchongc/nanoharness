@@ -240,6 +240,9 @@ pub const Simulators = struct {
     developer_dir_known: bool = false,
     developer_dir_env_set: bool = false,
     last_err: ?[]u8 = null,
+    /// One simulator operation at a time: the RPCs run outside the engine
+    /// lock, and two set-ups must not install into the same folder.
+    op_mutex: std.Io.Mutex = .init,
 
     pub const Options = struct {
         tools_dir: ?[]const u8 = null,
@@ -620,6 +623,8 @@ pub fn listReply(gpa: Allocator, supported: bool, reason: ?[]const u8, set_up: b
 
 /// Dispatch one simulator RPC (`params` as sent); a success body is allocated with `reply_gpa`.
 pub fn handle(sims: *Simulators, reply_gpa: Allocator, method: Method, params: json.Value) !Reply {
+    if (sims.io) |io| sims.op_mutex.lockUncancelable(io);
+    defer if (sims.io) |io| sims.op_mutex.unlock(io);
     const r = try handleInner(sims, method, params);
     switch (r) {
         .ok => |body| {
@@ -671,6 +676,12 @@ pub fn shared(io: ?std.Io, data_dir: ?[]const u8) !*Simulators {
 
 fn noSpawn(_: ?*anyopaque, gpa: Allocator, _: proc.Request) Allocator.Error!proc.Output {
     return .{ .term = .spawn_failed, .stdout = try gpa.dupe(u8, ""), .stderr = try gpa.dupe(u8, "") };
+}
+
+/// Tests: replace the engine's shared instance (null: forget it).
+pub fn setSharedForTests(s: ?Simulators) void {
+    if (shared_state) |*old| old.deinit();
+    shared_state = s;
 }
 
 /// Map a `Reply` onto the engine's `RpcOutcome`.

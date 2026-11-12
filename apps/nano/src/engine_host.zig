@@ -860,6 +860,10 @@ pub const EngineHost = struct {
     watches: std.ArrayList(WatchSubscription) = .empty,
     pushed_frames: std.ArrayList(PushedStreamItem) = .empty,
     mutex: std.Io.Mutex = .init,
+    /// The socket dispatcher holds `mutex` for the request being handled, so
+    /// a long call may hand it back (`releaseForLongCall`). False for direct
+    /// `handle` calls, which hold no lock.
+    held_for_dispatch: bool = false,
     live_ws_writer: ?*std.Io.Writer = null,
     cached_graff_models_json: ?[]u8 = null,
     focused_chat_id: ?[]u8 = null,
@@ -1532,6 +1536,25 @@ pub const EngineHost = struct {
             }
             i += 1;
         }
+    }
+
+    /// For a long call inside a handler (simulator boot, an npm install, a
+    /// release download): hand the engine lock back while it runs, so every
+    /// other request is served meanwhile. Only when the dispatcher holds the
+    /// lock for this request; returns what `retakeAfterLongCall` needs. The
+    /// call must not touch host state until the lock is retaken.
+    pub fn releaseForLongCall(self: *EngineHost) ?std.Io {
+        if (!self.held_for_dispatch) return null;
+        const io = self.io orelse return null;
+        self.held_for_dispatch = false;
+        self.mutex.unlock(io);
+        return io;
+    }
+
+    pub fn retakeAfterLongCall(self: *EngineHost, released: ?std.Io) void {
+        const io = released orelse return;
+        self.mutex.lockUncancelable(io);
+        self.held_for_dispatch = true;
     }
 
     pub fn removeClientWatches(self: *EngineHost, client_w: *std.Io.Writer) void {
@@ -2968,7 +2991,11 @@ pub const EngineHost = struct {
             .ApplyUpdate => {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
-                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .apply));
+                const updater = try upd.forEngine(EngineHost, self);
+                // The release download: not under the engine lock.
+                const released = self.releaseForLongCall();
+                defer self.retakeAfterLongCall(released);
+                return upd.toOutcome(RpcOutcome, try upd.handle(updater, self.gpa, .apply));
             },
             .WatchHarnessUpdates => {
                 if (params == .object) {
@@ -3148,19 +3175,35 @@ pub const EngineHost = struct {
             },
             .ListSimulators => {
                 const sims = @import("simulators_host.zig");
-                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .list, params));
+                const shared_sims = try sims.shared(self.io, self.data_dir);
+                // simctl and npm run for seconds to minutes: not under the engine lock.
+                const released = self.releaseForLongCall();
+                defer self.retakeAfterLongCall(released);
+                return sims.toOutcome(RpcOutcome, try sims.handle(shared_sims, self.gpa, .list, params));
             },
             .SetUpSimulators => {
                 const sims = @import("simulators_host.zig");
-                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .set_up, params));
+                const shared_sims = try sims.shared(self.io, self.data_dir);
+                // simctl and npm run for seconds to minutes: not under the engine lock.
+                const released = self.releaseForLongCall();
+                defer self.retakeAfterLongCall(released);
+                return sims.toOutcome(RpcOutcome, try sims.handle(shared_sims, self.gpa, .set_up, params));
             },
             .BootSimulator => {
                 const sims = @import("simulators_host.zig");
-                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .boot, params));
+                const shared_sims = try sims.shared(self.io, self.data_dir);
+                // simctl and npm run for seconds to minutes: not under the engine lock.
+                const released = self.releaseForLongCall();
+                defer self.retakeAfterLongCall(released);
+                return sims.toOutcome(RpcOutcome, try sims.handle(shared_sims, self.gpa, .boot, params));
             },
             .ShutdownSimulator => {
                 const sims = @import("simulators_host.zig");
-                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .shutdown, params));
+                const shared_sims = try sims.shared(self.io, self.data_dir);
+                // simctl and npm run for seconds to minutes: not under the engine lock.
+                const released = self.releaseForLongCall();
+                defer self.retakeAfterLongCall(released);
+                return sims.toOutcome(RpcOutcome, try sims.handle(shared_sims, self.gpa, .shutdown, params));
             },
             .WatchSimulatorScreen, .WatchLocalhostPage => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"frame\":null}"));

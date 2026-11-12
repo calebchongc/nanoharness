@@ -374,6 +374,8 @@ pub const HostEngine = struct {
         // run on their own threads and fold into the host under that lock.
         if (self.host.io) |io| self.host.mutex.lockUncancelable(io);
         defer if (self.host.io) |io| self.host.mutex.unlock(io);
+        if (self.host.io != null) self.host.held_for_dispatch = true;
+        defer self.host.held_for_dispatch = false;
         var outcome = try self.host.handleWithId(0, method, params);
         switch (outcome) {
             .unary_json => |body| {
