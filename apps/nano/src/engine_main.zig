@@ -1,14 +1,15 @@
 //! `harness-engine` — the Zig headless engine daemon & CLI (`apps/harness/src/main.rs`).
 //!
-//! Drop-in replacement for `harness` / `harness headless` (`HARNESS_NANO_ENGINE_BIN`):
-//! - `headless` (or no args): binds `ws://127.0.0.1:{HARNESS_IPC_PORT|27664}`,
-//!   upgrades bare WebSocket clients (rejecting browser `Origin:` headers), and
-//!   serves JSON-RPC calls and live `Watch*` streams through `EngineHost`.
-//! - `status`: prints engine version and IPC port status.
+//! The engine the desktop app starts (engine_start.zig) and the service a
+//! daemon runs; it replaces the Rust `harness headless`:
+//! - `headless` (or no args): takes `{data_dir}/engine.lock`, binds
+//!   `ws://127.0.0.1:{HARNESS_IPC_PORT|27664}`, upgrades bare WebSocket clients
+//!   (rejecting browser `Origin:` headers), and serves JSON-RPC calls and live
+//!   `Watch*` streams through `EngineHost`.
+//! - `status`, `sync`, `login`, `logout`: engine_cli.zig.
 //! - `mcp`: runs the stdio JSON-RPC 2.0 MCP server (`mcp_server.zig`).
-//! - `daemon install|uninstall|start|stop|restart|status`: generates or manages
-//!   the OS service unit (`launchd` on macOS, `systemd` on Linux).
-//! - `login` / `logout` / `sync`: CLI control-plane commands.
+//! - `daemon install|uninstall|start|stop|restart|status`: engine_daemon.zig
+//!   (`launchd` on macOS, `systemd` on Linux).
 const std = @import("std");
 const builtin = @import("builtin");
 const json = std.json;
@@ -24,53 +25,138 @@ const engine_host = @import("engine_host.zig");
 const mcp_server = @import("mcp_server.zig");
 const ws = @import("ws.zig");
 const ws_server = @import("ws_server.zig");
+const engine_cli = @import("engine_cli.zig");
+const engine_daemon = @import("engine_daemon.zig");
+
+/// The folder a terminal started the engine in, if it names one to show as a
+/// project: not the filesystem root a service or Finder launch reports.
+pub fn defaultSpacePath(pwd: ?[]const u8) ?[]const u8 {
+    const p = pwd orelse return null;
+    if (p.len == 0 or std.mem.eql(u8, p, "/") or std.mem.eql(u8, p, "\\")) return null;
+    if (!std.fs.path.isAbsolute(p)) return null;
+    return p;
+}
+
+/// Where graff may be when `GRAFF_EXECUTABLE` isn't set, in order: the copy
+/// Harness keeps current (`~/.harness/bin/graff`), then the one shipped
+/// beside this engine: `Contents/Resources/bin` in the macOS bundle, the
+/// same folder elsewhere. The Rust launcher seeded the first from the second;
+/// starting from the bundle's copy keeps a fresh install working without it.
+pub fn graffCandidates(arena: Allocator, home: ?[]const u8, exe_dir: ?[]const u8) ![]const []const u8 {
+    const name = if (builtin.os.tag == .windows) "graff.exe" else "graff";
+    var out: std.ArrayList([]const u8) = .empty;
+    if (home) |h| if (h.len > 0) try out.append(arena, try std.fs.path.join(arena, &.{ h, ".harness", "bin", name }));
+    if (exe_dir) |d| {
+        try out.append(arena, try std.fs.path.join(arena, &.{ d, "..", "Resources", "bin", name }));
+        try out.append(arena, try std.fs.path.join(arena, &.{ d, name }));
+    }
+    return out.toOwnedSlice(arena);
+}
+
+test "no default project without a real starting folder; never a hard-coded one" {
+    try std.testing.expectEqual(@as(?[]const u8, null), defaultSpacePath(null));
+    try std.testing.expectEqual(@as(?[]const u8, null), defaultSpacePath("/"));
+    try std.testing.expectEqual(@as(?[]const u8, null), defaultSpacePath(""));
+    try std.testing.expectEqual(@as(?[]const u8, null), defaultSpacePath("relative/dir"));
+    try std.testing.expectEqualStrings("/work/synthetic", defaultSpacePath("/work/synthetic").?);
+}
+
+test "graff: the kept copy first, then the one shipped beside the engine" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const got = try graffCandidates(arena_state.allocator(), "/Users/synthetic", "/Applications/Harness.app/Contents/MacOS");
+    const sep = std.fs.path.sep_str;
+    try std.testing.expectEqual(@as(usize, 3), got.len);
+    try std.testing.expectEqualStrings("/Users/synthetic" ++ sep ++ ".harness" ++ sep ++ "bin" ++ sep ++ "graff", got[0]);
+    try std.testing.expectEqualStrings("/Applications/Harness.app/Contents/MacOS" ++ sep ++ ".." ++ sep ++ "Resources" ++ sep ++ "bin" ++ sep ++ "graff", got[1]);
+    const none = try graffCandidates(arena_state.allocator(), null, null);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const port = engine_mod.Engine.portFrom(init.environ_map);
 
-    var args_it = try init.minimal.args.iterateAllocator(gpa);
-    defer args_it.deinit();
-    const exe_name = args_it.next() orelse "harness-engine";
-    const subcmd = args_it.next() orelse "headless";
+    const raw_argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const argv = try init.arena.allocator().alloc([]const u8, raw_argv.len);
+    for (raw_argv, argv) |r, *a| a.* = r;
+    const command = engine_cli.parse(if (argv.len > 0) argv[1..] else argv) catch |err| {
+        var ebuf: [256]u8 = undefined;
+        var ew = Io.File.stderr().writerStreaming(io, &ebuf);
+        ew.interface.print("harness-engine: {s}\n\n{s}", .{ switch (err) {
+            error.UnknownCommand => "unknown command",
+            error.MissingDaemonAction => "daemon needs an action",
+            error.UnknownDaemonAction => "unknown daemon action",
+            error.UnexpectedArgument => "unexpected argument",
+        }, engine_cli.usage }) catch {};
+        ew.interface.flush() catch {};
+        std.process.exit(2);
+    };
 
-    if (std.mem.eql(u8, subcmd, "--version") or std.mem.eql(u8, subcmd, "version")) {
-        std.debug.print("harness-engine (zig) {s}\n", .{build_info.version});
+    if (command != .headless and command != .mcp) {
+        var obuf: [4096]u8 = undefined;
+        var ow = Io.File.stdout().writerStreaming(io, &obuf);
+        const out = &ow.interface;
+        var ibuf: [4096]u8 = undefined;
+        var ir = Io.File.stdin().readerStreaming(io, &ibuf);
+        const ctx: engine_cli.Context = .{
+            .gpa = gpa,
+            .io = io,
+            .env = init.environ_map,
+            .port = port,
+            .out = out,
+            .in = &ir.interface,
+            .interactive = Io.File.stdin().isTty(io) catch false,
+        };
+        const code: u8 = switch (command) {
+            .headless, .mcp => unreachable,
+            .version => blk: {
+                try out.print("harness-engine {s}\n", .{build_info.version});
+                break :blk 0;
+            },
+            .help => blk: {
+                try out.writeAll(engine_cli.usage);
+                break :blk 0;
+            },
+            .status => try engine_cli.status(ctx),
+            .sync => try engine_cli.sync(ctx),
+            .login => try engine_cli.login(ctx),
+            .logout => try engine_cli.logout(ctx),
+            .daemon => |action| blk: {
+                const dir = try engine_cli.resolveDataDir(gpa, io, init.environ_map);
+                defer gpa.free(dir);
+                break :blk try engine_daemon.main(gpa, io, init.environ_map, dir, action, out);
+            },
+        };
+        out.flush() catch {};
+        if (code != 0) std.process.exit(code);
         return;
     }
-    if (std.mem.eql(u8, subcmd, "status")) {
-        std.debug.print("harness-engine {s} (ws://127.0.0.1:{d})\n", .{ build_info.version, port });
-        return;
-    }
-    if (std.mem.eql(u8, subcmd, "daemon")) {
-        const action = args_it.next() orelse "status";
-        if (std.mem.eql(u8, action, "install")) {
-            const unit = try mcp_server.generateDaemonUnit(gpa, builtin.os.tag == .macos, exe_name, port);
-            defer gpa.free(unit);
-            std.debug.print("{s}", .{unit});
-            return;
-        }
-        std.debug.print("harness-engine daemon {s}: ok (port {d})\n", .{ action, port });
-        return;
-    }
-    if (std.mem.eql(u8, subcmd, "mcp")) {
+    if (command == .mcp) {
         try runMcpStdio(gpa, io);
         return;
     }
-    if (std.mem.eql(u8, subcmd, "login") or std.mem.eql(u8, subcmd, "logout") or std.mem.eql(u8, subcmd, "sync")) {
-        std.debug.print("harness-engine {s}: ok\n", .{subcmd});
-        return;
-    }
 
-    var default_data_dir_buf: [512]u8 = undefined;
-    var default_graff_buf: [512]u8 = undefined;
-    const resolved_data_dir: ?[]const u8 = init.environ_map.get("HARNESS_DATA_DIR") orelse
-        init.environ_map.get("DATA_DIR") orelse
-        blk: {
-            const home = init.environ_map.get("HOME") orelse break :blk null;
-            break :blk std.fmt.bufPrint(&default_data_dir_buf, "{s}/.harness", .{home}) catch null;
+    const resolved_data_dir: ?[]const u8 = engine_cli.resolveDataDir(init.arena.allocator(), io, init.environ_map) catch null;
+    // One engine per data folder, as the Rust engine's `InstanceLock`: two
+    // would each rewrite the same session and stores.
+    var instance_lock: ?engine_cli.InstanceLock = null;
+    defer if (instance_lock) |*l| l.release(io);
+    if (resolved_data_dir) |data_dir| {
+        std.Io.Dir.cwd().createDirPath(io, data_dir) catch {};
+        instance_lock = engine_cli.InstanceLock.acquire(gpa, io, data_dir) catch |err| switch (err) {
+            error.AlreadyRunning => {
+                const pid: i64 = switch (engine_cli.lockHolder(gpa, io, data_dir)) {
+                    .none => 0,
+                    .pid => |p| p,
+                };
+                std.log.err("another Harness engine is already running on {s} (pid {d}); stop it or use a different data dir (HARNESS_DATA_DIR)", .{ data_dir, pid });
+                std.process.exit(1);
+            },
+            else => |e| return e,
         };
+    }
 
     const persisted_dev_id = try engine_host.loadOrCreateDeviceId(gpa, io, resolved_data_dir);
     defer gpa.free(persisted_dev_id);
@@ -84,12 +170,15 @@ pub fn main(init: std.process.Init) !void {
     host.agent_accounts.configureFromEnv(init.environ_map) catch {};
     if (init.environ_map.get("GRAFF_EXECUTABLE")) |ge| {
         if (ge.len > 0) host.graff_exe = ge;
-    } else if (init.environ_map.get("HOME")) |home| {
-        if (std.fmt.bufPrint(&default_graff_buf, "{s}/.harness/bin/graff", .{home})) |gpath| {
+    } else {
+        const exe_dir = std.process.executableDirPathAlloc(io, init.arena.allocator()) catch null;
+        const list = graffCandidates(init.arena.allocator(), init.environ_map.get("HOME"), exe_dir) catch &.{};
+        for (list) |gpath| {
             if (std.Io.Dir.cwd().access(io, gpath, .{})) |_| {
                 host.graff_exe = gpath;
+                break;
             } else |_| {}
-        } else |_| {}
+        }
     }
     if (host.graff_exe) |ge| {
         host.cached_graff_models_json = acp_host.discoverGraffModelsJson(gpa, io, ge) catch null;
@@ -97,17 +186,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (resolved_data_dir) |data_dir| {
         if (data_dir.len > 0) {
-            std.Io.Dir.cwd().createDirPath(io, data_dir) catch {};
             host.setDataDir(data_dir) catch {};
-            if (comptime builtin.os.tag != .windows) {
-                var lock_path_buf: [512]u8 = undefined;
-                var pid_buf: [32]u8 = undefined;
-                if (std.fmt.bufPrint(&lock_path_buf, "{s}/engine.lock", .{data_dir})) |lock_path| {
-                    if (std.fmt.bufPrint(&pid_buf, "{d}\n", .{std.c.getpid()})) |pid_str| {
-                        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = lock_path, .data = pid_str }) catch {};
-                    } else |_| {}
-                } else |_| {}
-            }
             if (std.fmt.allocPrintSentinel(gpa, "{s}/docs.sqlite", .{data_dir}, 0)) |db_path_z| {
                 defer gpa.free(db_path_z);
                 if (docs_store.DocsStore.openSqlite(gpa, db_path_z.ptr)) |sqlite_store| {
@@ -121,18 +200,12 @@ pub fn main(init: std.process.Init) !void {
     // Configure real CodeGraff OAuth/PKCE + device sign-in (`apps/harness/src/main.rs`),
     // unless `HARNESS_AUTH_DISABLED=1` or an explicit `HARNESS_EDGE_TOKEN` dev override is set.
     try host.setBotsEnvOverride(init.environ_map.get("GRAFF_BOTS"));
-    const auth_disabled = if (init.environ_map.get("HARNESS_AUTH_DISABLED")) |v|
-        (std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true"))
-    else
-        false;
-    const edge_token = init.environ_map.get("HARNESS_EDGE_TOKEN");
-    if (!auth_disabled and (edge_token == null or edge_token.?.len == 0)) {
-        const edge_url = init.environ_map.get("HARNESS_EDGE_URL") orelse auth_host.default_edge_url;
-        const client_id = init.environ_map.get("HARNESS_CODEGRAFF_CLIENT_ID") orelse auth_host.default_codegraff_client_id;
-        const api_base = init.environ_map.get("HARNESS_CODEGRAFF_API_BASE") orelse auth_host.default_codegraff_api_base;
-        const gateway = init.environ_map.get("HARNESS_CODEGRAFF_GATEWAY") orelse auth_host.default_codegraff_gateway;
-        try host.auth.configureCodegraff(edge_url, client_id, api_base, resolved_data_dir);
-        try host.auth.setCodegraffGateway(gateway);
+    const auth_env = engine_cli.AuthEnv.from(init.environ_map);
+    const auth_disabled = auth_env.disabled;
+    const edge_token = auth_env.edge_token;
+    if (auth_env.codegraffEnabled()) {
+        try host.auth.configureCodegraff(auth_env.edge_url, auth_env.client_id, auth_env.api_base, resolved_data_dir);
+        try host.auth.setCodegraffGateway(auth_env.gateway);
         if (init.environ_map.get("HARNESS_CALLBACK_PORT")) |p_str| {
             if (std.fmt.parseInt(u16, p_str, 10)) |cb_port| {
                 host.auth.callback_port = cb_port;
@@ -153,11 +226,11 @@ pub fn main(init: std.process.Init) !void {
         } else {
             host.workspace_scope = "local";
         }
-    } else if (edge_token) |tok| {
-        if (tok.len > 0) {
-            host.auth.signInWithKey(tok) catch {};
-            host.workspace_scope = "development";
-        }
+    } else {
+        // No CodeGraff (a development bearer, or auth turned off): the
+        // development scope, as the Rust engine without a client id.
+        if (edge_token) |tok| host.auth.signInWithKey(tok) catch {};
+        host.workspace_scope = engine_cli.startScope(auth_env, false).name();
     }
 
     // Seed any persisted chats from docs.sqlite into host.chats so they appear in the sidebar and sync outbound.
@@ -223,8 +296,11 @@ pub fn main(init: std.process.Init) !void {
     }
     host.ensureLocalDeviceRow();
 
-    if (host.spaces.items.len == 0) {
-        const default_path = init.environ_map.get("PWD") orelse "/Users/rachpradhan/harness";
+    // A placeholder project for the folder an engine was started in from a
+    // terminal. A service or the app starts it with no such folder: then it
+    // has no projects until one is added, as the Rust engine.
+    const default_space = if (host.spaces.items.len == 0) defaultSpacePath(init.environ_map.get("PWD")) else null;
+    if (default_space) |default_path| {
         const id_copy = try gpa.dupe(u8, "space-zig-default");
         errdefer gpa.free(id_copy);
         const dev_copy = try gpa.dupe(u8, host.device_id);

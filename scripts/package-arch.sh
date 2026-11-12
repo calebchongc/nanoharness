@@ -3,32 +3,29 @@
 #   target/package/harness-<version>-linux-<arch>.pkg.tar.zst
 # via a pinned nfpm (scripts/install-nfpm.sh).
 #
-# Reuses the binary package-linux.sh already built; builds only if missing.
+# Ships only Zig output: /usr/bin/harness-nano (the app) and
+# /usr/bin/harness-engine (the engine). Reuses the binaries package-linux.sh
+# already built in apps/nano/zig-out; builds only if missing.
 #
 # Usage: scripts/package-arch.sh
-# Env:   PROFILE=debug to package target/debug/harness, release for
-#        target/release; default dist (what ships).
-#        BIN=<path> override the binary (dry-run/testing).
+# Env:   PROFILE=debug builds Debug if a build is needed; otherwise ReleaseSafe.
+#        BIN_DIR=<dir> holding harness-nano and harness-engine (dry-run/testing).
 #        NFPM_ARCH=amd64|arm64 override the package arch (default: uname -m).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 PROFILE="${PROFILE:-dist}"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
 PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"
 
 cd "$ROOT"
-BIN="${BIN:-$ROOT/target/$PROFILE/harness}"
-if [[ ! -x "$BIN" ]]; then
-  if [[ "$PROFILE" == "debug" ]]; then
-    cargo build -p harness
-  else
-    cargo build --profile "$PROFILE" -p harness
-  fi
-  BIN="$ROOT/target/$PROFILE/harness"
+BIN_DIR="${BIN_DIR:-$ROOT/apps/nano/zig-out/bin}"
+if [[ ! -x "$BIN_DIR/harness-nano" || ! -x "$BIN_DIR/harness-engine" ]]; then
+  if [[ "$PROFILE" == "debug" ]]; then OPTIMIZE=Debug; else OPTIMIZE=ReleaseSafe; fi
+  (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize="$OPTIMIZE")
+  BIN_DIR="$ROOT/apps/nano/zig-out/bin"
 fi
 
 # pacman arch names: x86_64 / aarch64. nfpm takes amd64 / arm64.
@@ -45,7 +42,11 @@ fi
 
 # nfpm does not expand env vars inside contents entries — render the config.
 config="$(mktemp)"
-trap 'rm -f "$config"' EXIT
+desktop="$(mktemp)"
+trap 'rm -f "$config" "$desktop"' EXIT
+# The desktop entry opens the Zig app (the template still names the old binary).
+sed -e 's/^Exec=harness /Exec=harness-nano /' -e 's/^TryExec=harness$/TryExec=harness-nano/' \
+  "$ROOT/dist/harness.desktop" >"$desktop"
 cat >"$config" <<YAML
 name: harness
 arch: $NFPM_ARCH
@@ -71,16 +72,18 @@ depends:
   - json-glib
 
 contents:
-  - src: $BIN
-    dst: /usr/bin/harness
-    file_info:
-      mode: 0755
-  - src: $ROOT/apps/nano/zig-out/bin/harness-nano
+  - src: $BIN_DIR/harness-nano
     dst: /usr/bin/harness-nano
     file_info:
       mode: 0755
-  - src: $ROOT/dist/harness.desktop
+  - src: $BIN_DIR/harness-engine
+    dst: /usr/bin/harness-engine
+    file_info:
+      mode: 0755
+  - src: $desktop
     dst: /usr/share/applications/harness.desktop
+    file_info:
+      mode: 0644
   - src: $ROOT/dist/harness.png
     dst: /usr/share/icons/hicolor/1024x1024/apps/harness.png
   - src: $ROOT/dist/harness.svg

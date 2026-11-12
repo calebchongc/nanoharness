@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# macOS packaging: build the release binary for the host arch and produce
+# macOS packaging: build the Zig app and engine for the host arch and produce
 #   target/package/harness-<version>-macos-<arch>.dmg          (user download)
 #   target/package/harness-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Harness.app (unsigned unless CODESIGN_IDENTITY is set).
+# containing Harness.app (unsigned unless CODESIGN_IDENTITY is set). Only Zig
+# output ships: Contents/MacOS/harness-nano (the app, CFBundleExecutable) and
+# Contents/MacOS/harness-engine (the engine the app starts and the daemon
+# runs). No cargo, no Rust binary.
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        GRAFF_BINARY=/absolute/path/to/graff to bundle an exact CLI build.
-#        HARNESS_BINARY=/absolute/path/to/harness to package a tested build
-#        without invoking a second Cargo profile (for local preview DMGs).
+#        OPTIMIZE=ReleaseFast|ReleaseSafe|ReleaseSmall for the Zig build
+#        (default ReleaseSafe, what ships).
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
 #        app and the dmg, which removes the Gatekeeper warning entirely.
@@ -18,7 +21,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
@@ -30,28 +32,27 @@ if [[ -n "${GRAFF_BINARY:-}" ]]; then
 fi
 
 cd "$ROOT"
-if [[ -n "${HARNESS_BINARY:-}" ]]; then
-  [[ -x "$HARNESS_BINARY" ]] || { echo "HARNESS_BINARY is not executable" >&2; exit 1; }
-  BUILD_BINARY="$HARNESS_BINARY"
-else
-  # PROFILE=release for a quicker local package; `dist` is what ships.
-  PROFILE="${PROFILE:-dist}"
-  cargo build --profile "$PROFILE" -p harness
-  TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
-  BUILD_BINARY="$TARGET_DIR/$PROFILE/harness"
-fi
-
+mkdir -p "$OUT_DIR"
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
-(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
+# One build installs both: harness-nano and harness-engine (apps/nano/build.zig).
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize="${OPTIMIZE:-ReleaseSafe}")
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-engine" "$APP/Contents/MacOS/harness-engine"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+# The app is the Zig binary; the template still names the old executable.
+plutil -replace CFBundleExecutable -string harness-nano "$APP/Contents/Info.plist"
+[[ "$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")" == "harness-nano" ]]
+# No Rust binary may ship: nothing in the bundle is named `harness`.
+if [[ -e "$APP/Contents/MacOS/harness" ]]; then
+  echo "error: a Rust harness binary is in the bundle" >&2
+  exit 1
+fi
 # ADR 0008: Verify both binaries inside the bundle carry the exact Cargo.toml
 # release version so a stale build cache can never trigger an update loop.
-CLI_VER="$("$APP/Contents/MacOS/harness" --version | awk '{print $2}')"
-if [[ "$CLI_VER" != "$VERSION" ]]; then
-  echo "error: harness CLI version ($CLI_VER) != Cargo.toml version ($VERSION)" >&2
+ENGINE_VER="$("$APP/Contents/MacOS/harness-engine" --version | awk '{print $2}')"
+if [[ "$ENGINE_VER" != "$VERSION" ]]; then
+  echo "error: harness-engine version ($ENGINE_VER) != Cargo.toml version ($VERSION)" >&2
   exit 1
 fi
 if [[ "$(strings "$APP/Contents/MacOS/harness-nano" | grep -Fc "version = \"$VERSION\"" || true)" -lt 1 ]]; then
@@ -141,7 +142,7 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-nano"
   codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness"
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-engine"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP"
 else
@@ -151,24 +152,52 @@ else
 fi
 
 # ADR 0008: Local live-bundle smoke gate before notarization/upload. Launch the
-# signed app binary against an isolated temporary HOME for 3 seconds and assert
-# that it stays alive (catching both startup crashes and self-update exit loops).
+# signed app binary against an isolated temporary HOME and data folder, assert
+# that it stays alive (catching both startup crashes and self-update exit
+# loops) and that the bundle's Zig engine it starts answers on the port.
 if [[ "${CI:-}" != "true" && "${SKIP_SMOKE_LAUNCH:-0}" != "1" ]]; then
   SMOKE_HOME="$(mktemp -d)"
-  echo "running 3s live smoke check on $APP/Contents/MacOS/harness-nano..."
-  HOME="$SMOKE_HOME" HARNESS_IPC_PORT=49877 "$APP/Contents/MacOS/harness-nano" >/dev/null 2>&1 &
-  SMOKE_PID=$!
-  sleep 3
-  if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+  SMOKE_PORT=49877
+  # Discovery must find the bundle's own engine: clear any override inherited
+  # from an older launcher's environment.
+  unset HARNESS_NANO_ENGINE_BIN HARNESS_NANO_NO_ENGINE_START
+  SMOKE_ENV=(HOME="$SMOKE_HOME" HARNESS_DATA_DIR="$SMOKE_HOME/.harness" HARNESS_IPC_PORT="$SMOKE_PORT" HARNESS_AUTH_DISABLED=1)
+  smoke_cleanup() {
+    kill "$SMOKE_PID" 2>/dev/null || true
+    wait "$SMOKE_PID" 2>/dev/null || true
+    # The engine outlives the app by design: stop the one the smoke run started.
+    local engine_pid
+    engine_pid="$(tr -dc 0-9 <"$SMOKE_HOME/.harness/engine.lock" 2>/dev/null || true)"
+    [[ -n "$engine_pid" ]] && kill "$engine_pid" 2>/dev/null || true
     rm -rf "$SMOKE_HOME"
-    echo "error: $APP/Contents/MacOS/harness-nano exited or crashed within 3s of launch" >&2
+  }
+  echo "running live smoke check on $APP/Contents/MacOS/harness-nano..."
+  env "${SMOKE_ENV[@]}" "$APP/Contents/MacOS/harness-nano" >/dev/null 2>&1 &
+  SMOKE_PID=$!
+  ENGINE_UP=false
+  for _ in $(seq 1 100); do
+    if env "${SMOKE_ENV[@]}" "$APP/Contents/MacOS/harness-engine" status 2>/dev/null | grep -q "^IPC:      listening"; then
+      ENGINE_UP=true
+      break
+    fi
+    sleep 0.1
+  done
+  sleep 1
+  if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+    smoke_cleanup
+    echo "error: $APP/Contents/MacOS/harness-nano exited or crashed on launch" >&2
     exit 1
   fi
-  kill "$SMOKE_PID" 2>/dev/null || true
-  wait "$SMOKE_PID" 2>/dev/null || true
-  pkill -f "$SMOKE_HOME" 2>/dev/null || true
-  rm -rf "$SMOKE_HOME"
-  echo "live smoke check passed: $APP/Contents/MacOS/harness-nano stayed up cleanly."
+  SMOKE_ENGINE_PID="$(tr -dc 0-9 <"$SMOKE_HOME/.harness/engine.lock" 2>/dev/null || true)"
+  SMOKE_ENGINE_CMD="$( [[ -n "$SMOKE_ENGINE_PID" ]] && ps -o command= -p "$SMOKE_ENGINE_PID" || true)"
+  SMOKE_ENGINE_WANT="$(cd "$APP/Contents/MacOS" && pwd -P)/harness-engine headless"
+  if ! $ENGINE_UP || [[ "$SMOKE_ENGINE_CMD" != "$SMOKE_ENGINE_WANT" ]]; then
+    smoke_cleanup
+    echo "error: harness-nano did not start the bundled harness-engine (running: ${SMOKE_ENGINE_CMD:-nothing})" >&2
+    exit 1
+  fi
+  smoke_cleanup
+  echo "live smoke check passed: harness-nano stayed up and started harness-engine."
 fi
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may

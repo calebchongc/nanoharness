@@ -14,6 +14,9 @@ test {
     _ = @import("steer_order.zig");
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
+    _ = @import("engine_cli.zig");
+    _ = @import("engine_daemon.zig");
+    _ = @import("engine_main.zig");
     _ = @import("diff.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
