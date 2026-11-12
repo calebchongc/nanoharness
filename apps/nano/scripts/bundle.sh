@@ -3,8 +3,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 # ReleaseSafe: a bug panics with a stack trace in the crash log instead of
-# corrupting memory, for 0.1 MB and no CPU measurable in bench/resource.py's
-# replay (8.9% streaming against ReleaseFast's 9.7%, the same within noise).
+# corrupting memory, for 0.1 MB and no measurable CPU in the resource replay
+# (8.9% streaming against ReleaseFast's 9.7%, the same within noise).
 zig build --release=safe -j1 "$@"
 # Use the version embedded in the executable: build.zig.zon's `.version`
 # (build.zig). Refuse a placeholder bundle when it is missing or malformed.
@@ -22,6 +22,13 @@ fi
 app="zig-out/Harness Nano.app/Contents"
 mkdir -p "$app/MacOS" "$app/Resources"
 cp zig-out/bin/harness-nano "$app/MacOS/"
+# The engine the app starts: the one beside its own executable, so the two
+# versions always match (src/engine_start.zig).
+if [ ! -x zig-out/bin/harness-engine ]; then
+    echo "Cannot package Harness Nano: the build did not produce harness-engine" >&2
+    exit 1
+fi
+cp zig-out/bin/harness-engine "$app/MacOS/"
 iconset_dir=$(mktemp -d)
 trap 'rm -rf "$iconset_dir"' EXIT
 iconset="$iconset_dir/AppIcon.iconset"

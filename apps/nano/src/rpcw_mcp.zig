@@ -34,16 +34,15 @@ fn validName(name: []const u8) bool {
 }
 
 /// `mcp_servers::run`: graff's stdout, or its last error line.
-fn runGraffMcp(gpa: Allocator, io: std.Io, verb: []const u8, names: []const []const u8, cwd: ?[]const u8, timeout_ms: i64) !Run {
+fn runGraffMcp(gpa: Allocator, io: std.Io, home: []const u8, verb: []const u8, names: []const []const u8, cwd: ?[]const u8, timeout_ms: i64) !Run {
     for (names) |n| if (!validName(n)) {
         return .{ .failed = common.errText("Could not resolve the graff CLI: harness protocol error: not an MCP server name: \"{s}\"", .{n}) };
     };
     const program = (try exes.resolveCli(gpa, io, .graff)) orelse
         return .{ .failed = "The `graff` CLI was not found on this device — install it first." };
     defer gpa.free(program);
-    // graff finds its MCP config, caches and sign-ins from HOME; graff's home
-    // is this device's home (`AgentAccountsConfig::graff_home`).
-    const home = common.homeDir() orelse "/";
+    // graff finds its MCP config, caches and sign-ins from HOME
+    // (`common.graffHome`, as sign-out uses).
     const home_arg = try std.fmt.allocPrint(gpa, "HOME={s}", .{home});
     defer gpa.free(home_arg);
     var argv: std.ArrayList([]const u8) = .empty;
@@ -153,8 +152,8 @@ fn knownState(s: []const u8) []const u8 {
     return "unknown";
 }
 
-fn listWith(gpa: Allocator, io: std.Io, cwd: ?[]const u8, names: []const []const u8) !RpcOutcome {
-    const out = switch (try runGraffMcp(gpa, io, "status", names, cwd, status_timeout_ms)) {
+fn listWith(gpa: Allocator, io: std.Io, home: []const u8, cwd: ?[]const u8, names: []const []const u8) !RpcOutcome {
+    const out = switch (try runGraffMcp(gpa, io, home, "status", names, cwd, status_timeout_ms)) {
         .failed => |m| return .{ .err = .{ .exec_error = m } },
         .ok => |o| o,
     };
@@ -192,7 +191,7 @@ pub fn listMcpServers(host: *engine_host.EngineHost, params: json.Value) !RpcOut
         }
     }
     const io = host.io orelse return common.failed("Could not run graff mcp status: no I/O", .{});
-    return listWith(gpa, io, cwd, names.items);
+    return listWith(gpa, io, common.graffHome(host), cwd, names.items);
 }
 
 /// `McpServerAction { action, name?, cwd? }` → the affected rows.
@@ -214,18 +213,19 @@ pub fn mcpServerAction(host: *engine_host.EngineHost, params: json.Value) !RpcOu
     if (name == null and verb != .reconnect) return common.failed("Say which MCP server to {s}.", .{@tagName(verb)});
     const io = host.io orelse return common.failed("Could not run graff mcp {s}: no I/O", .{@tagName(verb)});
     const names: []const []const u8 = if (name) |n| &.{n} else &.{};
+    const home = common.graffHome(host);
     switch (verb) {
         .login => {
-            const out = switch (try runGraffMcp(gpa, io, "login", names, cwd, login_timeout_ms)) {
+            const out = switch (try runGraffMcp(gpa, io, home, "login", names, cwd, login_timeout_ms)) {
                 .failed => |m| return .{ .err = .{ .exec_error = m } },
                 .ok => |x| x,
             };
             gpa.free(out);
-            return listWith(gpa, io, cwd, names);
+            return listWith(gpa, io, home, cwd, names);
         },
         .reconnect, .enable, .disable => {
             const timeout = if (verb == .reconnect) reconnect_timeout_ms else status_timeout_ms;
-            const out = switch (try runGraffMcp(gpa, io, @tagName(verb), names, cwd, timeout)) {
+            const out = switch (try runGraffMcp(gpa, io, home, @tagName(verb), names, cwd, timeout)) {
                 .failed => |m| return .{ .err = .{ .exec_error = m } },
                 .ok => |x| x,
             };
@@ -418,4 +418,22 @@ test "rpcw_mcp lastErrorLine prefers stdout's last line, then stderr's" {
     try testing.expectEqualStrings("b", lastErrorLine("x\n", "a\nb\n\n"));
     try testing.expectEqualStrings("y", lastErrorLine("x\ny\n", "  \n"));
     try testing.expectEqualStrings("graff exited with an error", lastErrorLine("", ""));
+}
+
+test "fix-sec 13: graff mcp runs with the engine's graff home, as sign-out does" {
+    const f = try Fx.init(true);
+    defer f.deinit();
+    const gpa = testing.allocator;
+    try f.tmp.dir.createDirPath(testing.io, "graff-home");
+    const graff_home = try std.fs.path.join(gpa, &.{ f.base, "graff-home" });
+    defer gpa.free(graff_home);
+    f.host.agent_accounts.home_dir = try gpa.dupe(u8, graff_home);
+
+    const out = try f.call("ListMcpServers", "{}");
+    defer gpa.free(out.unary_json);
+    // The fake graff logs to $HOME/calls.log: the configured home, not the process's.
+    var buf: [4096]u8 = undefined;
+    const log = try f.tmp.dir.readFile(testing.io, "graff-home/calls.log", &buf);
+    try testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, log, "\n"), "|1|mcp status --json"));
+    try testing.expectError(error.FileNotFound, f.tmp.dir.access(testing.io, "calls.log", .{}));
 }

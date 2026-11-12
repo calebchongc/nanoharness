@@ -370,23 +370,11 @@ pub const Failure = struct {
     }
 };
 
-fn isLoopbackHttp(url: []const u8) bool {
-    if (!std.mem.startsWith(u8, url, "http://")) return false;
-    const rest = url["http://".len..];
-    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
-    const hostport = rest[0..end];
-    const host = if (std.mem.startsWith(u8, hostport, "["))
-        hostport[0 .. (std.mem.indexOfScalar(u8, hostport, ']') orelse return false) + 1]
-    else
-        hostport[0 .. std.mem.indexOfScalar(u8, hostport, ':') orelse hostport.len];
-    return std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "[::1]");
-}
-
 /// `validate_secure_url("CodeGraff gateway", ..)`: null when fine, else the reason.
 pub fn gatewayProblem(url: []const u8) ?[]const u8 {
-    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return "CodeGraff gateway URL is invalid";
-    if (scheme_end == 0 or url.len == scheme_end + 3) return "CodeGraff gateway URL is invalid";
-    if (std.mem.startsWith(u8, url, "https://") or isLoopbackHttp(url)) return null;
+    const auth_host = @import("auth_host.zig");
+    if (auth_host.isSecureUrl(url)) return null;
+    _ = std.Uri.parse(url) catch return "CodeGraff gateway URL is invalid";
     return "CodeGraff gateway must use HTTPS (plain HTTP is allowed only on loopback)";
 }
 
@@ -711,10 +699,11 @@ var shared_io: ?std.Io = null;
 
 fn sendEdge(ctx: ?*anyopaque, gpa: Allocator, method: []const u8, url: []const u8, bearer: []const u8, body: ?[]const u8, timeout_ms: u64) anyerror!HttpReply {
     _ = ctx;
-    _ = timeout_ms;
     const io = shared_io orelse return error.NoIo;
     const auth_host = @import("auth_host.zig");
-    const r = try auth_host.AuthManager.edgeRequest(gpa, io, method, url, bearer, body);
+    // The caller's deadline (20, 90 or 120 s), enforced on the request.
+    const ms: u32 = @intCast(@min(timeout_ms, std.math.maxInt(u32)));
+    const r = try auth_host.AuthManager.edgeRequestTimed(null, gpa, io, method, url, bearer, &.{}, body, ms);
     return .{ .status = r.status, .body = r.body };
 }
 
@@ -1193,4 +1182,19 @@ test "sandboxes: the engine makes exactly the calls the shared plans name" {
     for (plans.get("neverCalled").?.array.items) |never| {
         for (gw.seen.items) |s| try testing.expect(std.mem.indexOf(u8, s.line, never.string) == null);
     }
+}
+
+test "fix-sec 10: a gateway request fails at its own deadline" {
+    const server = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try server.listen(testing.io, .{ .reuse_address = true });
+    defer listener.deinit(testing.io);
+    // Accepts (the kernel backlog does) but never answers.
+    const ctx = engineCtx(testing.io, "cg_sk_synthetic", "http://127.0.0.1:1", null);
+    var ubuf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ubuf, "http://127.0.0.1:{d}/v1/sandboxes", .{listener.socket.address.getPort()});
+    const started = std.Io.Clock.awake.now(testing.io);
+    try testing.expectError(error.Timeout, ctx.transport.send(testing.allocator, "GET", url, "cg_sk_synthetic", null, 300));
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
+    try testing.expect(elapsed >= 250);
+    try testing.expect(elapsed < 5_000);
 }

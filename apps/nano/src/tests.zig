@@ -153,6 +153,8 @@ test {
     _ = @import("run_journal.zig");
     _ = @import("mcp_server.zig");
     _ = @import("engine_host.zig");
+    _ = @import("sec_tests.zig");
+    _ = @import("engine_accept.zig");
     _ = @import("rpcw_common.zig");
     _ = @import("rpcw_worktrees.zig");
     _ = @import("rpcw_executables.zig");

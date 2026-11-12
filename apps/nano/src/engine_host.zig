@@ -967,6 +967,7 @@ pub const EngineHost = struct {
         }
         for (self.device_poll_threads.items) |th| th.join();
         self.device_poll_threads.deinit(self.gpa);
+        @import("updates_host.zig").releaseHost(self);
 
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);
@@ -1818,6 +1819,7 @@ pub const EngineHost = struct {
             },
             .SignIn => {
                 if (self.auth.codegraff_client_id != null) {
+                    self.auth.ensureSecureTransport() catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                     if (self.oauth_capture) |old_cap| {
                         self.oauth_capture = null;
                         old_cap.cancel();
@@ -1846,13 +1848,7 @@ pub const EngineHost = struct {
                             return .{ .err = .{ .exec_error = "sign-in callback port 27643 is already in use by another sign-in" } };
                         }
                     }
-                    const url = try self.auth.startHeadlessSignIn("state-zig-1");
-                    defer self.gpa.free(url);
-                    return .{ .unary_json = try std.fmt.allocPrint(
-                        self.gpa,
-                        "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
-                        .{json.fmt(url, .{})},
-                    ) };
+                    return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } };
                 }
                 self.workspace_scope = "synced";
                 self.auth.phase = .signed_in;
@@ -1863,7 +1859,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"workspaceScope\":\"synced\"}") };
             },
             .SignInHeadless => {
-                const url = try self.auth.startHeadlessSignIn("state-zig-1");
+                const url = self.auth.startHeadlessSignIn(self.io orelse return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } }) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                 defer self.gpa.free(url);
                 self.workspace_scope = "synced";
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -1873,19 +1869,9 @@ pub const EngineHost = struct {
                 ) };
             },
             .CompleteSignIn => {
-                if (requireObj(params)) |obj| {
-                    if (requireStr(obj, "code")) |code| {
-                        self.auth.completeSignIn(self.io, code) catch |err| switch (err) {
-                            error.InvalidOAuthState => return .{ .err = .{ .bad_params = "invalid OAuth state" } },
-                            error.SignInCanceled => return .{ .err = .{ .exec_error = "sign-in canceled" } },
-                            else => return .{ .err = .{ .exec_error = "OAuth exchange failed" } },
-                        };
-                    } else {
-                        try self.auth.completeSignIn(self.io, "state-zig-1.dev");
-                    }
-                } else {
-                    try self.auth.completeSignIn(self.io, "state-zig-1.dev");
-                }
+                const code = (if (requireObj(params)) |obj| requireStr(obj, "code") else null) orelse
+                    return .{ .err = .{ .bad_params = "missing field `code`" } };
+                self.auth.completeSignIn(self.io, code) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                 self.workspace_scope = "synced";
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
@@ -2334,14 +2320,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
             },
             .ListOrgs => {
-                return .{ .unary_json = try self.auth.listOrgsJson(self.io) };
+                return .{ .unary_json = self.auth.listOrgsJson(self.io) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } } };
             },
             .CreateOrg, .SelectOrg => {
-                const org_id = if (requireObj(params)) |obj|
-                    (requireStr(obj, "organizationId") orelse requireStr(obj, "id") orelse requireStr(obj, "name") orelse "org-personal")
-                else
-                    "org-personal";
-                try self.auth.selectOrg(self.io, org_id);
+                const field = if (rpc_method == .CreateOrg) "name" else "organizationId";
+                const arg = (if (requireObj(params)) |obj| requireStr(obj, field) else null) orelse
+                    return .{ .err = .{ .bad_params = if (rpc_method == .CreateOrg) "missing field `name`" else "missing field `organizationId`" } };
+                var created: ?[]u8 = null;
+                defer if (created) |c| self.gpa.free(c);
+                if (rpc_method == .CreateOrg) {
+                    created = self.auth.createOrg(self.io, arg) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
+                } else {
+                    self.auth.selectOrg(self.io, arg) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
+                }
+                const org_id = created orelse arg;
                 self.workspace_scope = "synced";
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
@@ -6664,13 +6656,15 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
     }
 
     // 3. SignInHeadless returns PKCE S256 authorize URL
+    var signin_state: []const u8 = "";
     {
         const res = try host.handle("SignInHeadless", empty_params);
         defer gpa.free(res.unary_json);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "https://codegraff.example/oauth/authorize?") != null);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "client_id=cg_client_test") != null);
-        try testing.expect(std.mem.indexOf(u8, res.unary_json, "state=state-zig-1") != null);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "code_challenge_method=S256") != null);
+        const res_v = try json.parseFromSliceLeaky(json.Value, a, res.unary_json, .{});
+        signin_state = (try auth_host.extractQueryParamAlloc(a, res_v.object.get("url").?.string, "state")).?;
     }
 
     // 4. CompleteSignIn with wrong OAuth state is rejected (CSRF protection)
@@ -6682,7 +6676,8 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
 
     // 5. CompleteSignIn with valid state.code exchanges with mock Edge and lands in NeedsOrganization
     {
-        const ok_p = try json.parseFromSliceLeaky(json.Value, a, "{\"code\":\"state-zig-1.code123\"}", .{});
+        const ok_body = try std.fmt.allocPrint(a, "{{\"code\":\"{s}.code123\"}}", .{signin_state});
+        const ok_p = try json.parseFromSliceLeaky(json.Value, a, ok_body, .{});
         const ok_r = try host.handle("CompleteSignIn", ok_p);
         defer gpa.free(ok_r.unary_json);
         try testing.expectEqual(auth_host.AuthPhase.needs_organization, host.auth.phase);

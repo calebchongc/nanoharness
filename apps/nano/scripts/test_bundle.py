@@ -80,7 +80,8 @@ class BundleVersionTests(unittest.TestCase):
             script = nano / "scripts/bundle.sh"
             script.write_bytes(source.read_bytes())
             tools = {
-                "zig": '#!/bin/sh\nmkdir -p zig-out/bin\nprintf synthetic > zig-out/bin/harness-nano\n',
+                "zig": '#!/bin/sh\nmkdir -p zig-out/bin\nprintf synthetic > zig-out/bin/harness-nano\n'
+                       'printf engine > zig-out/bin/harness-engine\nchmod +x zig-out/bin/harness-engine\n',
                 "codesign": '#!/bin/sh\ntest -f "zig-out/Harness Nano.app/Contents/Info.plist"\n',
                 "sips": SIPS,
                 "iconutil": ICONUTIL,
@@ -99,6 +100,9 @@ class BundleVersionTests(unittest.TestCase):
             contents = nano / "zig-out/Harness Nano.app/Contents"
             info = contents / "Info.plist"
             icns = contents / "Resources/AppIcon.icns"
+            engine = contents / "MacOS/harness-engine"
+            self.engine = engine.read_bytes() if engine.exists() else None
+            self.engine_executable = engine.exists() and os.access(engine, os.X_OK)
             return (
                 result,
                 plistlib.loads(info.read_bytes()) if info.exists() else None,
@@ -110,6 +114,14 @@ class BundleVersionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(info["CFBundleShortVersionString"], "9.8.7")
         self.assertEqual(info["CFBundleVersion"], "9.8.7")
+
+    def test_the_engine_ships_beside_the_app_executable(self):
+        # The app starts the engine found beside its own executable; a bundle
+        # without it shows "The Harness engine isn't installed".
+        result, _, _ = self.bundle(MANIFEST % "1.2.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.engine, b"engine")
+        self.assertTrue(self.engine_executable)
 
     def test_missing_version_does_not_ship_a_placeholder(self):
         for manifest in (None, MANIFEST.replace('    .version = "%s",\n', ""), MANIFEST % "next"):

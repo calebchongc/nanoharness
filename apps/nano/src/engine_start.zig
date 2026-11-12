@@ -180,6 +180,20 @@ pub fn parseLockPid(raw: []const u8, self_pid: i64) ?i64 {
     return pid;
 }
 
+/// Whether some process holds `{data_dir}/engine.lock` (the engine's
+/// exclusive lock), probed without keeping it.
+pub fn lockHeld(gpa: Allocator, io: std.Io, data_dir: []const u8) bool {
+    const path = std.fs.path.join(gpa, &.{ data_dir, "engine.lock" }) catch return false;
+    defer gpa.free(path);
+    const probe = std.Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_write,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }) catch |err| return err == error.WouldBlock;
+    probe.close(io);
+    return false;
+}
+
 /// Kills the background engine process recorded in
 /// `{data_dir}/engine.lock` (or `engine.lock.pid` on Windows) so a newly
 /// updated app can immediately start its bundled engine in place.
@@ -187,6 +201,9 @@ pub fn killLockedEngine(a: *App) bool {
     if (comptime builtin.os.tag == .ios) return false;
     if (a.offscreen or a.engine.scene != null) return false;
     const dir = resolveDataDir(a) orelse return false;
+    // Only an engine that holds the lock is signalled: a stale file's pid may
+    // since have been reused by an unrelated process.
+    if (!lockHeld(a.gpa, a.io, dir)) return false;
     const lock_file = if (comptime builtin.os.tag == .windows) "engine.lock.pid" else "engine.lock";
     const lock_path = std.fs.path.join(a.gpa, &.{ dir, lock_file }) catch return false;
     defer a.gpa.free(lock_path);
@@ -550,8 +567,14 @@ test "a start that never answers counts as failed, and three in a row give up" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var env = Map.init(testing.allocator);
     defer env.deinit();
-    // `false` exits at once: an engine that stops before it answers.
-    try env.put("HARNESS_NANO_ENGINE_BIN", "/usr/bin/false");
+    // An engine that stops at once, before it answers (a script of our own,
+    // not a `false` binary at a path some systems lack).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "stops-at-once", .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = .executable_file } });
+    const stops = try tmp.dir.realPathFileAlloc(testing.io, "stops-at-once", testing.allocator);
+    defer testing.allocator.free(stops);
+    try env.put("HARNESS_NANO_ENGINE_BIN", stops);
     try env.put("PATH", "");
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
@@ -638,6 +661,9 @@ test "replaces an older background engine session with the updated engine instea
     const locked_pid_str = try waitForFile(lock_path);
     defer testing.allocator.free(locked_pid_str);
     try testing.expectEqual(@as(?i64, old_pid), parseLockPid(locked_pid_str, std.c.getpid()));
+    // The engine's lock, held on its behalf (a shell script can't flock).
+    const held = try std.Io.Dir.cwd().openFile(testing.io, lock_path, .{ .mode = .read_write, .lock = .exclusive, .lock_nonblocking = true });
+    defer held.close(testing.io);
 
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
@@ -680,4 +706,33 @@ test "replaces an older background engine session with the updated engine instea
     defer new_info.deinit();
     a.onEngineInfo(2, .{ .ok = new_info.value });
     try testing.expectEqual(@as(usize, 0), a.view.sidebar_notice_len);
+}
+
+test "fix-sec 16: a stale engine.lock never gets another process signalled" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    // A process of this test's own, standing in for whatever reused the pid.
+    const child = try std.process.spawn(testing.io, .{ .argv = &.{ "/bin/sh", "-c", "exec sleep 5" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    const pid = child.id orelse return error.NoPid;
+    defer {
+        _ = std.c.kill(pid, .KILL);
+        _ = std.c.waitpid(pid, null, 0);
+    }
+    var pid_buf: [32]u8 = undefined;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "engine.lock", .data = try std.fmt.bufPrint(&pid_buf, "{d}\n", .{pid}) });
+
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HARNESS_DATA_DIR", dir);
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.env = &env;
+    // Nobody holds the lock: nothing is signalled.
+    try testing.expect(!lockHeld(testing.allocator, testing.io, dir));
+    try testing.expect(!killLockedEngine(&a));
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(pid, @enumFromInt(0)));
+    try testing.expectEqual(@as(c_int, 0), std.c.waitpid(pid, null, std.c.W.NOHANG));
 }

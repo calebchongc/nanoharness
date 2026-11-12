@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A deterministic transcript replay for the resource comparison: the
-engine's own frames (`TranscriptFrame`, crates/doc/src/transcript_delta.rs),
+"""A deterministic transcript replay for harness-nano's resource profile
+(`zig build profile`, src/profile.zig): the engine's own `TranscriptFrame`s,
 a user prompt and then a long Markdown reply streamed as text appends, as
 `scripts/resource-profile.mjs` records them. Made-up content only.
 

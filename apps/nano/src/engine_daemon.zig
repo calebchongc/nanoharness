@@ -283,6 +283,13 @@ pub const Runner = struct {
     gpa: Allocator,
     io: Io,
     out: *Io.Writer,
+    /// Where errors go; null: this process's stderr (as the Rust CLI's).
+    err: ?*Io.Writer = null,
+
+    fn fail(r: Runner, comptime fmt: []const u8, args: anytype) !void {
+        try r.out.flush();
+        try printErr(r.io, r.err, fmt, args);
+    }
 
     const Ran = struct { ok: bool, stdout: []u8, stderr: []u8 };
 
@@ -303,7 +310,7 @@ pub const Runner = struct {
     pub fn run(r: Runner, steps: []const Step) !u8 {
         for (steps, 0..) |step, i| switch (step) {
             .fail => |msg| {
-                try r.out.print("harness-engine: {s}\n", .{msg});
+                try r.fail("harness-engine: {s}\n", .{msg});
                 return 1;
             },
             .say => |msg| try r.out.print("{s}\n", .{msg}),
@@ -325,19 +332,19 @@ pub const Runner = struct {
                 if (!cmd.quiet) try r.out.print("$ {s}\n", .{try std.mem.join(r.gpa, " ", cmd.argv)});
                 const ran = r.exec(cmd.argv) catch |err| {
                     if (cmd.quiet) continue;
-                    try r.out.print("harness-engine: running {s} failed: {t}\n", .{ cmd.argv[0], err });
+                    try r.fail("harness-engine: running {s} failed: {t}\n", .{ cmd.argv[0], err });
                     return 1;
                 };
                 defer r.gpa.free(ran.stdout);
                 defer r.gpa.free(ran.stderr);
                 if (!ran.ok and !cmd.quiet) {
-                    try r.out.print("harness-engine: {s} failed: {s}\n", .{ try std.mem.join(r.gpa, " ", cmd.argv), std.mem.trim(u8, ran.stderr, " \r\n") });
+                    try r.fail("harness-engine: {s} failed: {s}\n", .{ try std.mem.join(r.gpa, " ", cmd.argv), std.mem.trim(u8, ran.stderr, " \r\n") });
                     return 1;
                 }
             },
             .passthrough => |argv| {
                 var child = std.process.spawn(r.io, .{ .argv = argv, .stdin = .inherit, .stdout = .inherit, .stderr = .inherit }) catch |err| {
-                    try r.out.print("harness-engine: running {s} failed: {t}\n", .{ argv[0], err });
+                    try r.fail("harness-engine: running {s} failed: {t}\n", .{ argv[0], err });
                     return 1;
                 };
                 _ = child.wait(r.io) catch {};
@@ -370,17 +377,29 @@ pub const Runner = struct {
 };
 
 /// `harness-engine daemon <action>` for this machine.
+fn printErr(io: Io, err_w: ?*Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    if (err_w) |w| {
+        try w.print(fmt, args);
+        try w.flush();
+        return;
+    }
+    var buf: [1024]u8 = undefined;
+    var ew = Io.File.stderr().writerStreaming(io, &buf);
+    try ew.interface.print(fmt, args);
+    try ew.interface.flush();
+}
+
 pub fn main(gpa: Allocator, io: Io, env: *const Map, data_dir: []const u8, action: DaemonAction, out: *Io.Writer) !u8 {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const os = hostOs();
     if (os == .other) {
-        try out.writeAll("harness-engine: Harness daemon is only supported on macOS (launchd) and Linux (systemd)\n");
+        try printErr(io, null, "harness-engine: Harness daemon is only supported on macOS (launchd) and Linux (systemd)\n", .{});
         return 1;
     }
     const home = env.get("HOME") orelse {
-        try out.writeAll("harness-engine: HOME not set\n");
+        try printErr(io, null, "harness-engine: HOME not set\n", .{});
         return 1;
     };
     const exe = try std.process.executablePathAlloc(io, arena);
@@ -487,21 +506,29 @@ test "daemon runner: missing unit says not installed; a failing command stops th
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var aw: Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
+    var ew: Io.Writer.Allocating = .init(testing.allocator);
+    defer ew.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
-    const runner: Runner = .{ .gpa = arena_state.allocator(), .io = testing.io, .out = &aw.writer };
+    // A command that fails, from the POSIX shell (no `false` binary assumed).
+    const failing = &[_][]const u8{ "/bin/sh", "-c", "exit 3" };
+    var missing_buf: [96]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buf, "/tmp/nano-daemon-test-missing-{d}.plist", .{std.c.getpid()});
+    const runner: Runner = .{ .gpa = arena_state.allocator(), .io = testing.io, .out = &aw.writer, .err = &ew.writer };
     try testing.expectEqual(@as(u8, 0), try runner.run(&.{
-        .{ .run = .{ .argv = &.{"/usr/bin/false"}, .quiet = true } },
-        .{ .remove = "/tmp/nano-daemon-test-definitely-missing.plist" },
+        .{ .run = .{ .argv = failing, .quiet = true } },
+        .{ .remove = missing },
         .{ .say = "unreachable" },
     }));
     try testing.expectEqualStrings("Not installed.\n", aw.written());
     aw.clearRetainingCapacity();
     try testing.expectEqual(@as(u8, 1), try runner.run(&.{
-        .{ .run = .{ .argv = &.{"/usr/bin/false"} } },
+        .{ .run = .{ .argv = failing } },
         .{ .say = "unreachable" },
     }));
-    try testing.expect(std.mem.indexOf(u8, aw.written(), "/usr/bin/false failed") != null);
+    // The failure is on stderr; stdout has only the command line.
+    try testing.expect(std.mem.indexOf(u8, ew.written(), "/bin/sh -c exit 3 failed") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "failed") == null);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "unreachable") == null);
 }
 

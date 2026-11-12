@@ -217,6 +217,66 @@ pub fn lockHolder(gpa: Allocator, io: Io, data_dir: []const u8) Holder {
     return .none;
 }
 
+/// The holder's pid as the Rust engine prints it: `unknown` when the lock
+/// file doesn't name one.
+pub fn holderPid(buf: *[24]u8, h: Holder) []const u8 {
+    return switch (h) {
+        .pid => |p| if (p > 0) (std.fmt.bufPrint(buf, "{d}", .{p}) catch "unknown") else "unknown",
+        .none => "unknown",
+    };
+}
+
+/// `InstanceLock::acquire`'s contention error, in the Rust engine's words.
+pub fn alreadyRunningText(buf: []u8, data_dir: []const u8, h: Holder) []const u8 {
+    var pid_buf: [24]u8 = undefined;
+    return std.fmt.bufPrint(buf, "another Harness engine is already running on {s} (pid {s}); stop it or use a different data dir (HARNESS_DATA_DIR)", .{ data_dir, holderPid(&pid_buf, h) }) catch
+        "another Harness engine is already running; stop it or use a different data dir (HARNESS_DATA_DIR)";
+}
+
+/// The engine's start-up lock: the data folder is created, then locked.
+/// Either failing stops the engine (`create_dir_all(data_dir)?` and
+/// `InstanceLock::acquire(data_dir)?`): it never runs without the lock.
+pub fn lockEngineDataDir(gpa: Allocator, io: Io, data_dir: []const u8, msg_buf: []u8) union(enum) { ok: InstanceLock, err: []const u8 } {
+    Io.Dir.cwd().createDirPath(io, data_dir) catch |e|
+        return .{ .err = std.fmt.bufPrint(msg_buf, "cannot create the data directory {s}: {t}", .{ data_dir, e }) catch "cannot create the data directory" };
+    const lock = InstanceLock.acquire(gpa, io, data_dir) catch |e| switch (e) {
+        error.AlreadyRunning => return .{ .err = alreadyRunningText(msg_buf, data_dir, lockHolder(gpa, io, data_dir)) },
+        else => return .{ .err = std.fmt.bufPrint(msg_buf, "cannot lock the data directory {s}: {t}", .{ data_dir, e }) catch "cannot lock the data directory" },
+    };
+    return .{ .ok = lock };
+}
+
+/// The engine's start-up lock, or the engine stops with the reason.
+pub fn lockEngineOrExit(gpa: Allocator, io: Io, data_dir: []const u8) InstanceLock {
+    var buf: [1024]u8 = undefined;
+    return switch (lockEngineDataDir(gpa, io, data_dir, &buf)) {
+        .ok => |l| l,
+        .err => |m| fatalStart(io, "{s}", .{m}),
+    };
+}
+
+/// The engine can't start: the reason on stderr, exit 1.
+pub fn fatalStart(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    var buf: [1024]u8 = undefined;
+    var ew = Io.File.stderr().writerStreaming(io, &buf);
+    ew.interface.print("harness-engine: " ++ fmt ++ "\n", args) catch {};
+    ew.interface.flush() catch {};
+    std.process.exit(1);
+}
+
+/// Errors go to stderr, as the Rust CLI's do (`err` when a test captures it).
+pub fn printErr(c: Context, comptime fmt: []const u8, args: anytype) !void {
+    if (c.err) |w| {
+        try w.print(fmt, args);
+        try w.flush();
+        return;
+    }
+    var buf: [1024]u8 = undefined;
+    var ew = Io.File.stderr().writerStreaming(c.io, &buf);
+    try ew.interface.print(fmt, args);
+    try ew.interface.flush();
+}
+
 fn currentPid() i64 {
     if (comptime builtin.os.tag == .windows) {
         const w = struct {
@@ -352,11 +412,7 @@ pub fn accountStatus(gpa: Allocator, scope: Scope, phase: auth_host.AuthPhase, e
 
 /// OAuth codes and refresh tokens travel over TLS only; plain HTTP is for a
 /// development edge on a numeric loopback address (`validate_secure_url`).
-pub fn isSecureUrl(url: []const u8) bool {
-    if (std.mem.startsWith(u8, url, "https://")) return true;
-    const rest = if (std.mem.startsWith(u8, url, "http://")) url["http://".len..] else return false;
-    return std.mem.startsWith(u8, rest, "127.") or std.mem.startsWith(u8, rest, "[::1]");
-}
+pub const isSecureUrl = auth_host.isSecureUrl;
 
 // ---------------------------------------------------------------------------
 // One RPC to the running engine
@@ -378,7 +434,19 @@ pub const Reply = union(enum) {
 /// Calls `method` on the engine at `127.0.0.1:port` and waits at most
 /// `timeout_ms` for its reply. `error.NoEngine` when nothing answers.
 pub fn rpcCall(gpa: Allocator, io: Io, port: u16, method: []const u8, params_json: []const u8, timeout_ms: u32) !Reply {
-    const client = ws.Client.connect(gpa, io, port, "/") catch return error.NoEngine;
+    // A loopback connect is answered at once (accepted or refused); the
+    // handshake runs under the call's deadline, so an engine that accepts
+    // and never upgrades can't hang the command.
+    const addr = Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return error.NoEngine;
+    const stream = addr.connect(io, .{ .mode = .stream }) catch return error.NoEngine;
+    var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
+    hs_dog.arm();
+    const upgraded = ws.Client.upgrade(gpa, io, stream, port, "/");
+    if (hs_dog.disarm()) {
+        if (upgraded) |c| c.deinit(gpa) else |_| {}
+        return error.Timeout;
+    }
+    const client = upgraded catch return error.NoEngine;
     defer client.deinit(gpa);
     const Watchdog = struct {
         done: std.atomic.Value(bool) = .init(false),
@@ -446,7 +514,18 @@ pub const Context = struct {
     /// Lines typed at the terminal, for `login`.
     in: *Io.Reader,
     interactive: bool,
+    /// Where errors go; null: this process's stderr.
+    err: ?*Io.Writer = null,
 };
+
+/// Whether `path` is a git checkout (`.git` is a folder, or a file for a
+/// linked worktree), for the engine's default project.
+pub fn gitDetected(io: Io, path: []const u8) bool {
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    defer dir.close(io);
+    _ = dir.statFile(io, ".git", .{}) catch return false;
+    return true;
+}
 
 /// `harness-engine status`; the exit code (1 when the account needs attention).
 pub fn status(c: Context) !u8 {
@@ -590,16 +669,14 @@ pub fn formatSyncStatus(w: *Io.Writer, status_val: json.Value) !void {
 fn lockForChange(c: Context, data_dir: []const u8, verb: []const u8) !?InstanceLock {
     return InstanceLock.acquire(c.gpa, c.io, data_dir) catch |err| switch (err) {
         error.AlreadyRunning => {
-            const pid: i64 = switch (lockHolder(c.gpa, c.io, data_dir)) {
-                .none => 0,
-                .pid => |p| p,
-            };
-            try c.out.print(
-                "harness-engine: another Harness engine is already running on {s} (pid {d})\n" ++
-                    "Cannot {s} while an engine is running — stop it first (`harness-engine daemon stop`, or quit the Harness app), or use the running app instead.\n",
-                .{ data_dir, pid, verb },
-            );
+            var buf: [1024]u8 = undefined;
             try c.out.flush();
+            try printErr(
+                c,
+                "harness-engine: {s}\n" ++
+                    "Cannot {s} while an engine is running — stop it first (`harness-engine daemon stop`, or quit the Harness app), or use the running app instead.\n",
+                .{ alreadyRunningText(&buf, data_dir, lockHolder(c.gpa, c.io, data_dir)), verb },
+            );
             return null;
         },
         else => |e| return e,
@@ -659,63 +736,65 @@ fn readLine(c: Context) ?[]const u8 {
 
 const Org = struct { id: []const u8, name: []const u8 };
 
-/// Org-less session: join the only workspace, or pick one (`run_org_onboarding`).
+/// Org-less session (`run_org_onboarding`): no workspaces yet, ask for a name
+/// and create one; one, join it; several, pick one. False when none was chosen.
 fn chooseWorkspace(c: Context, auth: *auth_host.AuthManager, cfg: AuthEnv) !bool {
-    const url = try std.fmt.allocPrint(c.gpa, "{s}/auth/orgs", .{std.mem.trimEnd(u8, cfg.edge_url, "/")});
-    defer c.gpa.free(url);
-    var resp = auth_host.AuthManager.edgeRequestPooled(null, c.gpa, c.io, "GET", url, auth.access_token, &.{}, null) catch |err| {
-        try c.out.print("Could not list workspaces ({t}) — create or select one from the Harness app to continue.\n", .{err});
+    _ = cfg;
+    const listed = auth.listOrgsJson(c.io) catch |err| {
+        try c.out.print("Could not list workspaces ({s}) \u{2014} create or select one from the Harness UI to continue.\n", .{auth.errorText(err)});
         return false;
     };
-    defer resp.deinit(c.gpa);
-    if (resp.status != 200) {
-        try c.out.print("Could not list workspaces (HTTP {d}) — create or select one from the Harness app to continue.\n", .{resp.status});
-        return false;
-    }
-    var parsed = try json.parseFromSlice(json.Value, c.gpa, resp.body, .{});
+    defer c.gpa.free(listed);
+    var parsed = try json.parseFromSlice(json.Value, c.gpa, listed, .{});
     defer parsed.deinit();
-    const items: []const json.Value = switch (parsed.value) {
-        .object => |o| if (o.get("orgs")) |ov| (if (ov == .array) ov.array.items else &.{}) else &.{},
-        .array => |arr| arr.items,
-        else => &.{},
-    };
     var orgs: std.ArrayList(Org) = .empty;
     defer orgs.deinit(c.gpa);
-    for (items) |it| {
-        if (it != .object) continue;
-        const id = for ([_][]const u8{ "organizationId", "id" }) |k| {
-            if (it.object.get(k)) |v| if (v == .string and v.string.len > 0) break v.string;
-        } else continue;
-        const name = if (it.object.get("name")) |v| (if (v == .string) v.string else id) else id;
-        try orgs.append(c.gpa, .{ .id = id, .name = name });
+    for (parsed.value.object.get("orgs").?.array.items) |it| {
+        try orgs.append(c.gpa, .{ .id = it.object.get("organizationId").?.string, .name = it.object.get("name").?.string });
     }
-    const chosen: Org = switch (orgs.items.len) {
+    switch (orgs.items.len) {
         0 => {
-            try c.out.writeAll("No workspaces yet — create one in the Harness app, then run `harness-engine login` again.\n");
-            return false;
-        },
-        1 => blk: {
-            try c.out.print("Joining workspace \"{s}\"…\n", .{orgs.items[0].name});
-            break :blk orgs.items[0];
-        },
-        else => blk: {
-            try c.out.writeAll("\nYour workspaces:\n");
-            for (orgs.items, 1..) |o, i| try c.out.print("  {d}. {s}\n", .{ i, o.name });
+            try c.out.writeAll("No workspaces yet \u{2014} name your new workspace and press enter:\n");
             while (true) {
-                try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
                 try c.out.flush();
-                const line = readLine(c) orelse return false;
-                const n = std.fmt.parseInt(usize, line, 10) catch continue;
-                if (n >= 1 and n <= orgs.items.len) break :blk orgs.items[n - 1];
+                const name = readLine(c) orelse return false;
+                const created = auth.createOrg(c.io, name) catch |err| {
+                    try c.out.print("Creating workspace failed: {s}\n", .{auth.errorText(err)});
+                    continue;
+                };
+                c.gpa.free(created);
+                return auth.phase == .signed_in;
             }
         },
-    };
-    try c.out.flush();
-    auth.selectOrg(c.io, chosen.id) catch |err| {
-        try c.out.print("Joining workspace failed: {t}\n", .{err});
-        return false;
-    };
-    return auth.phase == .signed_in;
+        1 => {
+            try c.out.print("Joining workspace \"{s}\"\u{2026}\n", .{orgs.items[0].name});
+            try c.out.flush();
+            auth.selectOrg(c.io, orgs.items[0].id) catch |err| {
+                try c.out.print("Joining workspace failed: {s}\n", .{auth.errorText(err)});
+                return false;
+            };
+            return auth.phase == .signed_in;
+        },
+        else => {
+            try c.out.writeAll("\nYour workspaces:\n");
+            for (orgs.items, 1..) |o, i| try c.out.print("  {d}. {s}\n", .{ i, o.name });
+            try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
+            while (true) {
+                try c.out.flush();
+                const line = readLine(c) orelse return false;
+                const n = std.fmt.parseInt(usize, line, 10) catch 0;
+                if (n < 1 or n > orgs.items.len) {
+                    try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
+                    continue;
+                }
+                auth.selectOrg(c.io, orgs.items[n - 1].id) catch |err| {
+                    try c.out.print("Joining workspace failed: {s}\n", .{auth.errorText(err)});
+                    continue;
+                };
+                return auth.phase == .signed_in;
+            }
+        },
+    }
 }
 
 /// `harness-engine login`: the paste-code sign-in (and workspace choice),
@@ -767,7 +846,7 @@ pub fn login(c: Context) !u8 {
                 if (auth.refresh_token != null) break;
                 try c.out.writeAll("Sign-in failed: the edge returned no session\n");
             } else |err| {
-                try c.out.print("Sign-in failed: {t}\n", .{err});
+                try c.out.print("Sign-in failed: {s}\n", .{auth.errorText(err)});
             }
             // A code is single-use: offer a fresh sign-in after a failure.
             if (auth.pending_state == null) try startSignIn(c, &auth, cfg);
@@ -874,22 +953,28 @@ fn syntheticEnv(data_dir: []const u8) !Map {
 
 const Captured = struct {
     out: Io.Writer.Allocating,
+    err: Io.Writer.Allocating,
     in: Io.Reader,
 
     fn init(input: []const u8) Captured {
-        return .{ .out = .init(testing.allocator), .in = .fixed(input) };
+        return .{ .out = .init(testing.allocator), .err = .init(testing.allocator), .in = .fixed(input) };
     }
 
     fn ctx(self: *Captured, env: *const Map, port: u16, interactive: bool) Context {
-        return .{ .gpa = testing.allocator, .io = testing.io, .env = env, .port = port, .out = &self.out.writer, .in = &self.in, .interactive = interactive };
+        return .{ .gpa = testing.allocator, .io = testing.io, .env = env, .port = port, .out = &self.out.writer, .in = &self.in, .interactive = interactive, .err = &self.err.writer };
     }
 
     fn text(self: *Captured) []const u8 {
         return self.out.written();
     }
 
+    fn errText(self: *Captured) []const u8 {
+        return self.err.written();
+    }
+
     fn deinit(self: *Captured) void {
         self.out.deinit();
+        self.err.deinit();
     }
 };
 
@@ -921,8 +1006,8 @@ test "login and logout refuse while an engine holds the folder" {
         var cap: Captured = .init("");
         defer cap.deinit();
         try testing.expectEqual(@as(u8, 1), try cmd(cap.ctx(&env, 1, true)));
-        try testing.expect(std.mem.indexOf(u8, cap.text(), "while an engine is running") != null);
-        try testing.expect(std.mem.indexOf(u8, cap.text(), verb) != null);
+        try testing.expect(std.mem.indexOf(u8, cap.errText(), "while an engine is running") != null);
+        try testing.expect(std.mem.indexOf(u8, cap.errText(), verb) != null);
     }
 }
 
@@ -1041,11 +1126,13 @@ test "login: the pasted code is exchanged, a workspace joined, and the session s
     defer gpa.free(jwt);
     const exchange = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-1\",\"user\":{{\"id\":\"u-1\",\"email\":\"ada@example.com\"}}}}", .{jwt});
     defer gpa.free(exchange);
-    const refreshed = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-2\"}}", .{jwt});
+    const jwt_b = try syntheticJwt(gpa, "{\"sub\":\"u-1\",\"iat\":1000,\"exp\":4000,\"org_id\":\"org-b\"}");
+    defer gpa.free(jwt_b);
+    const refreshed = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-2\"}}", .{jwt_b});
     defer gpa.free(refreshed);
     const routes = [_][2][]const u8{
         .{ "/auth/exchange", exchange },
-        .{ "/auth/orgs", "{\"orgs\":[{\"organizationId\":\"org-a\",\"name\":\"Alpha\"},{\"organizationId\":\"org-b\",\"name\":\"Beta\"}]}" },
+        .{ "/auth/orgs", "{\"orgs\":[{\"id\":\"om-a\",\"organizationId\":\"org-a\",\"name\":\"Alpha\"},{\"id\":\"om-b\",\"organizationId\":\"org-b\",\"name\":\"Beta\"}]}" },
         .{ "/auth/refresh", refreshed },
     };
     const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -1066,7 +1153,7 @@ test "login: the pasted code is exchanged, a workspace joined, and the session s
     var first: Captured = .init("wrong.code\n");
     defer first.deinit();
     try testing.expectEqual(@as(u8, 1), try login(first.ctx(&env, 1, true)));
-    try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in failed: InvalidOAuthState") != null);
+    try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in failed: invalid or expired sign-in code") != null);
     try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in did not complete") != null);
     try testing.expect(std.mem.indexOf(u8, first.text(), "redirect_uri=http%3A%2F%2F127.0.0.1") != null);
 
@@ -1226,4 +1313,112 @@ test "sync readout matches the Rust CLI's lines" {
             "Chat short: no room (dialing or edge-less)\n",
         out.written(),
     );
+}
+
+test "fix-sec 5: login with no workspaces asks for a name and creates one" {
+    const gpa = testing.allocator;
+    const sec = @import("sec_tests.zig");
+    const jwt_org_1 = "e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ.sig";
+    var edge: sec.MockEdge = .{ .server = try sec.listenLoopback(), .routes = &.{
+        .{ .path = "GET /auth/orgs", .status = 200, .body = "{\"orgs\":[]}" },
+        .{ .path = "POST /auth/orgs", .status = 200, .body = "{\"organizationId\":\"org_1\"}" },
+        .{ .path = "POST /auth/refresh", .status = 200, .body = "{\"accessToken\":\"" ++ jwt_org_1 ++ "\",\"refreshToken\":\"harness_rt_rotated\"}" },
+    } };
+    try edge.start();
+    defer edge.deinit();
+    var ubuf: [64]u8 = undefined;
+    const edge_url = edge.url(&ubuf);
+
+    var env = try syntheticEnv("/nonexistent-synthetic-data");
+    defer env.deinit();
+    try env.put("HARNESS_EDGE_URL", edge_url);
+    try env.put("HARNESS_CODEGRAFF_API_BASE", "https://oauth.example.invalid");
+    try env.put("HARNESS_CODEGRAFF_CLIENT_ID", "cg_client_synthetic");
+    var auth = try auth_host.AuthManager.init(gpa);
+    defer auth.deinit();
+    try auth.configureCodegraff(edge_url, "cg_client_synthetic", "https://oauth.example.invalid", null);
+    auth.refresh_token = try gpa.dupe(u8, "harness_rt_synthetic");
+    auth.access_token = try gpa.dupe(u8, "e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0.sig");
+    auth.phase = .needs_organization;
+    auth.signed_in = false;
+
+    // A blank line is asked again; the name creates the workspace and joins it.
+    var cap: Captured = .init("\n  \nAcme\n");
+    defer cap.deinit();
+    try testing.expect(try chooseWorkspace(cap.ctx(&env, 1, true), &auth, AuthEnv.from(&env)));
+    try testing.expect(std.mem.indexOf(u8, cap.text(), "No workspaces yet \u{2014} name your new workspace and press enter:") != null);
+    try testing.expectEqualStrings("org_1", auth.org_id.?);
+    try testing.expectEqual(auth_host.AuthPhase.signed_in, auth.phase);
+}
+
+test "fix-sec 15: the engine never runs unlocked, and an unnamed holder is `unknown`" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec15");
+    defer tmp.remove();
+    // A data folder that can't be created (its parent is a file) stops the engine.
+    const file_path = try std.fs.path.join(testing.allocator, &.{ dir, "a-file" });
+    defer testing.allocator.free(file_path);
+    try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = file_path, .data = "x" });
+    const under_file = try std.fs.path.join(testing.allocator, &.{ file_path, "data" });
+    defer testing.allocator.free(under_file);
+    var buf: [1024]u8 = undefined;
+    const blocked = lockEngineDataDir(testing.allocator, testing.io, under_file, &buf);
+    try testing.expect(std.mem.startsWith(u8, blocked.err, "cannot create the data directory "));
+
+    // A held lock whose file names no pid reads `pid unknown`, never `pid 0`.
+    const data = try std.fs.path.join(testing.allocator, &.{ dir, "data" });
+    defer testing.allocator.free(data);
+    var first = switch (lockEngineDataDir(testing.allocator, testing.io, data, &buf)) {
+        .ok => |l| l,
+        .err => |m| {
+            std.debug.print("{s}\n", .{m});
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer first.release(testing.io);
+    try first.file.setLength(testing.io, 0);
+    const second = lockEngineDataDir(testing.allocator, testing.io, data, &buf);
+    try testing.expect(std.mem.indexOf(u8, second.err, "(pid unknown)") != null);
+    var pid_buf: [24]u8 = undefined;
+    try testing.expectEqualStrings("unknown", holderPid(&pid_buf, .{ .pid = 0 }));
+    try testing.expectEqualStrings("4242", holderPid(&pid_buf, .{ .pid = 4242 }));
+}
+
+test "fix-sec 18: lock errors go to stderr, not stdout" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec18");
+    defer tmp.remove();
+    var env = try syntheticEnv(dir);
+    defer env.deinit();
+    var engine = try InstanceLock.acquire(testing.allocator, testing.io, dir);
+    defer engine.release(testing.io);
+    var cap: Captured = .init("");
+    defer cap.deinit();
+    try testing.expectEqual(@as(u8, 1), try logout(cap.ctx(&env, 1, true)));
+    try testing.expect(std.mem.indexOf(u8, cap.errText(), "another Harness engine is already running") != null);
+    try testing.expect(std.mem.indexOf(u8, cap.text(), "already running") == null);
+}
+
+test "fix-sec 18: an engine that accepts and never upgrades can't hang a command" {
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try addr.listen(testing.io, .{ .reuse_address = true });
+    defer server.deinit(testing.io);
+    // Never accepted: the kernel completes the connect, nobody answers.
+    const started = Io.Clock.awake.now(testing.io);
+    try testing.expectError(error.Timeout, rpcCall(testing.allocator, testing.io, server.socket.address.getPort(), "EngineInfo", "{}", 300));
+    try testing.expect(started.durationTo(Io.Clock.awake.now(testing.io)).toMilliseconds() < 5_000);
+}
+
+test "fix-sec 18: the default project is a git checkout only when it is one" {
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec18git");
+    defer tmp.remove();
+    try testing.expect(!gitDetected(testing.io, dir));
+    const git = try std.fs.path.join(testing.allocator, &.{ dir, ".git" });
+    defer testing.allocator.free(git);
+    try Io.Dir.cwd().createDirPath(testing.io, git);
+    try testing.expect(gitDetected(testing.io, dir));
+    try testing.expect(!gitDetected(testing.io, "/nonexistent-synthetic-project"));
 }

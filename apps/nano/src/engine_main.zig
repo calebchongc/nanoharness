@@ -161,25 +161,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const resolved_data_dir: ?[]const u8 = engine_cli.resolveDataDir(init.arena.allocator(), io, init.environ_map) catch null;
+    const resolved_data_dir: ?[]const u8 = engine_cli.resolveDataDir(init.arena.allocator(), io, init.environ_map) catch |err| engine_cli.fatalStart(io, "no data directory ({t}): set HOME or HARNESS_DATA_DIR", .{err});
     // One engine per data folder, as the Rust engine's `InstanceLock`: two
     // would each rewrite the same session and stores.
     var instance_lock: ?engine_cli.InstanceLock = null;
     defer if (instance_lock) |*l| l.release(io);
-    if (resolved_data_dir) |data_dir| {
-        std.Io.Dir.cwd().createDirPath(io, data_dir) catch {};
-        instance_lock = engine_cli.InstanceLock.acquire(gpa, io, data_dir) catch |err| switch (err) {
-            error.AlreadyRunning => {
-                const pid: i64 = switch (engine_cli.lockHolder(gpa, io, data_dir)) {
-                    .none => 0,
-                    .pid => |p| p,
-                };
-                std.log.err("another Harness engine is already running on {s} (pid {d}); stop it or use a different data dir (HARNESS_DATA_DIR)", .{ data_dir, pid });
-                std.process.exit(1);
-            },
-            else => |e| return e,
-        };
-    }
+    if (resolved_data_dir) |data_dir| instance_lock = engine_cli.lockEngineOrExit(gpa, io, data_dir);
 
     const persisted_dev_id = try engine_host.loadOrCreateDeviceId(gpa, io, resolved_data_dir);
     defer gpa.free(persisted_dev_id);
@@ -337,7 +324,7 @@ pub fn main(init: std.process.Init) !void {
             .device_id = dev_copy,
             .path = path_copy,
             .name = name_copy,
-            .git_detected = true,
+            .git_detected = engine_cli.gitDetected(io, default_path),
         });
     }
 
@@ -419,38 +406,7 @@ pub fn main(init: std.process.Init) !void {
     const device_relay = @import("relay_engine.zig").start(gpa, io, &host);
     defer if (device_relay) |r| r.stop();
 
-    const ClientWorker = struct {
-        gpa: Allocator,
-        io: Io,
-        host: *engine_host.EngineHost,
-        stream: net.Stream,
-
-        fn run(ctx: *@This()) void {
-            var stream = ctx.stream;
-            const gpa_c = ctx.gpa;
-            const io_c = ctx.io;
-            const host_c = ctx.host;
-            gpa_c.destroy(ctx);
-            defer stream.close(io_c);
-            serveSocket(gpa_c, io_c, host_c, &stream) catch |err| {
-                std.log.debug("harness-engine: client ended: {t}", .{err});
-            };
-        }
-    };
-
-    while (!host.stop_requested) {
-        var stream = server.accept(io) catch continue;
-        const ctx = gpa.create(ClientWorker) catch {
-            stream.close(io);
-            continue;
-        };
-        ctx.* = .{ .gpa = gpa, .io = io, .host = &host, .stream = stream };
-        if (std.Thread.spawn(.{}, ClientWorker.run, .{ctx})) |th| {
-            th.detach();
-        } else |_| {
-            ClientWorker.run(ctx);
-        }
-    }
+    @import("engine_accept.zig").serve(gpa, io, &server, &host, serveSocket);
 }
 
 const PongWriter = struct {

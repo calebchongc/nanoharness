@@ -84,7 +84,7 @@ test "rpc devices: update methods answer through the engine host" {
 
     var elsewhere = try call(&host, "CheckForUpdates", "{\"targetDeviceId\":\"another-device\"}");
     defer freeOutcome(&elsewhere);
-    try testing.expectEqualStrings("target device not connected", elsewhere.err.exec_error);
+    try testing.expectEqualStrings("cannot reach device another-device: remote routing unavailable (offline)", elsewhere.err.exec_error);
 
     var check = try call(&host, "CheckForUpdates", "{}");
     defer freeOutcome(&check);

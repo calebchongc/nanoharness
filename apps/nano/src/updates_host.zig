@@ -49,6 +49,19 @@ fn parts(v: []const u8, out: *[16]u64) ?[]const u64 {
     return if (n == 0) null else out[0..n];
 }
 
+/// A release version this engine will put in a URL, a folder name and the
+/// `current` link: `[0-9A-Za-z.+-]+`, not only dots, at most 64 bytes.
+/// Stricter than the Rust updater, which takes the feed's text as it is.
+pub fn validVersion(v: []const u8) bool {
+    if (v.len == 0 or v.len > 64) return false;
+    var dots_only = true;
+    for (v) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '+' or c == '-')) return false;
+        if (c != '.') dots_only = false;
+    }
+    return !dots_only;
+}
+
 pub fn platformKey() struct { os: []const u8, arch: []const u8 } {
     const os: []const u8 = @tagName(builtin.os.tag);
     const arch: []const u8 = switch (builtin.cpu.arch) {
@@ -62,6 +75,11 @@ pub fn platformKey() struct { os: []const u8, arch: []const u8 } {
 pub fn headlessArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
     const k = platformKey();
     return std.fmt.allocPrint(gpa, "harness-{s}-{s}-{s}.tar.gz", .{ version, k.os, k.arch });
+}
+
+/// `harness-<ver>-macos-<arch>-app.tar.gz` (`mac_app_artifact`).
+pub fn macAppArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "harness-{s}-macos-{s}-app.tar.gz", .{ version, platformKey().arch });
 }
 
 pub fn autoUpdateFrom(value: ?[]const u8) bool {
@@ -145,12 +163,33 @@ pub fn validateReleaseOverride(gpa: Allocator, value: []const u8) union(enum) { 
 
 pub const HttpReply = struct { status: u16, body: []u8 };
 
+/// What a download wrote: the final status, and the SHA-256 and size of the body.
+pub const Download = struct { status: u16, sha256: [32]u8, size: u64 };
+
+/// The largest release artifact and manifest this engine downloads.
+pub const max_artifact_bytes: u64 = 1 << 30;
+pub const max_manifest_bytes: u64 = 1 << 20;
+
 pub const Http = struct {
     ctx: ?*anyopaque = null,
     get_fn: *const fn (ctx: ?*anyopaque, gpa: Allocator, url: []const u8) anyerror!HttpReply,
+    /// Streams `url` into a new file at `dest`, at most `max_bytes`. Unset
+    /// (made-up releases in tests): `get_fn`'s body is written instead.
+    download_fn: ?*const fn (ctx: ?*anyopaque, gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8, max_bytes: u64) anyerror!Download = null,
 
     pub fn get(self: Http, gpa: Allocator, url: []const u8) anyerror!HttpReply {
         return self.get_fn(self.ctx, gpa, url);
+    }
+
+    pub fn download(self: Http, gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8, max_bytes: u64) anyerror!Download {
+        if (self.download_fn) |f| return f(self.ctx, gpa, io, url, dest, max_bytes);
+        const r = try self.get(gpa, url);
+        defer gpa.free(r.body);
+        if (r.body.len > max_bytes) return error.TooLarge;
+        var out: Download = .{ .status = r.status, .sha256 = undefined, .size = r.body.len };
+        std.crypto.hash.sha2.Sha256.hash(r.body, &out.sha256, .{});
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dest, .data = r.body });
+        return out;
     }
 };
 
@@ -293,9 +332,11 @@ pub const Updater = struct {
                     return .{ .err = "parsing manifest.json: invalid JSON" };
                 const ver = if (v == .object) v.object.get("version") else null;
                 if (ver == null or ver.? != .string) return .{ .err = "parsing manifest.json: missing field `version`" };
-                if (std.mem.trim(u8, ver.?.string, " \t\r\n").len == 0) return .{ .err = "manifest.json has an empty version" };
+                const version = std.mem.trim(u8, ver.?.string, " \t\r\n");
+                if (version.len == 0) return .{ .err = "manifest.json has an empty version" };
+                if (!validVersion(version)) return .{ .err = try std.fmt.allocPrint(arena, "manifest.json names an invalid version: {f}", .{json.fmt(version, .{})}) };
                 const files = v.object.get("files");
-                return .{ .ok = .{ .version = ver.?.string, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
+                return .{ .ok = .{ .version = version, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
             }
         } else |_| {}
         const lurl = try std.fmt.allocPrint(arena, "{s}/latest.txt", .{base});
@@ -305,6 +346,7 @@ pub const Updater = struct {
             return .{ .err = try std.fmt.allocPrint(arena, "fetching latest.txt: HTTP status {d}", .{r.status}) };
         const ver = std.mem.trim(u8, r.body, " \t\r\n");
         if (ver.len == 0) return .{ .err = "latest.txt is empty" };
+        if (!validVersion(ver)) return .{ .err = try std.fmt.allocPrint(arena, "latest.txt names an invalid version: {f}", .{json.fmt(ver, .{})}) };
         return .{ .ok = .{ .version = ver } };
     }
 
@@ -334,24 +376,30 @@ pub const Updater = struct {
         }
     }
 
-    /// Download `file` into `dest`, verifying the manifest's SHA-256 when it has one.
+    /// Download `file` into `dest`: streamed to `dest.partial`, verified against
+    /// the manifest's SHA-256, then renamed into place. A file the manifest
+    /// gives no SHA-256 for is never installed (the Rust updater installs a
+    /// managed release unverified then; `stage_mac_app` already refuses).
     fn download(self: *Updater, arena: Allocator, io: std.Io, m: Manifest, file: []const u8, dest: []const u8) !?[]const u8 {
+        const expected_raw = m.sha256For(file) orelse
+            return try std.fmt.allocPrint(arena, "the release has no SHA-256 for {s}; refusing to install it unverified", .{file});
+        const expected = std.mem.trim(u8, expected_raw, " \t\r\n");
         const base = try self.releaseBase(arena);
         const url = try std.fmt.allocPrint(arena, "{s}/{s}", .{ base, file });
-        const r = self.http.get(arena, url) catch |e|
-            return try std.fmt.allocPrint(arena, "downloading {s}: {s}", .{ url, @errorName(e) });
-        if (r.status < 200 or r.status >= 300)
-            return try std.fmt.allocPrint(arena, "downloading {s}: HTTP status {d}", .{ url, r.status });
-        if (m.sha256For(file)) |expected| {
-            var digest: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(r.body, &digest, .{});
-            const actual = std.fmt.bytesToHex(digest, .lower);
-            if (!std.ascii.eqlIgnoreCase(&actual, std.mem.trim(u8, expected, " \t\r\n")))
-                return try std.fmt.allocPrint(arena, "checksum mismatch for {s}: expected {s}, got {s}", .{ file, expected, &actual });
-        }
         const partial = try std.fmt.allocPrint(arena, "{s}.partial", .{dest});
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = partial, .data = r.body }) catch |e|
-            return try std.fmt.allocPrint(arena, "creating {s}: {s}", .{ partial, @errorName(e) });
+        const got = self.http.download(arena, io, url, partial, max_artifact_bytes) catch |e| {
+            std.Io.Dir.cwd().deleteFile(io, partial) catch {};
+            return try std.fmt.allocPrint(arena, "downloading {s}: {s}", .{ url, downloadErrorText(e) });
+        };
+        if (got.status < 200 or got.status >= 300) {
+            std.Io.Dir.cwd().deleteFile(io, partial) catch {};
+            return try std.fmt.allocPrint(arena, "downloading {s}: HTTP status {d}", .{ url, got.status });
+        }
+        const actual = std.fmt.bytesToHex(got.sha256, .lower);
+        if (!std.ascii.eqlIgnoreCase(&actual, expected)) {
+            std.Io.Dir.cwd().deleteFile(io, partial) catch {};
+            return try std.fmt.allocPrint(arena, "checksum mismatch for {s}: expected {s}, got {s}", .{ file, expected, &actual });
+        }
         std.Io.Dir.rename(std.Io.Dir.cwd(), partial, std.Io.Dir.cwd(), dest, io) catch |e|
             return try std.fmt.allocPrint(arena, "moving {s} into place: {s}", .{ dest, @errorName(e) });
         return null;
@@ -389,6 +437,44 @@ pub const Updater = struct {
         std.Io.Dir.rename(std.Io.Dir.cwd(), unpacked, std.Io.Dir.cwd(), dest, io) catch |e| {
             if (!exists(io, dest_bin)) return try std.fmt.allocPrint(arena, "moving {s} into place: {s}", .{ dest, @errorName(e) });
         };
+        return null;
+    }
+
+    /// `stage_mac_app`: download and unpack the app tarball into
+    /// `{data_dir}/updates/<ver>/Harness.app` (idempotent); the staged bundle's
+    /// path in `arena`, or why not. The manifest must give the tarball's
+    /// SHA-256: an app update is never installed unverified.
+    pub fn stageMacApp(self: *Updater, arena: Allocator, m: Manifest, data_dir: []const u8) !union(enum) { ok: []const u8, err: []const u8 } {
+        if (builtin.os.tag != .macos)
+            return .{ .err = try std.fmt.allocPrint(arena, "macOS app updates are not supported on {s}", .{@tagName(builtin.os.tag)}) };
+        const file = try macAppArtifactAlloc(arena, m.version);
+        if (m.sha256For(file) == null)
+            return .{ .err = try std.fmt.allocPrint(arena, "stable macOS update is missing the {s} checksum", .{file}) };
+        if (!validVersion(m.version)) return .{ .err = "the release names an invalid version" };
+        const io = self.io orelse return .{ .err = "updates need file access" };
+        const dir = try std.fmt.allocPrint(arena, "{s}/updates/{s}", .{ data_dir, m.version });
+        if (try stagedMacApp(arena, io, dir)) |staged| return .{ .ok = staged };
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |e|
+            return .{ .err = try std.fmt.allocPrint(arena, "creating {s}: {s}", .{ dir, @errorName(e) }) };
+        const tarball = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, file });
+        if (try self.download(arena, io, m, file, tarball)) |e| return .{ .err = e };
+        var out = try self.runner.run(arena, .{ .argv = &.{ "tar", "-xzf", tarball, "-C", dir }, .timeout_ms = 10 * 60_000 });
+        if (!out.ok()) {
+            return .{ .err = try std.fmt.allocPrint(arena, "tar -xzf {s} -C {s} failed ({s}): {s}", .{
+                tarball, dir, @tagName(out.term), std.mem.trim(u8, out.stderr, " \t\r\n"),
+            }) };
+        }
+        std.Io.Dir.cwd().deleteFile(io, tarball) catch {};
+        if (try stagedMacApp(arena, io, dir)) |staged| return .{ .ok = staged };
+        return .{ .err = try std.fmt.allocPrint(arena, "app tarball {s} did not contain Harness.app", .{file}) };
+    }
+
+    fn stagedMacApp(arena: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+        for ([_][]const u8{ "Harness.app", "Harnesser.app" }) |name| {
+            const bundle = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, name });
+            if (exists(io, try std.fmt.allocPrint(arena, "{s}/Contents/MacOS/harness", .{bundle}))) return bundle;
+        }
         return null;
     }
 
@@ -498,13 +584,18 @@ fn exists(io: std.Io, path: []const u8) bool {
 pub const Reply = union(enum) { ok: []u8, failed: []const u8, bad_params: []const u8 };
 pub const Method = enum { status, check, queue, apply };
 
-/// `targetDeviceId` names another device: this engine has no relay link to forward over.
+threadlocal var target_err_buf: [256]u8 = undefined;
+
+/// `targetDeviceId` names another device. The Rust engine forwards the call
+/// over its device relay; this engine has no relay client yet, so it answers
+/// as the Rust engine does when no relay link is available (`forward`).
 pub fn targetProblem(params: json.Value, local_device: []const u8) ?[]const u8 {
     if (params != .object) return null;
     const t = params.object.get("targetDeviceId") orelse return null;
     if (t != .string) return "invalid type for `targetDeviceId`, expected a string";
     if (std.mem.eql(u8, t.string, local_device)) return null;
-    return "target device not connected";
+    return std.fmt.bufPrint(&target_err_buf, "cannot reach device {s}: remote routing unavailable (offline)", .{t.string}) catch
+        "cannot reach device: remote routing unavailable (offline)";
 }
 
 pub fn handle(u: *Updater, reply_gpa: Allocator, method: Method) !Reply {
@@ -530,41 +621,231 @@ pub fn handle(u: *Updater, reply_gpa: Allocator, method: Method) !Reply {
 
 // ---------------------------------------------------------------- the engine's wiring
 
+/// The engine's updater, for one host at a time: set up by `forEngine`,
+/// dropped by `releaseHost` when that host goes away.
 const Engine = struct {
     updater: Updater,
-    sys_runner: proc.SystemRunner,
+    /// The host's I/O; null for a host without one (then nothing runs).
+    io: ?std.Io,
+    sys_runner: ?proc.SystemRunner,
     host: *anyopaque,
     started: bool = false,
 };
 
 var engine_state: ?Engine = null;
 
-fn stdGet(ctx: ?*anyopaque, gpa: Allocator, url: []const u8) anyerror!HttpReply {
-    const io: *std.Io = @ptrCast(@alignCast(ctx.?));
-    var client: std.http.Client = .{ .allocator = gpa, .io = io.* };
-    defer client.deinit();
-    var aw: std.Io.Writer.Allocating = .init(gpa);
-    errdefer aw.deinit();
-    const res = try client.fetch(.{
-        .location = .{ .url = url },
-        .response_writer = &aw.writer,
-        .headers = .{ .user_agent = .{ .override = "harness-engine-zig" } },
-    });
-    return .{ .status = @intFromEnum(res.status), .body = try aw.toOwnedSlice() };
+/// How long a release download may go without a byte before it fails (the
+/// Rust updater's read timeout: an inactivity deadline, not a total cap).
+pub const read_idle_ms: u32 = 30_000;
+pub const max_redirects: u8 = 10;
+
+/// `null` when following a redirect to `next` is fine, else why not: never
+/// from HTTPS to plain HTTP, and at most `max_redirects` hops.
+pub fn redirectProblem(seen_https: bool, hops: usize, next: []const u8) ?[]const u8 {
+    if (hops >= max_redirects) return "too many update redirects";
+    const uri = std.Uri.parse(next) catch return "invalid update redirect";
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return null;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return "invalid update redirect";
+    return if (seen_https) "update redirect would downgrade HTTPS" else null;
 }
 
-var engine_io: std.Io = undefined;
+fn downloadErrorText(e: anyerror) []const u8 {
+    return switch (e) {
+        error.Timeout => "no data for 30 s",
+        error.TooLarge => "the file is larger than this engine downloads",
+        error.RedirectDowngrade => "update redirect would downgrade HTTPS",
+        error.TooManyRedirects => "too many update redirects",
+        error.InvalidRedirect => "invalid update redirect",
+        else => @errorName(e),
+    };
+}
+
+/// Fails a stalled transfer: a helper thread watches a progress counter and,
+/// when it hasn't moved for `idle_ms`, shuts the socket down.
+const IdleWatchdog = struct {
+    io: std.Io,
+    handle: std.Io.net.Socket.Handle,
+    idle_ms: u32,
+    progress: std.atomic.Value(u64) = .init(0),
+    done: std.atomic.Value(bool) = .init(false),
+    fired: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn arm(self: *IdleWatchdog) void {
+        self.thread = std.Thread.spawn(.{}, run, .{self}) catch null;
+    }
+
+    fn run(self: *IdleWatchdog) void {
+        var seen = self.progress.load(.acquire);
+        var still_ms: u32 = 0;
+        while (!self.done.load(.acquire)) {
+            std.Io.sleep(self.io, .fromMilliseconds(20), .awake) catch return;
+            const now = self.progress.load(.acquire);
+            if (now != seen) {
+                seen = now;
+                still_ms = 0;
+                continue;
+            }
+            still_ms += 20;
+            if (still_ms >= self.idle_ms) {
+                self.fired.store(true, .release);
+                @import("auth_host.zig").shutdownSocket(self.handle);
+                return;
+            }
+        }
+    }
+
+    fn tick(self: *IdleWatchdog) void {
+        _ = self.progress.fetchAdd(1, .acq_rel);
+    }
+
+    /// True when the deadline had passed.
+    fn disarm(self: *IdleWatchdog) bool {
+        self.done.store(true, .release);
+        if (self.thread) |t| t.join();
+        self.thread = null;
+        return self.fired.load(.acquire);
+    }
+};
+
+pub const FetchLimits = struct { idle_ms: u32 = read_idle_ms, max_bytes: u64 };
+
+/// GET `url` into `sink`, following redirects (`redirectProblem`), with an
+/// inactivity deadline and a byte cap; the body's SHA-256 goes to `hash`.
+pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256) !Download {
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var current = try gpa.dupe(u8, url);
+    defer gpa.free(current);
+    var seen_https = false;
+    var hops: usize = 0;
+    while (true) {
+        const uri = std.Uri.parse(current) catch return error.InvalidRedirect;
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) seen_https = true;
+        var req = try client.request(.GET, uri, .{
+            .redirect_behavior = .unhandled,
+            .keep_alive = false,
+            .headers = .{ .user_agent = .{ .override = "harness-engine-zig" } },
+        });
+        defer req.deinit();
+        var dog: IdleWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .idle_ms = limits.idle_ms };
+        dog.arm();
+        const step = fetchStep(gpa, &req, limits, sink, hash, &dog);
+        const fired = dog.disarm();
+        if (fired) return error.Timeout;
+        switch (try step) {
+            .done => |d| return d,
+            .redirect => |next| {
+                defer gpa.free(next);
+                if (redirectProblem(seen_https, hops, next)) |why| {
+                    return if (std.mem.eql(u8, why, "update redirect would downgrade HTTPS"))
+                        error.RedirectDowngrade
+                    else if (std.mem.eql(u8, why, "too many update redirects")) error.TooManyRedirects else error.InvalidRedirect;
+                }
+                hops += 1;
+                gpa.free(current);
+                current = try gpa.dupe(u8, next);
+            },
+        }
+    }
+}
+
+const Step = union(enum) { done: Download, redirect: []u8 };
+
+fn fetchStep(gpa: Allocator, req: *std.http.Client.Request, limits: FetchLimits, sink: *std.Io.Writer, hash: *std.crypto.hash.sha2.Sha256, dog: *IdleWatchdog) !Step {
+    try req.sendBodiless();
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+    dog.tick();
+    const status: u16 = @backingInt(response.head.status);
+    if (status >= 300 and status < 400) {
+        if (response.head.location) |loc| return .{ .redirect = try absoluteLocation(gpa, req.uri, loc) };
+    }
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try gpa.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try gpa.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+    defer gpa.free(decompress_buffer);
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    var buf: [64 * 1024]u8 = undefined;
+    var size: u64 = 0;
+    while (true) {
+        const n = reader.readSliceShort(&buf) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
+        };
+        if (n > 0) {
+            size += n;
+            if (size > limits.max_bytes) return error.TooLarge;
+            hash.update(buf[0..n]);
+            try sink.writeAll(buf[0..n]);
+            dog.tick();
+        }
+        if (n < buf.len) break;
+    }
+    try sink.flush();
+    var out: Download = .{ .status = status, .sha256 = undefined, .size = size };
+    hash.final(&out.sha256);
+    return .{ .done = out };
+}
+
+/// A `Location` as an absolute URL: absolute ones as they are, `/path` on the same origin.
+fn absoluteLocation(gpa: Allocator, base: std.Uri, loc: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, loc, "://") != null) return gpa.dupe(u8, loc);
+    if (!std.mem.startsWith(u8, loc, "/")) return error.InvalidRedirect;
+    const host = switch (base.host orelse return error.InvalidRedirect) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    };
+    if (base.port) |port| return std.fmt.allocPrint(gpa, "{s}://{s}:{d}{s}", .{ base.scheme, host, port, loc });
+    return std.fmt.allocPrint(gpa, "{s}://{s}{s}", .{ base.scheme, host, loc });
+}
+
+fn engineIo(ctx: ?*anyopaque) std.Io {
+    const io: *std.Io = @ptrCast(@alignCast(ctx.?));
+    return io.*;
+}
+
+fn stdGet(ctx: ?*anyopaque, gpa: Allocator, url: []const u8) anyerror!HttpReply {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    const got = try fetchInto(gpa, engineIo(ctx), url, .{ .max_bytes = max_manifest_bytes }, &aw.writer, &hash);
+    return .{ .status = got.status, .body = try aw.toOwnedSlice() };
+}
+
+/// Streams the body to a new file at `dest` (never held in memory).
+pub fn stdDownload(ctx: ?*anyopaque, gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8, max_bytes: u64) anyerror!Download {
+    _ = ctx;
+    return downloadTo(gpa, io, url, dest, .{ .max_bytes = max_bytes });
+}
+
+pub fn downloadTo(gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8, limits: FetchLimits) !Download {
+    const file = try std.Io.Dir.cwd().createFile(io, dest, .{ .truncate = true });
+    defer file.close(io);
+    var wbuf: [64 * 1024]u8 = undefined;
+    var fw = file.writer(io, &wbuf);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    return fetchInto(gpa, io, url, limits, &fw.interface, &hash);
+}
 
 /// The engine's updater for `host` (an `*EngineHost`), started once: the
-/// release check thread runs for managed and app installs.
+/// release check thread runs for managed and app installs. Another host's
+/// updater is replaced (its check thread, if any, must have ended).
 pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
-    if (engine_state) |*e| return &e.updater;
+    if (engine_state) |*e| {
+        if (e.host == @as(*anyopaque, host)) return &e.updater;
+        if (e.started) return error.UpdaterInUse;
+        freeState();
+    }
     const gpa = std.heap.smp_allocator;
     var install: Install = .{ .kind = .unmanaged };
     var exe_buf: [4096]u8 = undefined;
     var root_buf: [4096]u8 = undefined;
     if (host.io) |io| {
-        engine_io = io;
         if (std.process.executablePath(io, &exe_buf)) |n| {
             const found = detectInstallFrom(exe_buf[0..n], proc.getenv("HOME"), builtin.os.tag, &root_buf, io, isDevBundleAt);
             install = .{ .kind = found.kind, .path = try gpa.dupe(u8, found.path) };
@@ -579,7 +860,8 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
     };
     engine_state = .{
         .host = host,
-        .sys_runner = .{ .io = engine_io },
+        .io = host.io,
+        .sys_runner = if (host.io) |io| .{ .io = io } else null,
         .updater = .{
             .gpa = gpa,
             .io = host.io,
@@ -588,7 +870,7 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
             .edge_url = try gpa.dupe(u8, host.auth.edge_url orelse ""),
             .current_version = @import("build_info").version,
             .releases_override = override,
-            .http = .{ .ctx = &engine_io, .get_fn = stdGet },
+            .http = .{ .get_fn = stdGet, .download_fn = stdDownload },
             .runner = .{ .run_fn = noSpawn },
             .restarter = .{ .restart_fn = Wiring(Host).restart },
             .quiescent_fn = Wiring(Host).quiescent,
@@ -597,7 +879,13 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
     const e = &engine_state.?;
     e.updater.quiescent_ctx = host;
     e.updater.restarter.ctx = host;
-    if (host.io != null) e.updater.runner = e.sys_runner.runner();
+    if (e.io != null) {
+        e.updater.http.ctx = &e.io.?;
+        e.updater.runner = e.sys_runner.?.runner();
+    } else {
+        // No I/O, no network: a check fails instead of reading an unset `Io`.
+        e.updater.http = .{ .get_fn = noNetwork };
+    }
     if (host.io != null and install.checksReleases()) {
         _ = host.bg_workers_active.fetchAdd(1, .acq_rel);
         if (std.Thread.spawn(.{}, Wiring(Host).loop, .{host})) |th| {
@@ -608,6 +896,28 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
         }
     }
     return &e.updater;
+}
+
+fn noNetwork(_: ?*anyopaque, _: Allocator, _: []const u8) anyerror!HttpReply {
+    return error.NoNetworkIo;
+}
+
+fn freeState() void {
+    if (engine_state) |*e| {
+        e.updater.deinit();
+        if (e.updater.install.path.len > 0) std.heap.smp_allocator.free(e.updater.install.path);
+        std.heap.smp_allocator.free(e.updater.edge_url);
+        if (e.updater.releases_override) |o| std.heap.smp_allocator.free(o);
+    }
+    engine_state = null;
+}
+
+/// `host` is going away (its background workers have ended): forget its
+/// updater, so nothing keeps a pointer to it.
+pub fn releaseHost(host: *anyopaque) void {
+    const e = engine_state orelse return;
+    if (e.host != host) return;
+    freeState();
 }
 
 /// Whether the engine's updater is set up (the engine does it at start-up).
@@ -627,14 +937,8 @@ pub fn publishStatus(comptime Host: type, host: *Host) void {
 
 /// Tests: forget the engine's updater (only when no check thread runs).
 pub fn resetForTests() void {
-    if (engine_state) |*e| {
-        if (e.started) return;
-        e.updater.deinit();
-        if (e.updater.install.path.len > 0) std.heap.smp_allocator.free(e.updater.install.path);
-        std.heap.smp_allocator.free(e.updater.edge_url);
-        if (e.updater.releases_override) |o| std.heap.smp_allocator.free(o);
-    }
-    engine_state = null;
+    if (engine_state) |e| if (e.started) return;
+    freeState();
 }
 
 fn noSpawn(_: ?*anyopaque, gpa: Allocator, _: proc.Request) Allocator.Error!proc.Output {
@@ -812,7 +1116,7 @@ fn Wiring(comptime Host: type) type {
                 var i: usize = 1;
                 while (i < argc) : (i += 1) argv.append(gpa, std.mem.span(raw[i])) catch return;
             } else if (builtin.os.tag == .linux) {
-                const io = engine_io;
+                const io = (engine_state orelse return).io orelse return;
                 const text = std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/cmdline", gpa, .limited(1 << 20)) catch return;
                 var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\x00"), 0);
                 _ = it.next();
@@ -1088,8 +1392,14 @@ test "updates: a queued update waits for idle, then applies and restarts" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
+    const artifact = try headlessArtifactAlloc(testing.allocator, "0.2.102");
+    defer testing.allocator.free(artifact);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("bytes", &digest, .{});
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{{\"version\":\"0.2.102\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    defer testing.allocator.free(manifest);
     var fh: FakeHttp = .{ .routes = &.{
-        .{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"0.2.102\"}" },
+        .{ .suffix = "/manifest.json", .status = 200, .body = manifest },
         .{ .suffix = ".tar.gz", .status = 200, .body = "bytes" },
     } };
     var fr: FakeRestart = .{};
@@ -1117,7 +1427,272 @@ test "updates: a queued update waits for idle, then applies and restarts" {
 test "updates: a target device this engine can't reach is refused" {
     const p = try json.parseFromSlice(json.Value, testing.allocator, "{\"targetDeviceId\":\"other\"}", .{});
     defer p.deinit();
-    try testing.expectEqualStrings("target device not connected", targetProblem(p.value, "dev-local").?);
+    try testing.expectEqualStrings("cannot reach device other: remote routing unavailable (offline)", targetProblem(p.value, "dev-local").?);
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(p.value, "other"));
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(.{ .object = .empty }, "dev-local"));
+}
+
+test "fix-sec 6: a release version must be a plain version before it names a path" {
+    try testing.expect(validVersion("0.2.101"));
+    try testing.expect(validVersion("1.0.0-rc.1+build.5"));
+    for ([_][]const u8{ "", ".", "..", "../../etc", "0.2/../../x", "0.2 1", "a;b", "0.2.1\x00" }) |v| try testing.expect(!validVersion(v));
+
+    var noop = proc.FakeRunner.init(testing.allocator, &.{});
+    defer noop.deinit();
+    var fr: FakeRestart = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var bad_manifest: FakeHttp = .{ .routes = &.{.{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"../../../tmp/x\"}" }} };
+    var u = testUpdater(.managed, "/nowhere", bad_manifest.http(), noop.runner(), fr.restarter(), null);
+    defer u.deinit();
+    try testing.expect(std.mem.startsWith(u8, (try u.fetchLatest(arena.allocator())).err, "manifest.json names an invalid version"));
+    var bad_latest: FakeHttp = .{ .routes = &.{.{ .suffix = "/latest.txt", .status = 200, .body = "9.9.9/../../x\n" }} };
+    u.http = bad_latest.http();
+    try testing.expect(std.mem.startsWith(u8, (try u.fetchLatest(arena.allocator())).err, "latest.txt names an invalid version"));
+}
+
+test "fix-sec 6: a managed install never installs a tarball without a SHA-256" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    // The latest.txt fallback never has checksums.
+    var fh: FakeHttp = .{ .routes = &.{
+        .{ .suffix = "/latest.txt", .status = 200, .body = "0.2.101\n" },
+        .{ .suffix = ".tar.gz", .status = 200, .body = "unverified bytes" },
+    } };
+    var fr: FakeRestart = .{};
+    var tar = proc.FakeRunner.init(testing.allocator, &.{.{ .prefix = "tar -xzf", .effect = TarEffect.unpack }});
+    defer tar.deinit();
+    var u = testUpdater(.managed, root, fh.http(), tar.runner(), fr.restarter(), testing.io);
+    defer u.deinit();
+    const msg = (try handle(&u, testing.allocator, .apply)).failed;
+    try testing.expect(std.mem.indexOf(u8, msg, "refusing to install it unverified") != null);
+    try testing.expectEqual(@as(usize, 0), tar.calls.items.len);
+    try testing.expectEqual(@as(usize, 0), fr.count);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "current", .{}));
+}
+
+/// A made-up release server on 127.0.0.1 for the real download path.
+const ReleaseServer = struct {
+    const Route = struct { path: []const u8, head: []const u8, body: []const u8 = "", stall: bool = false };
+    server: std.Io.net.Server,
+    routes: []const Route,
+    stop: std.atomic.Value(bool) = .init(false),
+    release: std.Io.Event = .unset,
+    thread: ?std.Thread = null,
+
+    fn start(self: *ReleaseServer) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *ReleaseServer) void {
+        const io = testing.io;
+        while (!self.stop.load(.acquire)) {
+            var stream = self.server.accept(io) catch return;
+            defer stream.close(io);
+            if (self.stop.load(.acquire)) return;
+            var rbuf: [4096]u8 = undefined;
+            var rd = stream.reader(io, &rbuf);
+            const line = rd.interface.takeDelimiterInclusive('\n') catch continue;
+            var path_buf: [128]u8 = undefined;
+            var toks = std.mem.tokenizeScalar(u8, line, ' ');
+            _ = toks.next();
+            const target = toks.next() orelse continue;
+            const n = @min(target.len, path_buf.len);
+            @memcpy(path_buf[0..n], target[0..n]);
+            while (true) {
+                const h = rd.interface.takeDelimiterInclusive('\n') catch break;
+                if (std.mem.trim(u8, h, "\r\n").len == 0) break;
+            }
+            var wbuf: [4096]u8 = undefined;
+            var wr = stream.writer(io, &wbuf);
+            for (self.routes) |r| if (std.mem.eql(u8, r.path, path_buf[0..n])) {
+                wr.interface.writeAll(r.head) catch break;
+                wr.interface.writeAll(r.body) catch break;
+                wr.interface.flush() catch break;
+                if (r.stall) self.release.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } }) catch {};
+                break;
+            };
+        }
+    }
+
+    fn url(self: *ReleaseServer, buf: []u8, path: []const u8) []const u8 {
+        return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ self.server.socket.address.getPort(), path }) catch unreachable;
+    }
+
+    fn deinit(self: *ReleaseServer) void {
+        self.stop.store(true, .release);
+        self.release.set(testing.io);
+        if (std.Io.net.IpAddress.parse("127.0.0.1", self.server.socket.address.getPort())) |addr| {
+            if (addr.connect(testing.io, .{ .mode = .stream })) |c| c.close(testing.io) else |_| {}
+        } else |_| {}
+        if (self.thread) |t| t.join();
+        self.server.deinit(testing.io);
+    }
+};
+
+test "fix-sec 7: downloads stream to a file, follow redirects, and stop at a cap or a stall" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const dest = try std.fs.path.join(gpa, &.{ root, "artifact.partial" });
+    defer gpa.free(dest);
+    const body_bytes = comptime blk: {
+        const unit = "made-up release bytes ";
+        var b: [unit.len * 64]u8 = undefined;
+        for (0..64) |i| @memcpy(b[i * unit.len ..][0..unit.len], unit);
+        break :blk b;
+    };
+    const body: []const u8 = &body_bytes;
+    var len_buf: [128]u8 = undefined;
+    const ok_head = try std.fmt.bufPrint(&len_buf, "HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{body.len});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv: ReleaseServer = .{ .server = try addr.listen(io, .{ .reuse_address = true }), .routes = &.{
+        .{ .path = "/final", .head = ok_head, .body = body },
+        .{ .path = "/hop", .head = "HTTP/1.1 302 Found\r\nlocation: /final\r\ncontent-length: 0\r\nconnection: close\r\n\r\n" },
+        .{ .path = "/loop", .head = "HTTP/1.1 302 Found\r\nlocation: /loop\r\ncontent-length: 0\r\nconnection: close\r\n\r\n" },
+        .{ .path = "/stall", .head = "HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\n", .body = "partial", .stall = true },
+    } };
+    try srv.start();
+    defer srv.deinit();
+    var ubuf: [128]u8 = undefined;
+
+    // Followed redirect; the body goes to the file with its SHA-256.
+    const got = try downloadTo(gpa, io, srv.url(&ubuf, "/hop"), dest, .{ .max_bytes = 1 << 20 });
+    try testing.expectEqual(@as(u16, 200), got.status);
+    try testing.expectEqual(@as(u64, body.len), got.size);
+    var want: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &want, .{});
+    try testing.expectEqualSlices(u8, &want, &got.sha256);
+    var fbuf: [4096]u8 = undefined;
+    try testing.expectEqualStrings(body, try tmp.dir.readFile(io, "artifact.partial", &fbuf));
+
+    // Over the cap.
+    try testing.expectError(error.TooLarge, downloadTo(gpa, io, srv.url(&ubuf, "/final"), dest, .{ .max_bytes = 100 }));
+    // A redirect loop ends.
+    try testing.expectError(error.TooManyRedirects, downloadTo(gpa, io, srv.url(&ubuf, "/loop"), dest, .{ .max_bytes = 100 }));
+    // A server that stops sending fails at the idle deadline, not never.
+    const started = std.Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, downloadTo(gpa, io, srv.url(&ubuf, "/stall"), dest, .{ .max_bytes = 1 << 20, .idle_ms = 300 }));
+    try testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 5_000);
+
+    // Never from HTTPS to plain HTTP.
+    try testing.expectEqualStrings("update redirect would downgrade HTTPS", redirectProblem(true, 1, "http://127.0.0.1/x").?);
+    try testing.expectEqual(@as(?[]const u8, null), redirectProblem(true, 1, "https://objects.example/x"));
+    try testing.expectEqual(@as(?[]const u8, null), redirectProblem(false, 1, "http://127.0.0.1/x"));
+    try testing.expectEqualStrings("too many update redirects", redirectProblem(false, max_redirects, "https://a.example/").?);
+}
+
+test "fix-sec 7: a managed update streams the real download into place" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const tarball = "made-up tarball bytes";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(tarball, &digest, .{});
+    const artifact = try headlessArtifactAlloc(gpa, "0.2.101");
+    defer gpa.free(artifact);
+    const manifest = try std.fmt.allocPrint(gpa, "{{\"version\":\"0.2.101\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    defer gpa.free(manifest);
+    const path = try std.fmt.allocPrint(gpa, "/{s}", .{artifact});
+    defer gpa.free(path);
+    var hbuf: [128]u8 = undefined;
+    const head = try std.fmt.bufPrint(&hbuf, "HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{tarball.len});
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv: ReleaseServer = .{ .server = try addr.listen(io, .{ .reuse_address = true }), .routes = &.{.{ .path = path, .head = head, .body = tarball }} };
+    try srv.start();
+    defer srv.deinit();
+    var ubuf: [128]u8 = undefined;
+    const base = srv.url(&ubuf, "");
+
+    var fh: FakeHttp = .{ .routes = &.{.{ .suffix = "/manifest.json", .status = 200, .body = manifest }} };
+    var http = fh.http();
+    http.download_fn = stdDownload;
+    var fr: FakeRestart = .{};
+    var tar = proc.FakeRunner.init(gpa, &.{.{ .prefix = "tar -xzf", .effect = TarEffect.unpack }});
+    defer tar.deinit();
+    var u = testUpdater(.managed, root, http, tar.runner(), fr.restarter(), io);
+    defer u.deinit();
+    u.releases_override = base;
+    const r = (try handle(&u, gpa, .apply)).ok;
+    defer gpa.free(r);
+    try testing.expectEqualStrings("{\"ok\":true,\"version\":\"0.2.101\"}", r);
+    try testing.expectEqual(@as(usize, 1), fr.count);
+}
+
+test "fix-sec 8: the engine's updater belongs to one host and goes with it" {
+    const engine_host = @import("engine_host.zig");
+    resetForTests();
+    defer resetForTests();
+    {
+        var first = try engine_host.EngineHost.init(testing.allocator, "dev-first", "Synthetic");
+        defer first.deinit();
+        _ = try forEngine(engine_host.EngineHost, &first);
+        try testing.expectEqual(@as(?*anyopaque, &first), configuredHost());
+    }
+    // The host went away: nothing points at it any more.
+    try testing.expectEqual(@as(?*anyopaque, null), configuredHost());
+    var second = try engine_host.EngineHost.init(testing.allocator, "dev-second", "Synthetic");
+    defer second.deinit();
+    const u = try forEngine(engine_host.EngineHost, &second);
+    try testing.expectEqual(@as(?*anyopaque, &second), configuredHost());
+    // Without I/O a check fails cleanly instead of touching an unset `Io`.
+    try testing.expect(!(try u.checkOnce(1)));
+    try testing.expectEqual(Phase.failed, u.phase);
+}
+
+const AppTarEffect = struct {
+    fn unpack(_: ?*anyopaque, req: proc.Request) void {
+        // argv: tar -xzf <tarball> -C <dir>
+        var buf: [1024]u8 = undefined;
+        const d = std.fmt.bufPrint(&buf, "{s}/Harness.app/Contents/MacOS", .{req.argv[4]}) catch return;
+        std.Io.Dir.cwd().createDirPath(testing.io, d) catch return;
+        var b2: [1024]u8 = undefined;
+        const p = std.fmt.bufPrint(&b2, "{s}/harness", .{d}) catch return;
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = "#!/bin/sh\n" }) catch return;
+    }
+};
+
+test "fix-sec 8: stage_mac_app requires the tarball's checksum and stages Harness.app" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(data_dir);
+    const artifact = try macAppArtifactAlloc(gpa, "0.2.101");
+    defer gpa.free(artifact);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("app bytes", &digest, .{});
+    var fh: FakeHttp = .{ .routes = &.{.{ .suffix = "-app.tar.gz", .status = 200, .body = "app bytes" }} };
+    var fr: FakeRestart = .{};
+    var tar = proc.FakeRunner.init(gpa, &.{.{ .prefix = "tar -xzf", .effect = AppTarEffect.unpack }});
+    defer tar.deinit();
+    var u = testUpdater(.mac_app, "/Applications/Harness.app", fh.http(), tar.runner(), fr.restarter(), testing.io);
+    defer u.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const unverified = try json.parseFromSliceLeaky(json.Value, a, "{\"files\":{}}", .{});
+    const missing = try u.stageMacApp(a, .{ .version = "0.2.101", .files = unverified.object.get("files").?.object }, data_dir);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "stable macOS update is missing the {s} checksum", .{artifact}), missing.err);
+    try testing.expectEqual(@as(usize, 0), fh.calls);
+
+    const files_text = try std.fmt.allocPrint(a, "{{\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    const verified = try json.parseFromSliceLeaky(json.Value, a, files_text, .{});
+    const staged = try u.stageMacApp(a, .{ .version = "0.2.101", .files = verified.object.get("files").?.object }, data_dir);
+    try testing.expect(std.mem.endsWith(u8, staged.ok, "/updates/0.2.101/Harness.app"));
+    // Staged once: a second call reuses it.
+    _ = try u.stageMacApp(a, .{ .version = "0.2.101", .files = verified.object.get("files").?.object }, data_dir);
+    try testing.expectEqual(@as(usize, 1), tar.calls.items.len);
 }
