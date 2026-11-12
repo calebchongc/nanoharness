@@ -31,6 +31,8 @@ pub const Command = union(enum) {
     logout,
     /// The MCP server on stdin/stdout.
     mcp,
+    /// Install a newer release for this install (`harness update`).
+    update,
     daemon: DaemonAction,
 };
 
@@ -46,6 +48,7 @@ pub const usage =
     \\  status     Show workspace mode, optional auth, and engine status
     \\  sync       Show the running engine's sync state
     \\  mcp        Serve the Harness MCP server on stdin/stdout
+    \\  update     Install a newer release for this install
     \\  daemon     install | uninstall | start | stop | restart | status
     \\  version    Print the version
     \\
@@ -61,6 +64,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     const simple = [_]struct { []const u8, Command }{
         .{ "headless", .headless }, .{ "status", .status },   .{ "sync", .sync },
         .{ "login", .login },       .{ "logout", .logout },   .{ "mcp", .mcp },
+        .{ "update", .update },
         .{ "version", .version },   .{ "--version", .version }, .{ "-V", .version },
         .{ "help", .help },         .{ "--help", .help },     .{ "-h", .help },
     };
@@ -1421,4 +1425,10 @@ test "fix-sec 18: the default project is a git checkout only when it is one" {
     try Io.Dir.cwd().createDirPath(testing.io, git);
     try testing.expect(gitDetected(testing.io, dir));
     try testing.expect(!gitDetected(testing.io, "/nonexistent-synthetic-project"));
+}
+
+test "engine_cli: `update` is a command, as `harness update` was" {
+    try std.testing.expectEqual(Command.update, try parse(&.{"update"}));
+    try std.testing.expectError(error.UnexpectedArgument, parse(&.{ "update", "now" }));
+    try std.testing.expect(std.mem.indexOf(u8, usage, "  update ") != null);
 }

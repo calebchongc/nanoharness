@@ -24,6 +24,12 @@ pub const check_backoff_ms = [_]i64{ 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_00
 pub const check_initial_delay_ms: i64 = 20_000;
 pub const idle_recheck_ms: i64 = 5 * 60_000;
 pub const launchd_label = "harness.codegraff.app";
+/// The executables a Zig release ships: the engine (what a managed install
+/// runs from `current/`) and the app inside `Harness.app`. Never the Rust
+/// `harness`.
+pub const engine_bin = if (builtin.os.tag == .windows) "harness-engine.exe" else "harness-engine";
+pub const app_bin = "harness-nano";
+
 pub const github_latest = "https://github.com/justrach/harness/releases/latest/download";
 
 // ---------------------------------------------------------------- pure rules
@@ -411,7 +417,7 @@ pub const Updater = struct {
             return try std.fmt.allocPrint(arena, "managed updates are not supported on {s}", .{@tagName(builtin.os.tag)});
         const io = self.io orelse return "updates need file access";
         const dest = try std.fmt.allocPrint(arena, "{s}/{s}", .{ app_root, m.version });
-        const dest_bin = try std.fmt.allocPrint(arena, "{s}/harness", .{dest});
+        const dest_bin = try std.fmt.allocPrint(arena, "{s}/" ++ engine_bin, .{dest});
         if (exists(io, dest_bin)) return null;
         const file = try headlessArtifactAlloc(arena, m.version);
         var rnd: [6]u8 = undefined;
@@ -432,8 +438,8 @@ pub const Updater = struct {
                 tarball, unpacked, @tagName(out.term), std.mem.trim(u8, out.stderr, " \t\r\n"),
             });
         }
-        const bin = try std.fmt.allocPrint(arena, "{s}/harness", .{unpacked});
-        if (!exists(io, bin)) return try std.fmt.allocPrint(arena, "tarball {s} did not contain a harness binary", .{file});
+        const bin = try std.fmt.allocPrint(arena, "{s}/" ++ engine_bin, .{unpacked});
+        if (!exists(io, bin)) return try std.fmt.allocPrint(arena, "tarball {s} did not contain a " ++ engine_bin ++ " binary", .{file});
         std.Io.Dir.rename(std.Io.Dir.cwd(), unpacked, std.Io.Dir.cwd(), dest, io) catch |e| {
             if (!exists(io, dest_bin)) return try std.fmt.allocPrint(arena, "moving {s} into place: {s}", .{ dest, @errorName(e) });
         };
@@ -473,8 +479,39 @@ pub const Updater = struct {
     fn stagedMacApp(arena: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
         for ([_][]const u8{ "Harness.app", "Harnesser.app" }) |name| {
             const bundle = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, name });
-            if (exists(io, try std.fmt.allocPrint(arena, "{s}/Contents/MacOS/harness", .{bundle}))) return bundle;
+            if (exists(io, try std.fmt.allocPrint(arena, "{s}/Contents/MacOS/" ++ app_bin, .{bundle}))) return bundle;
         }
+        return null;
+    }
+
+    /// `apply_mac_app`: copy the staged bundle next to the installed one
+    /// (`ditto`, metadata-preserving), then two renames; if the second fails
+    /// the old bundle is put back. Null on success, else why.
+    pub fn applyMacApp(self: *Updater, arena: Allocator, staged: []const u8, bundle: []const u8) !?[]const u8 {
+        if (builtin.os.tag != .macos) return "macOS app updates are not supported on this platform";
+        const io = self.io orelse return "updates need file access";
+        const parent = std.fs.path.dirname(bundle) orelse return "app bundle has no parent directory";
+        const name = std.fs.path.basename(bundle);
+        var rnd: [6]u8 = undefined;
+        io.random(&rnd);
+        const fresh = try std.fmt.allocPrint(arena, "{s}/.{s}.new-{x}", .{ parent, name, rnd });
+        const old = try std.fmt.allocPrint(arena, "{s}/.{s}.old-{x}", .{ parent, name, rnd });
+        std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
+        var out = try self.runner.run(arena, .{ .argv = &.{ "ditto", staged, fresh }, .timeout_ms = 10 * 60_000 });
+        if (!out.ok()) {
+            std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
+            return try std.fmt.allocPrint(arena, "ditto {s} {s} failed ({s}): {s}", .{ staged, fresh, @tagName(out.term), std.mem.trim(u8, out.stderr, " \t\r\n") });
+        }
+        std.Io.Dir.rename(std.Io.Dir.cwd(), bundle, std.Io.Dir.cwd(), old, io) catch |e| {
+            std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
+            return try std.fmt.allocPrint(arena, "moving the current app aside: {s}", .{@errorName(e)});
+        };
+        std.Io.Dir.rename(std.Io.Dir.cwd(), fresh, std.Io.Dir.cwd(), bundle, io) catch |e| {
+            std.Io.Dir.rename(std.Io.Dir.cwd(), old, std.Io.Dir.cwd(), bundle, io) catch {};
+            std.Io.Dir.cwd().deleteTree(io, fresh) catch {};
+            return try std.fmt.allocPrint(arena, "installing the new app bundle: {s}", .{@errorName(e)});
+        };
+        std.Io.Dir.cwd().deleteTree(io, old) catch {};
         return null;
     }
 
@@ -482,7 +519,7 @@ pub const Updater = struct {
     pub fn applyHeadless(self: *Updater, arena: Allocator, app_root: []const u8, version: []const u8) !?[]const u8 {
         const io = self.io orelse return "updates need file access";
         const target = try std.fmt.allocPrint(arena, "{s}/{s}", .{ app_root, version });
-        if (!exists(io, try std.fmt.allocPrint(arena, "{s}/harness", .{target})))
+        if (!exists(io, try std.fmt.allocPrint(arena, "{s}/" ++ engine_bin, .{target})))
             return try std.fmt.allocPrint(arena, "{s} is not a staged install", .{target});
         var rnd: [6]u8 = undefined;
         io.random(&rnd);
@@ -832,6 +869,111 @@ pub fn downloadTo(gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8,
     return fetchInto(gpa, io, url, limits, &fw.interface, &hash);
 }
 
+/// `harness-engine update` (`update_cli.rs`): check the release feed and
+/// install a newer release for this install: swap the app bundle (macOS app),
+/// or stage and repoint `current` (managed). Prints Rust's lines, which the
+/// app's update view reads ("is up to date", "relaunch Harness to finish").
+/// Exit code: 0 done or up to date, 1 failed.
+pub fn updateCommand(u: *Updater, arena: Allocator, data_dir: ?[]const u8, out: *std.Io.Writer, err_w: *std.Io.Writer) !u8 {
+    const m = switch (try u.fetchLatest(arena)) {
+        .ok => |m| m,
+        .err => |e| {
+            try err_w.print("error: {s}\n", .{e});
+            return 1;
+        },
+    };
+    if (!versionNewer(m.version, u.current_version)) {
+        try out.print("Harness {s} is up to date (latest: {s}).\n", .{ u.current_version, m.version });
+        return 0;
+    }
+    try out.print("Harness {s} \u{2192} {s} available\n", .{ u.current_version, m.version });
+    switch (u.install.kind) {
+        .mac_app => {
+            try out.print("downloading {s}\u{2026}\n", .{try macAppArtifactAlloc(arena, m.version)});
+            try out.flush();
+            const dir = data_dir orelse {
+                try err_w.writeAll("error: no data folder to stage the update in\n");
+                return 1;
+            };
+            const staged = switch (try u.stageMacApp(arena, m, dir)) {
+                .ok => |p| p,
+                .err => |e| {
+                    try err_w.print("error: {s}\n", .{e});
+                    return 1;
+                },
+            };
+            if (try u.applyMacApp(arena, staged, u.install.path)) |e| {
+                try err_w.print("error: {s}\n", .{e});
+                return 1;
+            }
+            try out.print("updated {s} \u{2014} relaunch Harness to finish.\n", .{u.install.path});
+        },
+        .managed => {
+            try out.print("downloading {s}\u{2026}\n", .{try headlessArtifactAlloc(arena, m.version)});
+            try out.flush();
+            if (try u.stageHeadless(arena, m, u.install.path)) |e| {
+                try err_w.print("error: {s}\n", .{e});
+                return 1;
+            }
+            if (try u.applyHeadless(arena, u.install.path, m.version)) |e| {
+                try err_w.print("error: {s}\n", .{e});
+                return 1;
+            }
+            try out.print("installed {s}/{s} (current \u{2192} {s})\n", .{ u.install.path, m.version, m.version });
+            try out.writeAll("note: restart the engine to finish (harness-engine daemon restart).\n");
+        },
+        .unmanaged => {
+            try err_w.writeAll("error: this binary is not update-managed (source build or hand-copied).\n");
+            return 1;
+        },
+    }
+    return 0;
+}
+
+/// `updateCommand` for this process's own install: install detection from
+/// the executable's path, the release feed from `edge_url` (or
+/// `HARNESS_RELEASES_URL`), real downloads and processes.
+pub fn runUpdateCommand(gpa: Allocator, io: std.Io, edge_url: []const u8, data_dir: ?[]const u8, out: *std.Io.Writer, err_w: *std.Io.Writer) !u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var install: Install = .{ .kind = .unmanaged };
+    var exe_buf: [4096]u8 = undefined;
+    var root_buf: [4096]u8 = undefined;
+    if (std.process.executablePath(io, &exe_buf)) |n| {
+        const found = detectInstallFrom(exe_buf[0..n], proc.getenv("HOME"), builtin.os.tag, &root_buf, io, isDevBundleAt);
+        install = .{ .kind = found.kind, .path = try arena.dupe(u8, found.path) };
+    } else |_| {}
+    var override: ?[]const u8 = null;
+    if (proc.getenv("HARNESS_RELEASES_URL")) |raw| if (std.mem.trim(u8, raw, " \t\r\n").len > 0) {
+        switch (validateReleaseOverride(arena, raw)) {
+            .ok => |o| override = o,
+            .err => |e| {
+                try err_w.print("error: HARNESS_RELEASES_URL: {s}\n", .{e});
+                return 1;
+            },
+        }
+    };
+    var io_slot = io;
+    var sys: proc.SystemRunner = .{ .io = io };
+    var u: Updater = .{
+        .gpa = gpa,
+        .io = io,
+        .install = install,
+        .automatic = false,
+        .edge_url = edge_url,
+        .current_version = @import("build_info").version,
+        .releases_override = override,
+        .http = .{ .ctx = &io_slot, .get_fn = stdGet, .download_fn = stdDownload },
+        .runner = sys.runner(),
+        .restarter = .{ .restart_fn = noRestart },
+    };
+    defer u.deinit();
+    return updateCommand(&u, arena, data_dir, out, err_w);
+}
+
+fn noRestart(_: ?*anyopaque, _: []const u8) void {}
+
 /// The engine's updater for `host` (an `*EngineHost`), started once: the
 /// release check thread runs for managed and app installs. Another host's
 /// updater is replaced (its check thread, if any, must have ended).
@@ -1088,7 +1230,7 @@ fn Wiring(comptime Host: type) type {
             return out.ok();
         }
 
-        /// Replace this process with `app_root/current/harness`, same arguments.
+        /// Replace this process with `app_root/current/harness-engine`, same arguments.
         fn reexec(host: *Host, io: std.Io, app_root: []const u8) void {
             {
                 host.mutex.lockUncancelable(io);
@@ -1097,7 +1239,7 @@ fn Wiring(comptime Host: type) type {
             }
             const gpa = std.heap.smp_allocator;
             var argv: std.ArrayList([]const u8) = .empty;
-            const exe = std.fmt.allocPrint(gpa, "{s}/current/harness", .{app_root}) catch return;
+            const exe = std.fmt.allocPrint(gpa, "{s}/current/" ++ engine_bin, .{app_root}) catch return;
             argv.append(gpa, exe) catch return;
             ownArgs(gpa, &argv);
             std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
@@ -1197,7 +1339,8 @@ test "updates: release feed override must be a plain https base" {
 
 /// Made-up releases: url suffix → reply.
 const FakeHttp = struct {
-    routes: []const struct { suffix: []const u8, status: u16, body: []const u8 },
+    const Route = struct { suffix: []const u8, status: u16, body: []const u8 };
+    routes: []const Route,
     calls: usize = 0,
 
     fn http(self: *FakeHttp) Http {
@@ -1310,7 +1453,7 @@ const TarEffect = struct {
     fn unpack(_: ?*anyopaque, req: proc.Request) void {
         // argv: tar -xzf <tarball> -C <unpacked> --strip-components=1
         var buf: [1024]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}/harness", .{req.argv[4]}) catch return;
+        const p = std.fmt.bufPrint(&buf, "{s}/" ++ engine_bin, .{req.argv[4]}) catch return;
         std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = "#!/bin/sh\n" }) catch return;
     }
 };
@@ -1657,7 +1800,7 @@ const AppTarEffect = struct {
         const d = std.fmt.bufPrint(&buf, "{s}/Harness.app/Contents/MacOS", .{req.argv[4]}) catch return;
         std.Io.Dir.cwd().createDirPath(testing.io, d) catch return;
         var b2: [1024]u8 = undefined;
-        const p = std.fmt.bufPrint(&b2, "{s}/harness", .{d}) catch return;
+        const p = std.fmt.bufPrint(&b2, "{s}/" ++ app_bin, .{d}) catch return;
         std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = "#!/bin/sh\n" }) catch return;
     }
 };
@@ -1695,4 +1838,79 @@ test "fix-sec 8: stage_mac_app requires the tarball's checksum and stages Harnes
     // Staged once: a second call reuses it.
     _ = try u.stageMacApp(a, .{ .version = "0.2.101", .files = verified.object.get("files").?.object }, data_dir);
     try testing.expectEqual(@as(usize, 1), tar.calls.items.len);
+}
+
+const DittoEffect = struct {
+    // argv: ditto <staged> <fresh>: a copy carrying the staged marker.
+    fn copy(_: ?*anyopaque, req: proc.Request) void {
+        var buf: [1024]u8 = undefined;
+        const d = std.fmt.bufPrint(&buf, "{s}/Contents/MacOS", .{req.argv[2]}) catch return;
+        std.Io.Dir.cwd().createDirPath(testing.io, d) catch return;
+        var b2: [1024]u8 = undefined;
+        const p = std.fmt.bufPrint(&b2, "{s}/" ++ app_bin, .{d}) catch return;
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = "new release\n" }) catch return;
+    }
+};
+
+test "updates: `harness-engine update` swaps a macOS app for the verified release and says to relaunch" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(base);
+    try tmp.dir.createDirPath(testing.io, "Applications/Harness.app/Contents/MacOS");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "Applications/Harness.app/Contents/MacOS/" ++ app_bin, .data = "old release\n" });
+    try tmp.dir.createDirPath(testing.io, "data");
+    const bundle = try std.fs.path.join(gpa, &.{ base, "Applications", "Harness.app" });
+    defer gpa.free(bundle);
+    const data_dir = try std.fs.path.join(gpa, &.{ base, "data" });
+    defer gpa.free(data_dir);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("app bytes", &digest, .{});
+    const artifact = try macAppArtifactAlloc(a, "0.2.101");
+    const manifest = try std.fmt.allocPrint(a, "{{\"version\":\"0.2.101\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    const routes = [_]FakeHttp.Route{
+        .{ .suffix = "/manifest.json", .status = 200, .body = manifest },
+        .{ .suffix = "-app.tar.gz", .status = 200, .body = "app bytes" },
+    };
+    var fh: FakeHttp = .{ .routes = &routes };
+    var fr: FakeRestart = .{};
+    var runner = proc.FakeRunner.init(gpa, &.{
+        .{ .prefix = "tar -xzf", .effect = AppTarEffect.unpack },
+        .{ .prefix = "ditto", .effect = DittoEffect.copy },
+    });
+    defer runner.deinit();
+    var u = testUpdater(.mac_app, bundle, fh.http(), runner.runner(), fr.restarter(), testing.io);
+    defer u.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var err_out: std.Io.Writer.Allocating = .init(gpa);
+    defer err_out.deinit();
+    try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "relaunch Harness to finish.") != null);
+    try testing.expectEqualStrings("", err_out.written());
+    // The installed bundle is the new one, and nothing is left beside it.
+    const now = try tmp.dir.readFileAlloc(testing.io, "Applications/Harness.app/Contents/MacOS/" ++ app_bin, a, .limited(64));
+    try testing.expectEqualStrings("new release\n", now);
+    var apps = try tmp.dir.openDir(testing.io, "Applications", .{ .iterate = true });
+    defer apps.close(testing.io);
+    var it = apps.iterate();
+    var entries: usize = 0;
+    while (try it.next(testing.io)) |_| entries += 1;
+    try testing.expectEqual(@as(usize, 1), entries);
+    // The app's update view reads these lines (`classifyUpdateOutput`).
+    try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.staged, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), err_out.written()));
+
+    // Already current: says so, and the app reads it as up to date.
+    u.current_version = "0.2.101";
+    out.clearRetainingCapacity();
+    try testing.expectEqual(@as(u8, 0), try updateCommand(&u, a, data_dir, &out.writer, &err_out.writer));
+    try testing.expectEqualStrings("Harness 0.2.101 is up to date (latest: 0.2.101).\n", out.written());
+    try testing.expectEqual(@import("view_updates.zig").UpdateCommandOutcome.up_to_date, @import("view_updates.zig").classifyUpdateOutput(true, out.written(), ""));
 }

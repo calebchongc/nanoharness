@@ -146,6 +146,15 @@ pub fn main(init: std.process.Init) !void {
             .sync => try engine_cli.sync(ctx),
             .login => try engine_cli.login(ctx),
             .logout => try engine_cli.logout(ctx),
+            .update => blk: {
+                const dir: ?[]u8 = engine_cli.resolveDataDir(gpa, io, init.environ_map) catch null;
+                defer if (dir) |d| gpa.free(d);
+                var ebuf: [1024]u8 = undefined;
+                var ew = Io.File.stderr().writerStreaming(io, &ebuf);
+                defer ew.interface.flush() catch {};
+                const edge = engine_cli.AuthEnv.from(init.environ_map).edge_url;
+                break :blk try updates_host.runUpdateCommand(gpa, io, edge, dir, out, &ew.interface);
+            },
             .daemon => |action| blk: {
                 const dir = try engine_cli.resolveDataDir(gpa, io, init.environ_map);
                 defer gpa.free(dir);
