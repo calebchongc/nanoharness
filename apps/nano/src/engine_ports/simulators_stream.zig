@@ -795,6 +795,8 @@ const CaptureResult = union(enum) { ok: Captured, err: []const u8 };
 
 /// Run `argv` with `extra` env vars, killing it after `timeout_ms`.
 fn runCapture(a: Allocator, io: Io, argv: []const []const u8, extra: ?[2][]const u8, timeout_ms: i64) CaptureResult {
+    // Simulators are macOS-only; no POSIX signals on Windows.
+    if (comptime builtin.os.tag == .windows) return .{ .err = "simulators are not available on this platform" };
     if (comptime !std.process.can_spawn) return .{ .err = "spawn unsupported" };
     var env = currentEnv(a) catch return .{ .err = "out of memory" };
     defer env.deinit();
@@ -910,6 +912,7 @@ pub const Hub = struct {
     /// Start the host when the helper is installed; record its pid; wait for
     /// its ready line. Error texts are allocated in `a`.
     pub fn start(gpa: Allocator, io: Io, a: Allocator, o: Options) !Started {
+        if (comptime builtin.os.tag == .windows) return .{ .err = "simulators are not available on this platform" };
         const install = try std.fs.path.join(a, &.{ o.tools_dir, package, version });
         const middleware = try std.fs.path.join(a, &.{ install, "node_modules", package, "vendor", "serve-sim", "dist", "middleware.js" });
         var sbuf: [96]u8 = undefined;
@@ -1045,6 +1048,7 @@ fn fileReadable(f: Io.File, ms: i32) bool {
 /// The process's start time in the platform's own unit (µs since the epoch
 /// on macOS, clock ticks since boot on Linux), if it is running.
 fn processStart(a: Allocator, io: Io, pid: std.posix.pid_t) ?u64 {
+    if (comptime builtin.os.tag == .windows) return null;
     if (pid <= 1) return null;
     switch (builtin.os.tag) {
         .macos => {
@@ -1091,7 +1095,8 @@ fn isRecordedHost(a: Allocator, io: Io, pid: std.posix.pid_t, started: u64, scri
 }
 
 fn signalGroup(pid: std.posix.pid_t, sig: std.posix.SIG) void {
-    if (pid <= 1 or comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.os.tag == .windows) return;
+    if (pid <= 1) return;
     const C = struct {
         extern "c" fn getpgid(pid: std.posix.pid_t) std.posix.pid_t;
     };
@@ -1101,6 +1106,7 @@ fn signalGroup(pid: std.posix.pid_t, sig: std.posix.SIG) void {
 /// An engine killed without cleanup may leave its host running; stop it, but
 /// only if the recorded pid still names that host.
 pub fn stopStale(a: Allocator, io: Io, pid_file: []const u8, script: []const u8) void {
+    if (comptime builtin.os.tag == .windows) return;
     const text = Io.Dir.cwd().readFileAlloc(io, pid_file, a, .limited(256)) catch return;
     Io.Dir.cwd().deleteFile(io, pid_file) catch {};
     var parts = std.mem.tokenizeAny(u8, text, " \n");
