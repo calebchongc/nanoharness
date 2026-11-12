@@ -1306,7 +1306,7 @@ test "mcp post_room: queues framed peer mail for mentioned chats and reports red
     const queued = w.lastWrite("QueueMessage").?;
     try testing.expectEqualStrings("chat-alpha-1", u.str(queued, "chatId").?);
     const text = u.str(queued, "text").?;
-    try testing.expect(peer.isRoomDelivery(text));
+    try testing.expect(peer.isRoomDelivery(w.arena.allocator(), text));
     try testing.expect(std.mem.indexOf(u8, text, "[room message from beta · room build #3 · agent, advisory]: @alpha the build is green") != null);
 
     // The room's refusals come back readable, and are not retried.

@@ -472,8 +472,8 @@ test "mcp rooms: a delivery opens with a tag the peer rules recognise" {
     defer arena.deinit();
     const a = arena.allocator();
     const text = try deliveryText(a, "room_0123456789abcdef01234567", "build -->", 7, "alpha", "hello");
-    try testing.expect(peer.isRoomDelivery(text));
-    try testing.expect(!peer.isHumanPrompt(text));
+    try testing.expect(peer.isRoomDelivery(a, text));
+    try testing.expect(!peer.isHumanPrompt(a, text));
     try testing.expect(std.mem.indexOf(u8, text, "build --\\u003e") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n[room message from alpha · room build --> #7 · agent, advisory]: hello\n\n(Another agent posted this") != null);
 }
