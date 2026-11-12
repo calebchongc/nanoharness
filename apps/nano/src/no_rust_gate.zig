@@ -183,6 +183,10 @@ pub fn scan(arena: std.mem.Allocator, io: std.Io, nano: std.Io.Dir, repo_scripts
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len > 2 and std.mem.eql(u8, args[2], "--with-loro")) {
+        std.debug.print("no-rust gate: -Dloro-lib links the retained Rust Loro core; this is not an all-Zig build\n", .{});
+        std.process.exit(1);
+    }
     const root = if (args.len > 1) args[1] else ".";
     var nano = try std.Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true });
     defer nano.close(init.io);

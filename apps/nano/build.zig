@@ -5,6 +5,11 @@ const build_rules = @import("src/build_rules.zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // An explicit, project-owned C ABI archive built by scripts/build-loro.sh.
+    // The default remains legacy/offline mode; a Loro build is NOT all-Zig.
+    const loro_lib = b.option([]const u8, "loro-lib", "Retained Loro C ABI static library (requires Rust)");
+    const sync_opts = b.addOptions();
+    sync_opts.addOption(bool, "loro_enabled", loro_lib != null);
     const lib_optimize = build_rules.httpZigOptimize(optimize, target.result.os.tag);
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
@@ -74,6 +79,7 @@ pub fn build(b: *std.Build) void {
     const info_mod = info_opts.createModule();
     const base_imports = [_]std.Build.Module.Import{
         .{ .name = "build_info", .module = info_mod },
+        .{ .name = "sync_options", .module = sync_opts.createModule() },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
         .{ .name = "fonts", .module = fonts },
@@ -100,6 +106,7 @@ pub fn build(b: *std.Build) void {
     gate.use_llvm = true;
     const run_gate = b.addRunArtifact(gate);
     run_gate.addDirectoryArg(b.path("."));
+    if (loro_lib != null) run_gate.addArg("--with-loro");
     b.step("no-rust", "Fail if the build, scripts or tests need Rust").dependOn(&run_gate.step);
 
     const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
@@ -181,6 +188,7 @@ pub fn build(b: *std.Build) void {
     // `zig build engine`: the Zig headless engine daemon (`ws://127.0.0.1:27664`).
     const engine_imports: []const std.Build.Module.Import = &.{
         .{ .name = "build_info", .module = info_mod },
+        .{ .name = "sync_options", .module = sync_opts.createModule() },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
         .{ .name = "mcp_tools_json", .module = @import("mcp_tools_build.zig").module(b) },
@@ -202,6 +210,14 @@ pub fn build(b: *std.Build) void {
     inline for (.{ exe, tests, snap, profile, vectors, engine_exe }) |artifact| {
         artifact.use_llvm = true;
         linkSqlite(b, artifact.root_module, target);
+        if (loro_lib) |archive| {
+            artifact.root_module.addObjectFile(.{ .cwd_relative = archive });
+            if (target.result.os.tag == .macos) {
+                artifact.root_module.linkFramework("Security", .{});
+                artifact.root_module.linkFramework("CoreFoundation", .{});
+                artifact.root_module.linkSystemLibrary("iconv", .{});
+            }
+        }
     }
 }
 

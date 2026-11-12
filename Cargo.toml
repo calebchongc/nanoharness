@@ -6,6 +6,7 @@ members = [
     "crates/preview",
     "crates/visual",
     "crates/doc",
+    "crates/nano-loro",
     "crates/sync",
     "crates/harness",
     "crates/engine",

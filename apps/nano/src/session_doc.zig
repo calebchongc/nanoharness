@@ -15,6 +15,7 @@ const json = std.json;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const transcript = @import("transcript.zig");
+const loro = @import("loro.zig");
 
 // 1:1 constants from `crates/doc/src/constants.rs` and `crates/engine/src/doc_host.rs`
 // (Lean `HarnessProofs.PerformanceAndQueueParity`).
@@ -102,7 +103,10 @@ pub const CommandEntry = struct {
     payload_json: []u8,
     issued_by: []u8,
     issued_at: i64,
-    status: []u8, // "pending", "running", "completed", "failed"
+    status: []u8, // native states plus retained command outcomes
+    based_on_json: ?[]u8 = null,
+    expires_at: ?i64 = null,
+    resolution: ?[]u8 = null,
 
     pub fn byteWeight(self: CommandEntry) usize {
         return self.id.len + self.kind.len + self.payload_json.len + self.status.len + 48;
@@ -114,6 +118,8 @@ pub const CommandEntry = struct {
         gpa.free(self.payload_json);
         gpa.free(self.issued_by);
         gpa.free(self.status);
+        if (self.based_on_json) |value| gpa.free(value);
+        if (self.resolution) |value| gpa.free(value);
     }
 };
 
@@ -227,6 +233,7 @@ pub const SessionDoc = struct {
     chat_id: []u8,
     device_id: []u8,
     local_seq: u64 = 0,
+    loro_doc: ?loro.Doc = null,
     last_access_seq: u64 = 0,
     /// O(1) incremental byte & pin counters (Lean `HarnessProofs.PerformanceAndQueueParity`).
     live_payload_bytes: usize = 0,
@@ -274,6 +281,7 @@ pub const SessionDoc = struct {
         const did = try gpa.dupe(u8, device_id);
         return .{
             .gpa = gpa,
+            .loro_doc = if (loro.enabled) try loro.Doc.init(chat_id) else null,
             .chat_id = cid,
             .device_id = did,
             .live_payload_bytes = cid.len + did.len,
@@ -281,6 +289,7 @@ pub const SessionDoc = struct {
     }
 
     pub fn deinit(self: *SessionDoc) void {
+        if (self.loro_doc) |doc| doc.deinit();
         self.msg_index.deinit(self.gpa);
         self.gpa.free(self.chat_id);
         self.gpa.free(self.device_id);
@@ -680,6 +689,20 @@ pub const SessionDoc = struct {
         return false;
     }
 
+    pub fn setCommandStatus(self: *SessionDoc, id: []const u8, status: []const u8) !void {
+        for (self.commands.items) |*c| if (std.mem.eql(u8, c.id, id)) {
+            if (std.mem.eql(u8, c.status, status)) return;
+            const copy = try self.gpa.dupe(u8, status);
+            if (std.mem.eql(u8, c.status, "pending")) self.pending_cmd_count -|= 1;
+            self.live_payload_bytes = self.live_payload_bytes -| c.status.len;
+            self.live_payload_bytes += copy.len;
+            self.gpa.free(c.status);
+            c.status = copy;
+            try self.bumpClock();
+            return;
+        };
+    }
+
     pub fn enqueueCommand(
         self: *SessionDoc,
         cmd_id: []const u8,
@@ -688,6 +711,10 @@ pub const SessionDoc = struct {
         status: []const u8,
         now_ms: i64,
     ) !void {
+        for (self.commands.items) |existing| if (std.mem.eql(u8, existing.id, cmd_id)) {
+            try self.setCommandStatus(cmd_id, status);
+            return;
+        };
         try self.bumpClock();
         const cid = try self.gpa.dupe(u8, cmd_id);
         errdefer self.gpa.free(cid);
@@ -734,6 +761,10 @@ pub const SessionDoc = struct {
         try w.writeAll(",\"role\":");
         try json.Stringify.encodeJsonString(m.role, .{}, w);
         try w.print(",\"createdAt\":{d}", .{m.created_at});
+        if (loro.enabled) {
+            try w.writeAll(",\"deviceId\":");
+            try json.Stringify.encodeJsonString(m.device_id, .{}, w);
+        }
         if (m.status) |st| {
             try w.writeAll(",\"status\":");
             try json.Stringify.encodeJsonString(st, .{}, w);
@@ -977,8 +1008,69 @@ pub const SessionDoc = struct {
         return aw.toOwnedSlice();
     }
 
-    /// Export causal frontier (`vv`) as compact JSON bytes for `chat2` checkpoint frontier checks.
+    /// Local persistence is distinct from wire snapshots: NLR1 retains the
+    /// real Loro snapshot, unresolved incoming bytes and unsent frontier.
+    pub fn exportPersisted(self: *const SessionDoc, gpa: Allocator) ![]u8 {
+        if (self.loro_doc) |doc| {
+            try self.flushLoro();
+            return doc.bytes(gpa, 7, "");
+        }
+        return self.exportSnapshot(gpa);
+    }
+
+    pub fn outgoingLoroUpdate(self: *const SessionDoc, gpa: Allocator) ![]u8 {
+        const doc = self.loro_doc orelse return error.LoroNotLinked;
+        try self.flushLoro();
+        return doc.bytes(gpa, 9, "");
+    }
+
+    pub fn outgoingLoroQueued(self: *const SessionDoc) !void {
+        const doc = self.loro_doc orelse return error.LoroNotLinked;
+        _ = try doc.command(self.gpa, 10, "");
+    }
+
+    pub fn hasPendingLoro(self: *const SessionDoc) !bool {
+        const doc = self.loro_doc orelse return false;
+        return doc.command(self.gpa, 11, "");
+    }
+
+    fn flushLoro(self: *const SessionDoc) !void {
+        const doc = self.loro_doc orelse return;
+        const projection = try self.exportLegacyProjection(self.gpa);
+        defer self.gpa.free(projection);
+        _ = try doc.command(self.gpa, 1, projection[zig_doc_magic.len..]);
+    }
+
+    fn refreshLoroProjection(self: *SessionDoc) !void {
+        const doc = self.loro_doc orelse return;
+        const projection = try doc.bytes(self.gpa, 2, "");
+        defer self.gpa.free(projection);
+        for (self.messages.items) |*m| m.deinit(self.gpa);
+        self.messages.clearRetainingCapacity();
+        self.msg_index.clearRetainingCapacity();
+        for (self.queue.items) |*q| q.deinit(self.gpa);
+        self.queue.clearRetainingCapacity();
+        for (self.commands.items) |*c| c.deinit(self.gpa);
+        self.commands.clearRetainingCapacity();
+        self.live_payload_bytes = self.chat_id.len + self.device_id.len;
+        self.streaming_msg_count = 0;
+        self.pending_cmd_count = 0;
+        try self.importLegacyProjection(projection);
+        self.local_seq += 1;
+        // Baseline the representable projection, without rewriting richer
+        // retained-client metadata that the UI does not currently expose.
+        const mirror = try self.exportLegacyProjection(self.gpa);
+        defer self.gpa.free(mirror);
+        _ = try doc.command(self.gpa, 13, mirror[zig_doc_magic.len..]);
+    }
+
+    /// Loro mode exports the binary VersionVector expected by retained
+    /// chat2 clients. Legacy mode retains its private JSON clock offline.
     pub fn exportFrontier(self: *const SessionDoc, gpa: Allocator) ![]u8 {
+        if (self.loro_doc) |doc| {
+            try self.flushLoro();
+            return doc.bytes(gpa, 5, "");
+        }
         var aw: std.Io.Writer.Allocating = .init(gpa);
         errdefer aw.deinit();
         try self.writeFrontier(&aw.writer);
@@ -987,6 +1079,12 @@ pub const SessionDoc = struct {
 
     /// True if every `(peer, seq)` in `frontier_bytes` is `<= self.vv[peer]`.
     pub fn frontierContained(self: *const SessionDoc, gpa: Allocator, frontier_bytes: []const u8) bool {
+        if (self.loro_doc) |doc| {
+            self.flushLoro() catch return false;
+            const result = doc.bytes(gpa, 6, frontier_bytes) catch return false;
+            defer gpa.free(result);
+            return result.len == 1 and result[0] == 1;
+        }
         if (frontier_bytes.len == 0) return true;
         if (isRustLoroBlob(frontier_bytes)) return false;
         var parsed = json.parseFromSlice(json.Value, gpa, frontier_bytes, .{}) catch return false;
@@ -1005,6 +1103,14 @@ pub const SessionDoc = struct {
     /// Single-pass pre-sized snapshot export (`HZD1` header + JSON state) for `DocsStore` and `chat2`
     /// checkpoints (Lean Theorem `single_pass_export_fewer_allocs_and_copies`: 1 allocation, 1 byte pass).
     pub fn exportSnapshot(self: *const SessionDoc, gpa: Allocator) ![]u8 {
+        if (self.loro_doc) |doc| {
+            try self.flushLoro();
+            return doc.bytes(gpa, 3, "");
+        }
+        return self.exportLegacyProjection(gpa);
+    }
+
+    fn exportLegacyProjection(self: *const SessionDoc, gpa: Allocator) ![]u8 {
         const est_cap = self.live_payload_bytes + self.vv.count() * 48 + 256;
         var aw: std.Io.Writer.Allocating = try .initCapacity(gpa, est_cap);
         errdefer aw.deinit();
@@ -1018,13 +1124,48 @@ pub const SessionDoc = struct {
         try self.writeResetFrame(w);
         try w.writeAll(",\"queue\":");
         try self.writeQueueFrame(w);
-        try w.writeByte('}');
+        try w.writeAll(",\"deviceId\":");
+        try json.Stringify.encodeJsonString(self.device_id, .{}, w);
+        try w.writeAll(",\"commands\":[");
+        for (self.commands.items, 0..) |c, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"id\":{f},\"kind\":{f},\"payload\":", .{ json.fmt(c.id, .{}), json.fmt(c.kind, .{}) });
+            if (json.parseFromSlice(json.Value, gpa, c.payload_json, .{})) |parsed_payload| {
+                var parsed = parsed_payload;
+                defer parsed.deinit();
+                try json.Stringify.value(parsed.value, .{}, w);
+            } else |_| {
+                try json.Stringify.encodeJsonString(c.payload_json, .{}, w);
+            }
+            try w.print(",\"issuedBy\":{f},\"issuedAt\":{d},\"status\":{f},\"basedOn\":{s},\"expiresAt\":{f},\"resolution\":{f}}}", .{
+                json.fmt(c.issued_by, .{}), c.issued_at, json.fmt(c.status, .{}), c.based_on_json orelse "null", json.fmt(c.expires_at, .{}), json.fmt(c.resolution, .{}),
+            });
+        }
+        try w.writeAll("]}");
         return aw.toOwnedSlice();
     }
 
     /// Import a snapshot or CRDT update (`HZD1` envelope) into `self`, merging
     /// version vector entries and hydrating missing messages, tool calls, and queue items in O(M + Q).
     pub fn importSnapshot(self: *SessionDoc, bytes: []const u8) !void {
+        if (self.loro_doc) |doc| {
+            if (std.mem.startsWith(u8, bytes, "NLR1")) {
+                _ = try doc.command(self.gpa, 8, bytes);
+            } else {
+                if (std.mem.startsWith(u8, bytes, zig_doc_magic)) return error.LegacySnapshotNeedsMigration;
+                try self.flushLoro();
+                const pending = try doc.command(self.gpa, 4, bytes);
+                try self.refreshLoroProjection();
+                if (pending) return error.PendingDependencies;
+                return;
+            }
+            try self.refreshLoroProjection();
+            return;
+        }
+        return self.importLegacyProjection(bytes);
+    }
+
+    fn importLegacyProjection(self: *SessionDoc, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         if (isRustLoroBlob(bytes)) return error.UnsupportedLegacyLoroBlob;
         const payload = if (std.mem.startsWith(u8, bytes, zig_doc_magic))
@@ -1075,7 +1216,7 @@ pub const SessionDoc = struct {
                     errdefer if (!msg_transferred) self.gpa.free(mid);
                     const mrole = try self.gpa.dupe(u8, role_s);
                     errdefer if (!msg_transferred) self.gpa.free(mrole);
-                    const mdev = try self.gpa.dupe(u8, self.device_id);
+                    const mdev = try self.gpa.dupe(u8, if (mo.get("deviceId")) |v| (if (v == .string) v.string else self.device_id) else self.device_id);
                     errdefer if (!msg_transferred) self.gpa.free(mdev);
                     const mstatus = if (status_s) |st| try self.gpa.dupe(u8, st) else null;
                     errdefer if (!msg_transferred) if (mstatus) |st| self.gpa.free(st);
@@ -1133,6 +1274,41 @@ pub const SessionDoc = struct {
                     try self.appendIndexedMessage(msg);
                 }
             };
+        };
+
+        if (root.get("commands")) |commands| if (commands == .array) {
+            for (commands.array.items) |c| {
+                if (c != .object) continue;
+                const co = c.object;
+                const id = co.get("id") orelse continue;
+                const command_payload = co.get("payload") orelse continue;
+                const issuer = co.get("issuedBy") orelse continue;
+                const at = co.get("issuedAt") orelse continue;
+                const status = co.get("status") orelse continue;
+                if (id != .string or issuer != .string or at != .integer or status != .string or command_payload != .object) continue;
+                const kind = command_payload.object.get("kind") orelse continue;
+                if (kind != .string) continue;
+                var exists = false;
+                for (self.commands.items) |existing| if (std.mem.eql(u8, existing.id, id.string)) {
+                    exists = true;
+                    break;
+                };
+                if (exists) continue;
+                const command = CommandEntry{
+                    .id = try self.gpa.dupe(u8, id.string),
+                    .kind = try self.gpa.dupe(u8, kind.string),
+                    .payload_json = try json.Stringify.valueAlloc(self.gpa, command_payload, .{}),
+                    .issued_by = try self.gpa.dupe(u8, issuer.string),
+                    .issued_at = at.integer,
+                    .status = try self.gpa.dupe(u8, status.string),
+                    .based_on_json = if (co.get("basedOn")) |v| (if (v == .object) try json.Stringify.valueAlloc(self.gpa, v, .{}) else null) else null,
+                    .expires_at = if (co.get("expiresAt")) |v| (if (v == .integer) v.integer else null) else null,
+                    .resolution = if (co.get("resolution")) |v| (if (v == .string) try self.gpa.dupe(u8, v.string) else null) else null,
+                };
+                try self.commands.append(self.gpa, command);
+                self.live_payload_bytes += command.byteWeight();
+                if (std.mem.eql(u8, command.status, "pending")) self.pending_cmd_count += 1;
+            }
         };
 
         if (root.get("queue")) |q_root| if (q_root == .object) {

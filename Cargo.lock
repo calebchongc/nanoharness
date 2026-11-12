@@ -1615,6 +1615,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-nano-loro"
+version = "0.2.186"
+dependencies = [
+ "futures",
+ "harness-doc",
+ "harness-proto",
+ "harness-sync",
+ "loro",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "harness-observe"
 version = "0.2.186"
 dependencies = [
