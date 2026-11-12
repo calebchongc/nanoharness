@@ -55,6 +55,8 @@ pub const Sheet = enum {
     write_dock,
     settings,
     session_switcher,
+    profile,
+    reauth,
 };
 
 pub const State = struct {
@@ -82,6 +84,20 @@ pub const State = struct {
     effort_idx: usize = 2, // 0=low, 1=medium, 2=high
     last_frame_sec: f64 = 0,
     telemetry: ios_scroll.ScrollTelemetry = .{},
+    /// The account: sign-in, organizations, deletion (app_mobile_auth.zig).
+    auth: @import("app_mobile_auth.zig").State = .{},
+    /// `HARNESS_MOBILE_SCREEN` read (a capture's pinned screen, demo only).
+    preview_read: bool = false,
+    /// Running on the demo's made-up data (`--demo`): Profile says so.
+    demo: bool = false,
+    /// The question panel's height as last laid out (it sits above the safe area).
+    question_h: f32 = 0,
+    /// The attach menu and its last error (view_mobile_attach.zig).
+    attach: @import("view_mobile_attach.zig").State = .{},
+    /// Settings' page and its per-computer values (view_mobile_settings.zig).
+    settings_ui: @import("view_mobile_settings.zig").State = .{},
+    /// The error row whose agent sign-in sheet is open (view_mobile_reauth.zig).
+    reauth: @import("view_mobile_reauth.zig").Open = .{},
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         @import("text_buffer.zig").deinit(&s.search_query);
@@ -171,6 +187,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
 
     const rt = c.access.reduce_transparency;
+    if (!a.mobile.preview_read) {
+        a.mobile.preview_read = true;
+        if (a.env) |env| if (env.get("HARNESS_MOBILE_SCREEN")) |which| @import("view_mobile_preview.zig").apply(a, which);
+    }
+    if (@import("view_mobile_signin.zig").gate(a, c, k, rt)) return;
     const split = ios_scroll.shouldSplitPhone(c.size.w, a.mobile.split_mode, c.size.w >= 660.0);
 
     {
@@ -208,6 +229,9 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (a.mobile.sheet != .none) {
         renderSheetOverlay(a, c, k, rt);
     }
+    @import("view_mobile_profile.zig").overlays(a, c, k);
+    // First-run setup, over everything (view_mobile_onboarding.zig).
+    _ = @import("view_mobile_onboarding.zig").render(a, c, k);
 
     const t_end = std.Io.Clock.awake.now(a.io);
     const work_ns: f64 = @floatFromInt(t_start.durationTo(t_end).toNanoseconds());
@@ -351,7 +375,19 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
         defer top_bar.end();
 
         if (mg.circleButton(c, "ios-home-settings-btn", .home_customize_circle, .@"settings-minimalistic", k.text, rt, null).clicked) {
+            a.mobile.settings_ui.page = .root;
             a.mobile.sheet = .settings;
+        }
+        {
+            // Profile: the account's initial in a glass circle (ProfileView's person button).
+            ui.key(c, "ios-home-profile-btn");
+            const side = mg.spec(.home_customize_circle).min_height_pt;
+            const pb = mg.styleGlassDiv(c, ui.div(c).row().center().w(side).h(side).control(), .home_customize_circle, rt, ui.Color.transparent, null);
+            defer pb.end();
+            const line: []const u8 = if (a.account.user) |u| (u.name orelse u.email) else "?";
+            const initial = [1]u8{@import("app_account.zig").initial(line)};
+            ui.text(c, c.print("{s}", .{&initial}), .{ .size = 15, .weight = .semibold, .color = k.text });
+            if (pb.clicked()) a.mobile.sheet = .profile;
         }
 
         // Horizontally scrollable `.scrollX()` Liquid Glass filter & Zen pills
@@ -618,23 +654,6 @@ fn renderEmptyDetail(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
     }
 }
 
-fn findUnansweredQuestion(a: *const App) ?struct { req_id: []const u8, q: tr.Question } {
-    const entries = a.transcript.entries.items;
-    var i = entries.len;
-    while (i > 0) {
-        i -= 1;
-        const e = &entries[i];
-        for (e.parts.items) |*p| {
-            if (p.kind == .input and !p.resolved and p.questions.len > 0) {
-                if (!std.mem.eql(u8, p.request_id, a.mobile.answeredReq())) {
-                    return .{ .req_id = p.request_id, .q = p.questions[0] };
-                }
-            }
-        }
-    }
-    return null;
-}
-
 fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: bool) void {
     const chat_id = a.selected orelse return;
     const chat_hash = std.hash.Wyhash.hash(0, chat_id);
@@ -647,7 +666,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
 
     const ch_opt = a.findChat(chat_id);
     const st = a.selectedStatus();
-    const pending_q = findUnansweredQuestion(a);
+    const vq = @import("view_mobile_question.zig");
+    const asking = vq.active(a);
     const queue_count = a.queue.items.len;
 
     const top_inset = c.safe_area.top;
@@ -655,7 +675,13 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
     const top_chrome_h: f32 = 54;
     var bot_chrome_h: f32 = 112; // 40pt chip bar + 8pt gap + 56pt composer + margins
     if (queue_count > 0) bot_chrome_h += @min(@as(f32, @floatFromInt(queue_count)) * 34.0 + 8.0, 110.0);
-    if (pending_q != null) bot_chrome_h += 136.0;
+    // The question panel takes the chips' and the composer's place.
+    if (@import("app_attachments.zig").count(a) > 0) bot_chrome_h += 72;
+    if (a.mobile.attach.menu) bot_chrome_h += 150;
+    if (!a.mobile.attach.err.empty()) bot_chrome_h += 22;
+    if (asking) bot_chrome_h = vq.height(a) else {
+        a.mobile.question_h = 0;
+    }
 
     // -----------------------------------------------------------------------
     // PASS 1 (`layer = 0`): Full-bleed underlap tail-virtualized transcript
@@ -782,6 +808,7 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
         }
 
         if (mg.circleButton(c, "ios-session-menu-btn", .session_menu_circle, .@"more-horizontal", k.text, rt, null).clicked) {
+            a.mobile.settings_ui.page = .root;
             a.mobile.sheet = .settings;
         }
     }
@@ -807,26 +834,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
         const stack = ui.div(c).column().wFull().maxW(ios_scroll.max_content_width).gap(8);
         defer stack.end();
 
-        // 1. Active Question Panel (`26pt` squircle Liquid Glass)
-        if (pending_q) |pq| {
-            ui.key(c, "ios-question-panel");
-            const qcard = mg.styleGlassDiv(c, ui.div(c).column().wFull().p(14).gap(8), .question_panel, rt, ui.Color.transparent, null);
-            defer qcard.end();
-            ui.text(c, pq.q.question, .{ .size = 14, .weight = .semibold, .color = k.text });
-            const opts_row = ui.div(c).row().wFull().gap(6);
-            defer opts_row.end();
-            for (pq.q.options, 0..) |opt_txt, o_idx| {
-                if (o_idx >= 3) break;
-                const ok_key = c.print("ios-q-opt-{d}", .{o_idx});
-                if (mg.pillButton(c, ok_key, .write_toolbar_pill, null, opt_txt, null, k.text, o_idx == 0, k.accent, rt).clicked) {
-                    const now_ms = nowEpochMs(a);
-                    a.mobile.markAnswered(pq.req_id, now_ms);
-                    a.composer.set(opt_txt);
-                    a.send();
-                    a.mobile.stick_to_bottom = true;
-                    nanoui.haptics.notify(.success);
-                }
-            }
+        // 1. The agent's question, in the composer's place (view_mobile_question.zig).
+        if (asking) {
+            vq.panel(a, c, k, rt);
+            return;
         }
 
         // 2. Queued Follow-Up Messages Tray
@@ -848,7 +859,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
             }
         }
 
-        // 3. Horizontal `.scrollX()` 40pt Liquid Glass Chip Strip
+        // 3. The attach menu and the staged pictures.
+        @import("view_mobile_attach.zig").above(a, c, k, rt);
+
+        // 4. Horizontal `.scrollX()` 40pt Liquid Glass Chip Strip
         {
             ui.key(c, "ios-composer-chips");
             const chip_st: ui.Style = .{
@@ -915,7 +929,7 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
             );
             defer shell.end();
 
-            _ = mg.circleButton(c, "ios-composer-attach", .composer_attach_circle, .plus, k.text, rt, null);
+            @import("view_mobile_attach.zig").button(a, c, k, rt);
 
             {
                 const input_well = ui.div(c).row().grow().px(4).itemsCenter();
@@ -932,7 +946,9 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
                 a.mobile.composer_focus = tf.focused;
             }
 
-            const has_text = std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0;
+            // Attachments count as content: an image-only send is a send, never a stop.
+            const has_text = std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0 or
+                @import("app_attachments.zig").count(a) > 0;
             if (has_text) {
                 ui.key(c, "ios-composer-send-btn");
                 const send_btn = ui.div(c).row().size(36, 36).center().roundedFull().circular().bg(k.accent).control();
@@ -954,9 +970,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
                     a.interrupt();
                     nanoui.haptics.notify(.warning);
                 }
-            } else {
-                _ = mg.circleButton(c, "ios-composer-mic", .composer_dictate_circle, .microphone, k.muted, rt, null);
             }
+            // No dictation button: nanoui has no speech recognizer on iOS yet.
         }
     }
 }
@@ -1040,10 +1055,14 @@ fn renderTranscriptEntry(a: *App, c: *ui.Context, k: theme.Colors, entry: *const
                 }
             },
             .@"error" => {
-                const ebox = ui.div(c).row().wFull().p(10).gap(8).rounded(12).bg(k.danger.alpha(0.14)).border(k.danger.alpha(0.4)).borderW(1);
-                defer ebox.end();
-                icons.icon(c, .@"danger-triangle", 15, k.danger, 0);
-                ui.text(c, p.text.items, .{ .size = 13.5, .wrap = true, .color = k.danger });
+                {
+                    const ebox = ui.div(c).row().wFull().p(10).gap(8).rounded(12).bg(k.danger.alpha(0.14)).border(k.danger.alpha(0.4)).borderW(1);
+                    defer ebox.end();
+                    icons.icon(c, .@"danger-triangle", 15, k.danger, 0);
+                    ui.text(c, p.text.items, .{ .size = 13.5, .wrap = true, .color = k.danger });
+                }
+                // A typed sign-in error: reconnect the agent on the chat's computer.
+                @import("view_mobile_reauth.zig").rowControls(a, c, k, entry, p, e_idx);
             },
             else => {},
         }
@@ -1173,8 +1192,10 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
         const title = switch (a.mobile.sheet) {
             .new_session => "New Session",
             .write_dock => "Compose",
-            .settings => "Settings & Telemetry",
+            .settings => @import("view_mobile_settings.zig").title(a),
             .session_switcher => "Switch Session",
+            .profile => "Profile",
+            .reauth => "Reconnect ChatGPT",
             .none => "",
         };
         ui.text(c, title, .{ .size = 17, .weight = .bold, .color = k.text });
@@ -1186,8 +1207,10 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
     switch (a.mobile.sheet) {
         .new_session => renderNewSessionSheet(a, c, k, rt),
         .write_dock => renderWriteDockSheet(a, c, k, rt),
-        .settings => renderSettingsSheet(a, c, k, rt),
+        .settings => @import("view_mobile_settings.zig").render(a, c, k, rt),
         .session_switcher => renderSwitcherSheet(a, c, k),
+        .profile => @import("view_mobile_profile.zig").render(a, c, k),
+        .reauth => @import("view_mobile_reauth.zig").sheet(a, c, k),
         .none => {},
     }
 }
@@ -1301,74 +1324,6 @@ fn renderSwitcherSheet(a: *App, c: *ui.Context, k: theme.Colors) void {
             a.openChat(ch.id, ch.space_id);
             a.mobile.sheet = .none;
             nanoui.haptics.selection();
-        }
-    }
-}
-
-fn renderSettingsSheet(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
-    ui.key(c, "ios-settings-scroll");
-    const sc = ui.div(c).column().wFull().maxH(420).gap(12).scrollY();
-    defer sc.end();
-
-    // 1. Live 120Hz ProMotion & perf-contract.json Telemetry
-    const sum = a.mobile.telemetry.summarize();
-    {
-        const tcard = ui.div(c).column().wFull().p(12).gap(6).rounded(16).bg(k.shell).border(k.border).borderW(1);
-        defer tcard.end();
-        {
-            const thdr = ui.div(c).row().wFull().itemsCenter().justifyBetween();
-            defer thdr.end();
-            ui.text(c, "120Hz ProMotion Telemetry", .{ .size = 13.5, .weight = .semibold, .color = k.text });
-            const ok = sum.meetsPerfContract();
-            ui.text(c, if (ok) "1:1 PASS (< 8.0ms)" else "WARMING", .{ .size = 11.5, .weight = .bold, .color = if (ok) k.success else k.warning });
-        }
-        ui.text(
-            c,
-            c.print("p50: {d:.2} ms  \u{00B7}  p95: {d:.2} ms  \u{00B7}  {d:.0} fps", .{ sum.p50_work_ms, sum.p95_work_ms, sum.est_fps }),
-            .{ .size = 11.5, .mono = true, .wrap = true, .color = k.muted },
-        );
-        ui.text(
-            c,
-            c.print("Scroll: {d} fr  \u{00B7}  Peak: {d:.0} pt/s (0.998/ms)", .{ sum.scroll_frames, sum.peak_velocity_pt_s }),
-            .{ .size = 11.5, .mono = true, .wrap = true, .color = k.faint },
-        );
-    }
-
-    // 2. PhoneSplit Mode (`Auto` / `On` / `Off`)
-    ui.text(c, "Phone Split (>= 600pt)", .{ .size = 12.5, .weight = .semibold, .color = k.muted });
-    {
-        const srow = ui.div(c).row().wFull().gap(6);
-        defer srow.end();
-        for ([_]ios_scroll.SplitMode{ .auto, .on, .off }) |sm| {
-            if (mg.pillButton(c, c.print("ios-split-{s}", .{sm.asText()}), .write_toolbar_pill, null, sm.asText(), null, k.text, a.mobile.split_mode == sm, k.accent, rt).clicked) {
-                a.mobile.split_mode = sm;
-            }
-        }
-    }
-
-    // 3. 19-Family / 31-Variant iOS Theme Catalog
-    const all_mobile = themes.mobileAll();
-    ui.text(c, c.print("iOS Themes ({d} variants)", .{all_mobile.len}), .{ .size = 12.5, .weight = .semibold, .color = k.muted });
-    {
-        const tlist = ui.div(c).column().wFull().gap(5);
-        defer tlist.end();
-        for (all_mobile) |v| {
-            const active = if (a.mobile.theme_override_id) |tid| std.mem.eql(u8, tid, v.id) else false;
-            ui.key(c, c.print("ios-theme-{s}", .{v.id}));
-            const trow = ui.div(c).row().wFull().px(12).py(8).rounded(12).itemsCenter().justifyBetween().bg(if (active) k.accent.alpha(0.18) else k.raised.alpha(0.55)).control();
-            defer trow.end();
-            {
-                const left = ui.div(c).row().itemsCenter().gap(8);
-                defer left.end();
-                _ = ui.div(c).size(14, 14).roundedFull().circular().bg(v.colors.accent).border(v.colors.border).borderW(1).end();
-                ui.text(c, v.name, .{ .size = 13.5, .weight = if (active) .semibold else .medium, .color = k.text });
-            }
-            ui.text(c, if (v.dark) "Dark" else "Light", .{ .size = 11.5, .color = k.faint });
-            if (trow.clicked()) {
-                a.mobile.setThemeOverride(a.gpa, v.id);
-                a.dark = v.dark;
-                nanoui.haptics.selection();
-            }
         }
     }
 }

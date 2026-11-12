@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     var a: App = .init(init.gpa, init.io, engine_port);
     defer a.deinit();
     a.mobile_preview = mobile_flag;
+    a.mobile.demo = demo_flag;
     const harness_override = init.environ_map.get("HARNESS_NANO_HARNESS");
     a.new_harness = try init.gpa.dupe(u8, harness_override orelse "graff");
     a.settings = .open(init.gpa, init.io, init.environ_map);

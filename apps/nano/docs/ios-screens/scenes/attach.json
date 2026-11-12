@@ -1,0 +1,103 @@
+{
+ "mobile": true,
+ "width": 402,
+ "height": 874,
+ "scale": 2,
+ "dark": false,
+ "devices": [
+  {
+   "id": "dev-box",
+   "name": "Build Box",
+   "platform": "macos"
+  }
+ ],
+ "spaces": [
+  {
+   "id": "sp-1",
+   "deviceId": "dev-box",
+   "path": "/work/sample",
+   "name": "sample"
+  }
+ ],
+ "chats": [
+  {
+   "id": "chat-r",
+   "spaceId": "sp-1",
+   "deviceId": "dev-box",
+   "title": "Run the sample suite",
+   "archived": false,
+   "cwd": "/work/sample",
+   "config": {
+    "harness": "codex",
+    "model": "gpt-5.4"
+   }
+  }
+ ],
+ "open": "chat-r",
+ "replies": {
+  "AuthStatus": {
+   "$items": [
+    {
+     "state": "signedIn",
+     "user": {
+      "id": "u",
+      "email": "sam@example.com",
+      "name": "Sam Rivera"
+     }
+    }
+   ]
+  },
+  "StartAgentLogin": {
+   "loginId": "login-1",
+   "url": "https://auth.openai.com/codex/device",
+   "mode": "device-code",
+   "code": "ABCD-1234"
+  },
+  "PollAgentLogin": {
+   "status": "pending"
+  }
+ },
+ "transcripts": {
+  "chat-r": [
+   {
+    "id": "u1",
+    "role": "user",
+    "parts": [
+     {
+      "kind": "text",
+      "id": "t1",
+      "text": "Here is the screenshot of the broken layout."
+     }
+    ]
+   },
+   {
+    "id": "m1",
+    "role": "assistant",
+    "parts": [
+     {
+      "kind": "text",
+      "id": "a1",
+      "text": "Attach the picture and I'll compare it with the sample design."
+     }
+    ]
+   }
+  ]
+ },
+ "steps": [
+  {
+   "clickAt": [
+    40,
+    834
+   ]
+  },
+  {
+   "wait": 0.3
+  },
+  {
+   "expect": "Files"
+  },
+  {
+   "snap": "attach-menu"
+  }
+ ]
+}

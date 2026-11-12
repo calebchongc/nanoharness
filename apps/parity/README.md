@@ -21,6 +21,10 @@ each app runs its own test against the same files, so neither can drift without 
 | `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 
+The Zig phone app (`apps/nano`) runs the vectors in `src/mobile_parity_tests.zig`, and `ux-contract.json` in
+`src/mobile_ux_contract_tests.zig` for the groups it has ported (Settings and Profile's account rows so far; the rest
+are listed there as not yet).
+
 The expected values are what the SwiftUI app does. Change a rule on iOS and the vector must change with it, which
 then fails the Android test until the port follows, and the other way round.
 
