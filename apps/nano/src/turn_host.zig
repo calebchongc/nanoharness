@@ -23,6 +23,7 @@ const Event = agent_turn.Event;
 /// Harness ids whose turns this engine runs, mapped to their adapters.
 pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
     const map = .{
+        .{ "mock", &@import("agent_mock.zig").adapter },
         .{ "claude-code", &@import("agent_claude.zig").adapter },
         .{ "codex", &@import("agent_codex.zig").adapter },
         .{ "graff", &@import("agent_acp.zig").graff },
@@ -131,16 +132,16 @@ fn reqStr(obj: json.ObjectMap, key: []const u8) ?[]const u8 {
 
 /// Run the turn for a `run` command whose user message and streaming
 /// assistant entry `asst_id` the engine already wrote. Called with the
-/// engine lock held. Starts the chat's adapter on its own thread; without an
-/// `io` (or for graff without a configured graff binary, as before) the
-/// engine acknowledges in place.
+/// engine lock held. Starts the chat's adapter on its own thread. A harness
+/// whose CLI can't be found ends the turn with Rust's "harness binary not
+/// found" error. Only a host with no `io` (unit tests that never run an
+/// agent) completes the entry in place.
 pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, prompt: []const u8, cwd: []const u8, req: json.ObjectMap) anyerror!void {
     // Whether this turn answers peer mail only: any origin but a person's.
     if (findChat(host, chat_id)) |c| c.running_turn_peer_only = if (reqStr(req, "turnOrigin")) |o| !std.mem.eql(u8, o, "human") else false;
     setPaused(host.io orelse return ackInPlace(host, chat_id, asst_id, prompt), chat_id, false);
     const chat = findChat(host, chat_id);
     const harness = reqStr(req, "harness") orelse (if (chat) |c| (if (c.harness.len > 0) c.harness else null) else null) orelse "graff";
-    if (std.mem.eql(u8, harness, "graff") and host.graff_exe == null) return ackInPlace(host, chat_id, asst_id, prompt);
     const io = host.io.?;
 
     const adapter = adapterFor(harness) orelse {
@@ -200,6 +201,7 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
     turn.release();
 }
 
+/// Test hosts without `io` only: production hosts always have one.
 fn ackInPlace(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, prompt: []const u8) !void {
     const doc = try host.getOrCreateDoc(chat_id);
     const reply_text = try std.fmt.allocPrint(host.gpa, "Ack from {s}: {s}", .{ host.device_id, prompt });
@@ -640,4 +642,23 @@ pub fn shutdownHost(host: *EngineHost) void {
     }
     for (turns.items) |t| t.release();
     _ = agent_turn.waitAllExited(io, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testkit = @import("agent_testkit.zig");
+
+test "turn_host: graff with no binary reports it missing instead of replying" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    // No configured graff copy, and GRAFF_EXECUTABLE names a missing file.
+    const rig = try testkit.Rig.create(.{ .harness = "graff", .override_var = "GRAFF_EXECUTABLE", .script = "", .missing_binary = true });
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitIdle(5000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expect(std.mem.indexOf(u8, doc, "Ack from") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"kind\":\"error\",\"message\":\"harness binary not found: /nonexistent/harness-agent-mock does not exist\"") != null);
 }

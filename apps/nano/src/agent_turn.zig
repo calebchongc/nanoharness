@@ -148,6 +148,12 @@ pub fn waitAllExited(io: Io, ms: u32) bool {
     return true;
 }
 
+/// Whether `resolveExe` may search the disk (PATH, the login shell, the
+/// install dirs). Off in test builds, so a test can never start an agent CLI
+/// installed on the machine running it: tests name their mock through the
+/// adapter's override variable.
+pub var allow_exe_search: bool = !@import("builtin").is_test;
+
 pub const interrupt_grace_ms: u32 = 2000;
 pub const kill_grace_ms: u32 = 3000;
 
@@ -369,6 +375,7 @@ pub const Turn = struct {
             return a.dupe(u8, v);
         };
         if (self.req.exe_hint) |h| return a.dupe(u8, h);
+        if (!allow_exe_search) return self.fail("harness binary not found: {s}", .{hint});
         const login = if (self.req.env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(self.gpa, self.io, self.req.env);
         const found = try agent_proc.findExecutable(self.gpa, self.io, .{
             .name = name,
