@@ -41,6 +41,9 @@ pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
 /// Tests replace the engine's environment (agent overrides, PATH, HOME).
 pub var env_override: ?*const Environ.Map = null;
 
+/// A turn the host is running. It holds its own reference to `turn`, so
+/// `liveTurn` and `shutdownHost` never see a freed one; it is freed with the
+/// turn's Done (`destroyLive`) whatever that Done's folding does.
 const Live = struct {
     host: *EngineHost,
     chat_id: []u8,
@@ -67,6 +70,15 @@ fn removeLive(io: Io, l: *Live) void {
         _ = live_list.swapRemove(i);
         return;
     };
+}
+
+/// Unlist and free `l`, dropping its turn reference (idempotent unlisting).
+fn destroyLive(io: Io, l: *Live) void {
+    removeLive(io, l);
+    const gpa = l.host.gpa;
+    l.turn.release();
+    gpa.free(l.chat_id);
+    gpa.destroy(l);
 }
 
 /// Live turns on `host` (tests poll this).
@@ -156,6 +168,7 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
     errdefer turn.release();
     live.* = .{ .host = host, .chat_id = try host.gpa.dupe(u8, chat_id), .turn = turn };
     errdefer host.gpa.free(live.chat_id);
+    // From here `live` owns the turn reference `create` returned.
 
     const a = turn.arena.allocator();
     const env = try a.create(Environ.Map);
@@ -188,17 +201,19 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         defer live_mutex.unlock(io);
         try live_list.append(list_gpa, live);
     }
-    turn.start() catch |err| {
-        removeLive(io, live);
-        host.gpa.free(live.chat_id);
-        host.gpa.destroy(live);
-        turn.release();
-        const msg = try std.fmt.allocPrint(host.gpa, "io: {t}", .{err});
-        defer host.gpa.free(msg);
-        return failInPlace(host, chat_id, asst_id, msg);
+    startLive(host, live, chat_id, asst_id);
+}
+
+/// Start `live`'s thread; on failure the entry ends with the error. No
+/// error escapes: `live` is either running or already freed.
+fn startLive(host: *EngineHost, live: *Live, chat_id: []const u8, asst_id: []const u8) void {
+    const io = live.turn.io;
+    live.turn.start() catch |err| {
+        destroyLive(io, live);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "io: {t}", .{err}) catch "io: spawn failed";
+        failInPlace(host, chat_id, asst_id, msg) catch |e| std.log.warn("harness-engine: failing the turn failed: {t}", .{e});
     };
-    // The thread holds its own reference; drop ours.
-    turn.release();
 }
 
 /// Test hosts without `io` only: production hosts always have one.
@@ -296,14 +311,12 @@ fn emit(ctx: *anyopaque, t: *Turn, ev: Event) void {
     const host = live.host;
     host.mutex.lockUncancelable(t.io);
     defer host.mutex.unlock(t.io);
-    if (host.stop_requested) {
-        if (ev == .done) {
-            removeLive(t.io, live);
-            host.gpa.free(live.chat_id);
-            host.gpa.destroy(live);
-        }
-        return;
-    }
+    // Done frees the entry however its folding goes (Turn.emit drops any
+    // event after Done, so nothing reaches it again).
+    defer if (ev == .done) destroyLive(t.io, live);
+    // A stopping engine, or a chat deleted mid-turn: nothing to write, and
+    // no doc, snapshot or outbox batch is recreated for it.
+    if (host.stop_requested or findChat(host, live.chat_id) == null) return;
     applyEvent(host, live, t, ev) catch |err| std.log.warn("harness-engine: folding {t} failed: {t}", .{ ev, err });
 }
 
@@ -443,14 +456,12 @@ fn finishLive(host: *EngineHost, live: *Live, t: *Turn, doc: *session_doc.Sessio
         if (std.mem.eql(u8, p.kind, "input")) p.resolved = true;
     };
     if (d.session_id) |sid| rememberSession(host, live.chat_id, sid);
-    try doc.setMessageStatus(asst, if (interrupted) "aborted" else "complete");
-    const chat_id = try host.gpa.dupe(u8, live.chat_id);
-    defer host.gpa.free(chat_id);
+    // Unlisted now so the next turn (the queue below) is the chat's live
+    // one; `emit` frees the entry after this returns.
     removeLive(t.io, live);
-    host.gpa.free(live.chat_id);
-    host.gpa.destroy(live);
-    try finishTurn(host, chat_id, asst, if (interrupted) "aborted" else "complete", if (d.status == .errored) "errored" else "idle");
-    drainQueue(host, chat_id) catch |err| std.log.warn("harness-engine: queue drain failed: {t}", .{err});
+    try doc.setMessageStatus(asst, if (interrupted) "aborted" else "complete");
+    try finishTurn(host, live.chat_id, asst, if (interrupted) "aborted" else "complete", if (d.status == .errored) "errored" else "idle");
+    drainQueue(host, live.chat_id) catch |err| std.log.warn("harness-engine: queue drain failed: {t}", .{err});
 }
 
 /// Start the first deliverable queued message as the next turn.
@@ -609,6 +620,16 @@ pub fn dismissInput(host: *EngineHost, chat_id: []const u8, request_id: []const 
     return false;
 }
 
+/// `deleteChat` (engine lock held): stop the chat's live turn. Its events
+/// and Done then find no chat and write nothing (`emit`).
+pub fn chatDeleted(host: *EngineHost, chat_id: []const u8) void {
+    const io = host.io orelse return;
+    setPaused(io, chat_id, false);
+    const t = liveTurn(io, host, chat_id) orelse return;
+    defer t.release();
+    t.interrupt();
+}
+
 /// The `interrupt` command: stop the live turn (its Done finishes the entry
 /// as "aborted") and pause the queue. False when nothing is running.
 pub fn interrupt(host: *EngineHost, chat_id: []const u8) bool {
@@ -661,4 +682,25 @@ test "turn_host: graff with no binary reports it missing instead of replying" {
     defer testing.allocator.free(doc);
     try testing.expect(std.mem.indexOf(u8, doc, "Ack from") == null);
     try testing.expect(std.mem.indexOf(u8, doc, "\"kind\":\"error\",\"message\":\"harness binary not found: /nonexistent/harness-agent-mock does not exist\"") != null);
+}
+
+fn mockRig(delay_ms: []const u8) !*testkit.Rig {
+    const rig = try testkit.Rig.create(.{ .harness = "mock", .override_var = "HARNESS_TEST_UNUSED", .script = "" });
+    errdefer rig.destroy();
+    try rig.env.put("HARNESS_MOCK_DELAY_MS", delay_ms);
+    return rig;
+}
+
+test "turn_host: deleting a chat mid-turn stops the turn and recreates nothing" {
+    const rig = try mockRig("150");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.call("Mutate", "{\"op\":\"deleteChat\",\"chatId\":\"chat-1\"}");
+    try rig.waitIdle(5000);
+    rig.host.mutex.lockUncancelable(rig.io);
+    defer rig.host.mutex.unlock(rig.io);
+    try testing.expect(rig.host.docs.get("chat-1") == null);
+    try testing.expect(rig.host.store.snapshots.get("chat-1") == null);
+    for (rig.host.store.outbox.items) |o| try testing.expect(!std.mem.eql(u8, o.doc_id, "chat-1"));
 }

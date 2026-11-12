@@ -192,7 +192,11 @@ pub const Turn = struct {
     input_seq: u32 = 0,
     interrupted: std.atomic.Value(bool) = .init(false),
     finished: std.atomic.Value(bool) = .init(false),
+    /// Set under `emit_mu` with the Done.
     done_emitted: bool = false,
+    /// Serializes `emit`, so an event from another thread can't reach the
+    /// host after (or while) Done frees its side.
+    emit_mu: Io.Mutex = .init,
     /// A detailed failure message an adapter sets before returning an error.
     fail_msg: ?[]u8 = null,
     /// Adapter state (owned by the adapter's `run`, read by its callbacks under `mu`).
@@ -276,11 +280,13 @@ pub const Turn = struct {
         self.finished.store(true, .release);
     }
 
+    /// Report `ev` to the host. Nothing is reported after Done: the host
+    /// frees its side of the turn with it.
     pub fn emit(self: *Turn, ev: Event) void {
-        if (ev == .done) {
-            if (self.done_emitted) return;
-            self.done_emitted = true;
-        }
+        self.emit_mu.lockUncancelable(self.io);
+        defer self.emit_mu.unlock(self.io);
+        if (self.done_emitted) return;
+        if (ev == .done) self.done_emitted = true;
         self.sink.emitFn(self.sink.ctx, self, ev);
     }
 

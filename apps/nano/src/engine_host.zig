@@ -3683,6 +3683,7 @@ pub const EngineHost = struct {
     }
 
     pub fn deleteChat(self: *EngineHost, chat_id: []const u8) bool {
+        turn_host.chatDeleted(self, chat_id);
         var removed = false;
         var i: usize = 0;
         while (i < self.chats.items.len) {
