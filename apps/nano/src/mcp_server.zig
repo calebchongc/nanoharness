@@ -441,6 +441,7 @@ test {
     _ = @import("mcp/transcript.zig");
     _ = @import("mcp/peer.zig");
     _ = @import("mcp/rooms.zig");
+    _ = @import("mcp/unicode_alnum.zig");
     _ = @import("mcp/bots.zig");
     _ = @import("mcp/tools.zig");
     _ = @import("mcp/tests.zig");
