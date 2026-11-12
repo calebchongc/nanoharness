@@ -7,10 +7,11 @@ as two devices of one made-up user. It is the first run of the Zig engine
 against the real Worker code; before it, the engine was only tested against
 in-process fakes of the edge.
 
-Everything stays on the machine: no Cloudflare account, no deployed edge, no
-secrets. Wrangler runs with metrics, error reports, its npm update check and
-the `request.cf` download turned off, and the check samples every process it
-started for non-loopback connections (reported below).
+The workflow uses no Cloudflare account, deployed edge or real credentials.
+Wrangler runs with metrics, error reports, its npm update check and the
+`request.cf` download turned off, and the check samples every process it
+started for non-loopback connections (reported below). Sampling reports
+observations; it is not a proof that no outbound packet was ever sent.
 
 ## How sign-in works here
 
@@ -173,19 +174,19 @@ from the Worker.
 ## Last run
 
 <!-- local-edge:run:begin -->
-Last `scripts/local-edge.sh check` run: commit `36203a1f`, harness-engine 0.2.186, Zig 0.17.0, Node v24.10.0, wrangler 4.120.0 (the lockfile's). Passed; run 3 of 3 in a row.
+Last `scripts/local-edge.sh check` run: commit `1690f125`, harness-engine 0.2.186, Zig 0.17.0, Node v24.10.0, wrangler 4.120.0 (the lockfile's). Passed; run 1 of 1 in a row.
 
 | Step | | Result | Time | Detail |
 |---|---|---|---|---|
-| 1 | local edge starts on fresh persisted state | pass | 1.2 s | wrangler dev --local, dev auth, 2 loopback ports |
-| 2 | engine A (Zig) starts against it | pass | 0.6 s | harness-engine 0.2.186, scope development |
-| 3 | A signs in, org, device registered | pass | 0.0 s | CLI status ok; AuthStatus signedIn ada-pvio0o in user-ada-pvio0o (= /auth/orgs); engine ListOrgs [] (dev mode); org creation not offered by the Worker (405); device row + relay host online (1 socket) |
-| 4 | A: project, mock chat, turn, transcript | pass | 0.1 s | 2 messages read back, assistant complete, 2 tool parts |
+| 1 | local edge starts on fresh persisted state | pass | 1.5 s | wrangler dev --local; missing/forged/stale sessions rejected; registry no-bearer 401, own-org 200, cross-org 403; forged-session engine refused startup; 3 loopback ports |
+| 2 | engine A (Zig) starts against it | pass | 0.8 s | harness-engine 0.2.186, scope development |
+| 3 | A signs in, org, device registered | pass | 0.0 s | CLI status ok; AuthStatus signedIn ada-pnev8h in user-ada-pnev8h (= /auth/orgs); engine ListOrgs [] (dev mode); org creation not offered by the Worker (405); device row + relay host online (1 socket) |
+| 4 | A: project, mock chat, turn, transcript | pass | 0.2 s | 2 messages read back, assistant complete, 2 tool parts |
 | 5 | the Worker holds the chat row and its history | pass | 0.5 s | chats row (title "Summarise the synthetic demo repo", host A), spaces row present; /chat2/:id/tail 2 messages with the turn; chat2 log headSeq 0 |
 | 6 | engine B: lists, reads, relays a prompt to A | pass | 2.7 s | B lists "Summarise the synthetic demo repo" hosted on A and reads it; B's prompt ran on A, reply on B, Worker tail has both turns |
 | 7 | rooms, tool blob, attachment | pass | 0.1 s | room: B read A's post; tool blob: skipped, no turn produced one (the Zig engine uploads no tool sidecars); FetchToolBlob of a Worker-held blob ok; attachment: landed in A's uploads, relayed prompt ran on A |
-| 8 | edge and A restart on the same state | pass | 2.3 s | A signed in again (dev bearer), chat + both turns local, Worker tail + rows persisted, a rename synced |
-| 9 | everything stopped, no process or port left | pass | 0.3 s | 3 process groups stopped; 14 ports closed |
+| 8 | edge and A restart on the same state | pass | 2.5 s | A signed in again (verified local session), chat + both turns local, Worker tail + rows persisted, a rename synced |
+| 9 | everything stopped, no process or port left | pass | 0.3 s | 3 process groups stopped; 15 ports closed |
 
 Non-loopback connections seen from the edge and engines during the run: none.
 - chat2 log for the chat: headSeq 0 (the Zig engine writes no Loro rows; history is the host-published tail)
