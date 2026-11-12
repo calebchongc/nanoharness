@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# One command that proves Harness builds, tests, packages and runs with Zig
-# alone (apps/nano), on the committed tree:
+# Proves the LEGACY/OFFLINE HZD1 mode builds, tests, packages and runs with
+# Zig alone. It does NOT validate retained-Loro synchronization, whose
+# explicit -Dloro-lib dependency requires Rust (scripts/local-loro.sh).
+# On the committed tree:
 #   1. zig build no-rust
 #   2. the full test suite, in a fresh cache, from a copy of HEAD that has no
 #      crates/, Cargo.toml or Cargo.lock
@@ -163,7 +165,9 @@ fi
 FAKE_ARMS="$(grep -c '^    \.{ \.method = "' "$NANO/src/fake_arm_gate.zig")"
 SCENARIO_CLEAN="$(printf '%s' "$SCENARIO" | sed -e "s#$WORK#<tmp>#g")"
 {
-  echo "# Zig-only proof"
+  echo "# Zig-only legacy/offline proof"
+  echo
+  echo "This proof does not validate retained-Loro sync; that explicit mode requires Rust."
   echo
   echo "- Commit: \`$COMMIT\`"
   echo "- Zig: $ZIG_VERSION"

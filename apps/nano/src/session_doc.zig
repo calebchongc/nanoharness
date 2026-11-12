@@ -279,6 +279,7 @@ pub const SessionDoc = struct {
         const cid = try gpa.dupe(u8, chat_id);
         errdefer gpa.free(cid);
         const did = try gpa.dupe(u8, device_id);
+        errdefer gpa.free(did);
         return .{
             .gpa = gpa,
             .loro_doc = if (loro.enabled) try loro.Doc.init(chat_id) else null,

@@ -162,7 +162,7 @@ fn output(sink: &Sink, dir: &Path) -> Value {
         serde_json::to_vec_pretty(&typed(&doc)).unwrap(),
     )
     .unwrap();
-    json!({"messages":entries.len(),"first":entries.first().map(|m|&m.id),"middle":entries.get(65).map(|m|&m.id),"last":entries.last().map(|m|&m.id),"cursor":sink.cursor.load(Relaxed),"rowsApplied":sink.rows.load(Relaxed),"checkpointApplied":sink.checkpoint.load(Relaxed),"pendingPushes":sink.store.pending_chat_updates(&sink.chat).unwrap().len(),"remoteRunCount":entries.iter().filter(|m|m.id=="remote-message").count()})
+    json!({"messages":entries.len(),"first":entries.first().map(|m|&m.id),"middle":entries.get(65).map(|m|&m.id),"last":entries.last().map(|m|&m.id),"cursor":sink.cursor.load(Relaxed),"rowsApplied":sink.rows.load(Relaxed),"checkpointApplied":sink.checkpoint.load(Relaxed),"pendingPushes":sink.store.pending_chat_updates(&sink.chat).unwrap().len(),"remoteRunCount":entries.iter().filter(|m|m.id=="remote-message").count(),"nativeUnicodeRoundtrip":entries.iter().any(|m|m.parts.iter().any(|p|matches!(p,harness_doc::MessagePart::Text{text,..} if text.contains("Zig writes real Loro updates 🦀 é"))))})
 }
 async fn wait_for(mut pred: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);

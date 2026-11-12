@@ -11,6 +11,11 @@ export HARNESS_HEAVY_BUILD_LOCK="${HARNESS_HEAVY_BUILD_LOCK:-$root/../zigfull.lo
 case "$cmd" in
   build|check|up)
     if [[ "${LOCAL_LORO_NO_BUILD:-}" != 1 ]]; then
+      command -v node >/dev/null || { echo "Node 22+ is required" >&2; exit 1; }
+      [[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge 22 ]] || { echo "Node 22+ is required" >&2; exit 1; }
+      if [[ ! -x "$root/edge/node_modules/.bin/wrangler" ]]; then
+        (cd "$root/edge" && npm ci --no-audit --no-fund)
+      fi
       bash "$root/scripts/build-loro.sh"
       (cd "$root/apps/nano" && "$root/scripts/heavy-build.sh" zig build install -Dloro-lib="$root/target/nano-loro/debug/libharness_nano_loro.a")
       if [[ "$cmd" == check && "$(uname -s)" == Darwin && -d /Applications/Xcode.app ]]; then

@@ -90,10 +90,10 @@ try {
     return { ...seeded, dependentBeforePrerequisite: true, pendingPersistedAcrossRestart: true, appliedCursorHeld: 0, headSeq: st.headSeq, messages: rows.length, first: rows[0].id, middle: rows[65].id, last: rows.at(-1).id };
   });
   await step("Zig turn -> retained Rust ChatClient typed document", async () => {
-    await runPrompt(a, chat, repo, "Zig writes real Loro updates");
+    await runPrompt(a, chat, repo, "Zig writes real Loro updates 🦀 é");
     await history(a, (r) => completed(r, "Zig writes real Loro updates"), "native mock turn");
     const result = peer("inspect");
-    if (result.messages < 133 || (!result.rowsApplied && !result.checkpointApplied)) throw new Error("Rust client did not consume real document data");
+    if (result.messages < 133 || !result.nativeUnicodeRoundtrip || (!result.rowsApplied && !result.checkpointApplied)) throw new Error("Rust client did not consume real document data with native Unicode content");
     return result;
   });
   await step("Rust document command executes once on Zig host and returns via Loro", async () => {

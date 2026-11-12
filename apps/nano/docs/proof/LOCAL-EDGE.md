@@ -78,16 +78,15 @@ Fixed in Zig, each with a test that fails without it:
    existing `Zero-latency SSD registry-cache.json + tail disk cache
    round-trip` for the replay.
 
-Open:
+Original gaps and current boundaries:
 
-4. **No chat2 log rows (Loro).** The Zig engine never opens
-   `/chat2/:id/ws`; the chat's log on the Worker stays at `headSeq 0`, and
-   history reaches other devices only through the tail sidecar. A Rust or Swift
-   client opening a Zig-hosted chat gets the tail (instant open) but no live
-   doc, and a command it writes into the doc never reaches the Zig host (only
-   `RelayCommand` does). `chat2_client.zig` is only used in tests. Keep Loro:
-   integrate the existing implementation through a compatible bridge rather
-   than rewriting the codec in Zig (see the inventory below).
+4. **The default legacy/offline mode still has no Loro log.** Its `HZD1`
+   format and tails are not Loro sync. The explicit `-Dloro-lib` build now
+   links the retained core, runs real chat2 HTTP rows/checkpoints, reads full
+   history and executes document commands. Use `scripts/local-loro.sh check`
+   and see [the separate full-sync evidence](FULL-LORO.md). Its Rust peer
+   uses the real retained WebSocket client; the native client currently uses
+   the protocol's existing HTTP transport, not a persistent per-chat socket.
 5. **No tool-output sidecars.** The engine never uploads
    `PUT /blob/:chat/:part` for a long tool output or diff; `FetchToolBlob`
    reads a blob the Worker holds correctly. The upload belongs where the turn
@@ -101,9 +100,10 @@ Open:
 7. **One device-room socket per forwarded call.** `relay_dial.zig` doesn't
    cache peer links as Rust's `LinkCache` does, so a large attachment dials
    once per chunk. A small per-target cache in that file.
-8. **Remote turns show up at row changes, not while they stream.** A second
-   device sees the host's turn when its chat or session row changes (start
-   and end), not token by token, which Rust gets from chat2 rows (see 4).
+8. **Legacy remote turns still depend on tail/row changes.** Explicit Loro
+   mode transports genuine document increments and updates existing entries,
+   but coalesces them on the background HTTP sync cadence; token-by-token
+   native WebSocket delivery is not claimed.
 
 Worker behaviour the engine follows, not mismatches:
 
@@ -130,18 +130,19 @@ its implementation or dependencies:
   `SessionStore.swift`, and `SessionQueue.swift`: committed Swift Loro
   persistence, chat2 client, session store and queue integration.
 
-This is reusable implementation, **not functioning Loro sync in the Zig
-engine**. The committed nano build contains no Loro ABI bridge. Its
-`session_doc.zig` writes a private `HZD1` document format and explicitly
-returns `UnsupportedLegacyLoroBlob` for Loro input. Its chat2 state machine
-and shared wire vectors do not make that format Loro-compatible. Required
-follow-up: bridge the retained Loro session operations and snapshots,
-connect chat2 into the live Zig host, persist/import compatible frontiers
-and updates, execute document commands, and prove Rust/Swift/Zig bidirectional
-streaming, queue edits, offline merge and restart interoperability using
-synthetic data. No uncommitted bridge or other session's worktree was read
-or copied. Retaining `crates/` and `edge/` is distinct from whether legacy
-`tui/` is included in a future repository.
+The default/offline build remains `HZD1` and rejects Loro input. Separately,
+`crates/nano-loro` now provides a project-owned thin C ABI over retained
+`harness-doc` + locked Loro 1.13.9, with the native wrapper in `src/loro.zig`
+and runtime in `src/loro_sync.zig`. This **requires Rust** and is not an
+official loro-ffi Zig binding or an all-Zig codec rewrite. Genuine snapshots,
+updates and binary VVs go through chat2; private `NLR1` disk state additionally
+retains unresolved incoming bytes and unsent state with a held cursor.
+
+See `crates/nano-loro/README.md` for the ABI, explicit build mode and migration
+policy, and `FULL-LORO.md` for actual acceptance evidence rather than inferring
+sync from retained files. No other session's uncommitted bridge or worktree
+was read or copied. Retaining `crates/` and `edge/` remains distinct from
+whether legacy `tui/` is included in a future repository.
 
 ## Historical branch test evidence (not integration validation)
 

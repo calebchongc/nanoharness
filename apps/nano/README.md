@@ -62,8 +62,15 @@ check alone is not a public-distribution gate.
 
 ## Build and run
 
-You need Zig 0.17.0 and, on macOS, Xcode or the Command Line Tools. Nothing
-else: no Rust toolchain, and nothing from `crates/`.
+The default **legacy/offline** build needs Zig 0.17.0 and, on macOS, Xcode
+or the Command Line Tools, with no Rust toolchain. Its `HZD1` document format
+is not Loro-compatible.
+
+For retained-Loro synchronization, use `scripts/local-loro.sh build` or
+`scripts/local-loro.sh check` from the repository root. This explicit mode
+links a thin project-owned C ABI around the existing `harness-doc` schema
+and locked Loro core, and **requires Rust**. It is not an official
+`loro-ffi` Zig binding. See [the ABI and persistence boundary](../../crates/nano-loro/README.md).
 
 ```sh
 cd apps/nano
@@ -106,13 +113,16 @@ wait for an engine instead. `sh scripts/bundle.sh` packages only the app;
 harness-nano connects to `127.0.0.1:27664`. Set `HARNESS_IPC_PORT` to use
 another engine.
 
-## Proving it builds and runs with Zig alone
+## Proving legacy/offline mode builds and runs with Zig alone
 
 ```sh
 HARNESS_HEAVY_BUILD_LOCK=/path/to/a.lock scripts/prove-zig.sh   # from the repository root
 ```
 
-One command, on the committed tree: `zig build no-rust`; the full test suite
+This does **not** validate retained-Loro synchronization. Passing the Loro
+archive to `zig build no-rust` deliberately fails: that mode links Rust.
+
+One command, on the committed legacy/offline tree: `zig build no-rust`; the full test suite
 in a fresh cache from a copy of HEAD with no `crates/`, `Cargo.toml` or
 `Cargo.lock`; the macOS bundle, checked to hold `harness-engine` and no Rust
 binary; the bundle's own engine under a temporary HOME, data folder and port

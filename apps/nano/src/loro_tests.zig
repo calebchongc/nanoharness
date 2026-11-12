@@ -8,6 +8,11 @@ const Client = @import("chat2_client.zig").Chat2RoomClient;
 const baseline = @embedFile("fixtures/loro-baseline.bin");
 const increment = @embedFile("fixtures/loro-incremental.bin");
 
+test "retained Loro: ABI constructor failure frees native allocations" {
+    if (!@import("loro.zig").enabled) return error.SkipZigTest;
+    try t.expectError(error.LoroCreateFailed, sd.SessionDoc.init(t.allocator, "invalid-\xff", "synthetic-device"));
+}
+
 test "retained Loro: genuine Rust snapshot and incremental change existing entries beyond the tail" {
     if (!@import("loro.zig").enabled) return error.SkipZigTest;
     var doc = try sd.SessionDoc.init(t.allocator, "synthetic-loro-fixture", "synthetic-zig");

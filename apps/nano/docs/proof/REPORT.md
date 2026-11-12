@@ -1,4 +1,8 @@
-# Zig-only proof
+# Historical Zig-only legacy/offline proof
+
+This report predates the retained-Loro bridge. It validates the named commit
+and legacy/offline mode only, not the explicit Rust-dependent full-sync mode.
+See `crates/nano-loro/README.md` and the separate full-sync acceptance report.
 
 - Commit: `fd0977d1`
 - Zig: 0.17.0
