@@ -153,6 +153,7 @@ test {
     _ = @import("rpcw_worktrees.zig");
     _ = @import("rpcw_executables.zig");
     _ = @import("rpcw_harnesses.zig");
+    _ = @import("rpcw_mcp.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");

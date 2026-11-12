@@ -314,6 +314,22 @@ fn findWithExtras(gpa: Allocator, io: std.Io, exe: []const u8, p: Probe, home: ?
     return false;
 }
 
+/// The CLI a harness launches: its validated `*_EXECUTABLE` override, else the
+/// first runnable candidate of `find_on_paths(cli, install dirs)`.
+pub fn resolveCli(gpa: Allocator, io: std.Io, id: HarnessId) !?[]u8 {
+    const p = probeFor(id);
+    if (p.env_override) |var_name| {
+        const value = if (id == .pi) common.getenv(var_name) else common.getenvNonEmpty(var_name);
+        if (value) |v| return if (common.isFile(io, v)) try gpa.dupe(u8, v) else null;
+    }
+    var extra = try extraPaths(gpa, p, common.homeDir());
+    defer {
+        for (extra.items) |x| gpa.free(x);
+        extra.deinit(gpa);
+    }
+    return findOnPaths(gpa, io, p.cli, @ptrCast(extra.items));
+}
+
 /// `crate::adapter_install::adapters_root` (Unix).
 pub fn adaptersRoot(gpa: Allocator) !?[]u8 {
     if (common.getenvNonEmpty("HARNESS_ADAPTERS_DIR")) |d| return try gpa.dupe(u8, d);
