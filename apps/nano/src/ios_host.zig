@@ -29,6 +29,7 @@ pub const EmbeddedHost = struct {
         env: *const std.process.Environ.Map,
         demo_mode: bool,
     ) !*EmbeddedHost {
+        if (demo_mode and @import("engine_cli.zig").AuthEnv.from(env).local_edge_auth) return error.LocalAuthConflictsWithOfflineDemo;
         const self = try gpa.create(EmbeddedHost);
         errdefer gpa.destroy(self);
 
@@ -76,16 +77,7 @@ pub const EmbeddedHost = struct {
         if (demo_mode) {
             try seedSyntheticDemo(&host);
         } else {
-            const edge_url = env.get("HARNESS_EDGE_URL") orelse auth_host.default_edge_url;
-            const client_id = env.get("HARNESS_CODEGRAFF_CLIENT_ID") orelse auth_host.default_codegraff_client_id;
-            const api_base = env.get("HARNESS_CODEGRAFF_API_BASE") orelse auth_host.default_codegraff_api_base;
-            const gateway = env.get("HARNESS_CODEGRAFF_GATEWAY") orelse auth_host.default_codegraff_gateway;
-            host.auth.configureCodegraff(edge_url, client_id, api_base, resolved_dir) catch {};
-            host.auth.setCodegraffGateway(gateway) catch {};
-            if (host.auth.loadPersistedSession(io)) {
-                host.workspace_scope = "synced";
-                _ = host.loadPersistedRegistryCache(io);
-            }
+            try configureEmbeddedAuth(&host, io, env, resolved_dir);
         }
 
         const listen_addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -137,6 +129,7 @@ pub const EmbeddedHost = struct {
             if (!self.host.stop_requested) {
                 self.host.prefetchRecentChatTailsUnlocked(self.io, 16);
             }
+            @import("loro_sync.zig").sync(&self.host, self.io) catch |err| std.log.warn("embedded Loro sync: {s}", .{@errorName(err)});
         }
         while (!self.host.stop_requested) {
             var step: usize = 0;
@@ -149,6 +142,7 @@ pub const EmbeddedHost = struct {
             if (self.host.syncFromEdgeRegistryUnlocked(self.io) and !self.host.stop_requested) {
                 self.host.prefetchRecentChatTailsUnlocked(self.io, 16);
             }
+            @import("loro_sync.zig").sync(&self.host, self.io) catch |err| std.log.warn("embedded Loro sync: {s}", .{@errorName(err)});
         }
     }
 
@@ -192,6 +186,68 @@ pub const EmbeddedHost = struct {
     }
 };
 
+/// Shared by the embedded startup and focused configuration regressions.
+pub fn configureEmbeddedAuth(host: *engine_host.EngineHost, io: Io, env: *const std.process.Environ.Map, data_dir: ?[]const u8) !void {
+    const cfg = @import("engine_cli.zig").AuthEnv.from(env);
+    if (cfg.local_edge_auth or cfg.edge_token != null) {
+        if (builtin.os.tag == .ios and builtin.target.abi != .simulator) {
+            host.auth.signOut();
+            return error.LocalAuthRequiresSimulator;
+        }
+        try @import("dev_edge_auth.zig").configure(&host.auth, io, cfg, env.get("HARNESS_ORG_ID"), data_dir);
+        host.workspace_scope = "development";
+        _ = host.loadPersistedRegistryCache(io);
+        return;
+    }
+    if (cfg.disabled) {
+        host.auth.signOut();
+        return;
+    }
+    try host.auth.configureCodegraff(cfg.edge_url, cfg.client_id, cfg.api_base, data_dir);
+    try host.auth.setCodegraffGateway(cfg.gateway);
+    if (host.auth.loadPersistedSession(io)) {
+        host.workspace_scope = "synced";
+        _ = host.loadPersistedRegistryCache(io);
+    }
+}
+
+test "embedded local auth: invalid local session fails before server startup" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HARNESS_LOCAL_EDGE_AUTH", "1");
+    try env.put("HARNESS_EDGE_URL", "http://127.0.0.1:9");
+    try env.put("HARNESS_EDGE_TOKEN", "synthetic-invalid-session");
+    var host = try engine_host.EngineHost.init(std.testing.allocator, "synthetic-ios", "Synthetic Phone");
+    defer host.deinit();
+    if (configureEmbeddedAuth(&host, std.testing.io, &env, null)) |_| {
+        return error.InvalidLocalSessionWasIgnored;
+    } else |_| {}
+    try std.testing.expect(!host.auth.signed_in);
+    try std.testing.expect(host.auth.api_key == null);
+    try std.testing.expect(host.auth.edge_url == null);
+}
+
+test "embedded local auth: remote origin and implicit token fail closed; defaults stay production" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var host = try engine_host.EngineHost.init(std.testing.allocator, "synthetic-ios", "Synthetic Phone");
+    defer host.deinit();
+    {
+        var normal = try engine_host.EngineHost.init(std.testing.allocator, "synthetic-normal", "Synthetic Phone");
+        defer normal.deinit();
+        try configureEmbeddedAuth(&normal, std.testing.io, &env, null);
+        try std.testing.expectEqualStrings(auth_host.default_edge_url, normal.auth.edge_url.?);
+    }
+    try env.put("HARNESS_EDGE_TOKEN", "synthetic-session");
+    try std.testing.expectError(error.LocalAuthNotEnabled, configureEmbeddedAuth(&host, std.testing.io, &env, null));
+    try env.put("HARNESS_LOCAL_EDGE_AUTH", "1");
+    try std.testing.expectError(error.LocalAuthRequiresLoopback, configureEmbeddedAuth(&host, std.testing.io, &env, null));
+    try std.testing.expect(!host.auth.signed_in);
+    try std.testing.expect(host.auth.api_key == null);
+    try std.testing.expect(host.auth.edge_url == null);
+    try std.testing.expectError(error.LocalAuthConflictsWithOfflineDemo, EmbeddedHost.start(std.testing.allocator, std.testing.io, &env, true));
+}
+
 /// Seeds synthetic demo data (zero user data per `AGENTS.md`) covering multi-project
 /// & multi-device grouping, a 240-message ProMotion scroll benchmark transcript,
 /// active working turn, interactive question card, queued follow-ups, and archived row.
@@ -232,9 +288,11 @@ pub fn seedSyntheticDemo(host: *engine_host.EngineHost) !void {
     , .{
         now,      t_1d,
         now,      t_1d,
-        t_2h,     t_recent, t_recent, t_recent,
+        t_2h,     t_recent,
         t_recent, t_recent,
-        t_2h,     t_2m,     t_2m,     t_2m,
+        t_recent, t_recent,
+        t_2h,     t_2m,
+        t_2m,     t_2m,
         t_2m,     now,
     });
     try w.print(
@@ -247,13 +305,13 @@ pub fn seedSyntheticDemo(host: *engine_host.EngineHost) !void {
         \\  {{"kind":"chats","id":"chat-archived-swift","deleted":false,"fields":{{"id":"chat-archived-swift","spaceId":"space-nanoharness","deviceId":"dev-studio","archived":true,"title":"Retire Legacy Swift FFI Bridge","branch":"chore/pure-zig","createdAt":{d},"lastMessageAt":{d},"lastPromptAt":{d},"lastSeenAt":{d},"lastMessagePreview":"Replaced UniFFI + SwiftUI wrapper with single native Zig binary.","config":{{"harness":"graff","model":"claude-sonnet-4-6"}}}}}}
         \\]}}
     , .{
-        t_2h, t_8m,  t_8m,
-        t_8m, t_8m,
-        t_2h, t_25m, t_25m,
-        t_25m, t_25m,
-        t_1d, t_2h,  t_2h, t_2h,
-        t_2h, t_2h,
-        t_1d, t_1d,  t_1d, t_1d,
+        t_2h,  t_8m,  t_8m,
+        t_8m,  t_8m,  t_2h,
+        t_25m, t_25m, t_25m,
+        t_25m, t_1d,  t_2h,
+        t_2h,  t_2h,  t_2h,
+        t_2h,  t_1d,  t_1d,
+        t_1d,  t_1d,
     });
 
     _ = host.applyRegistryResponseJson("org-synth-demo", aw.written(), false);

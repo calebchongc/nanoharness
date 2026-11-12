@@ -129,6 +129,14 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .ios) {
         exe.use_llvm = true;
         linkSqlite(b, exe.root_module, target);
+        // iOS returns before the desktop artifact loop. The simulator's
+        // retained core must be compiled for aarch64-apple-ios-sim, NEVER
+        // reused from the macOS dylib or the physical-device target.
+        if (loro_lib) |archive| {
+            exe.root_module.addObjectFile(.{ .cwd_relative = archive });
+            exe.root_module.linkFramework("CoreFoundation", .{});
+            exe.root_module.linkSystemLibrary("iconv", .{});
+        }
         // The Keychain (session_store.zig), push (ios_push.zig) and
         // MetricKit (ios_crash_reports.zig).
         for ([_][]const u8{ "Security", "UserNotifications", "MetricKit" }) |f| exe.root_module.linkFramework(f, .{});
