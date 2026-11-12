@@ -900,7 +900,9 @@ test "turn_host: a run that changes the model replaces the live turn once it sto
     try rig.run("m-1", "hello");
     try rig.waitFor("Streaming pipeline", 5000);
     try rig.command("{\"kind\":\"run\",\"messageId\":\"m-2\",\"request\":{\"prompt\":\"on another model\",\"model\":\"mock-fable-5\"}}");
-    try testing.expectEqual(@as(usize, 1), liveCount(rig.io, rig.host));
+    // Never two turns on the chat. While the stopped turn hands over to its
+    // replacement there can briefly be none, so this is "at most one".
+    try testing.expect(liveCount(rig.io, rig.host) <= 1);
     try rig.waitIdle(8000);
     const doc = try rig.docJson();
     defer testing.allocator.free(doc);
