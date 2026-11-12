@@ -2177,9 +2177,6 @@ pub const EngineHost = struct {
             .CodegraffGithubRunnerAction,
             .CreateWorktree,
             .DeleteWorktree,
-            .SetUpSimulators,
-            .BootSimulator,
-            .ShutdownSimulator,
             .SimulatorInput,
             .LocalhostPageInput,
             .ApplyUpdate,
@@ -3254,7 +3251,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"closed\":{}}}", .{closed}) };
             },
             .ListSimulators => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"simulators\":[]}") };
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .list, params));
+            },
+            .SetUpSimulators => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .set_up, params));
+            },
+            .BootSimulator => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .boot, params));
+            },
+            .ShutdownSimulator => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .shutdown, params));
             },
             .WatchSimulatorScreen, .WatchLocalhostPage => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"frame\":null}"));
