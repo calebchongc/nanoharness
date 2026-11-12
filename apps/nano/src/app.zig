@@ -489,6 +489,8 @@ pub const App = struct {
     nav_index: usize = 0,
     nav_initialized: bool = false,
     nav_restoring: bool = false,
+    /// Image preview, annotate, workspace gate, keep-awake, `/` menu.
+    ui_gaps: @import("app_ui_gaps.zig").State = .{},
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -528,6 +530,7 @@ pub const App = struct {
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
         a.reap();
+        a.ui_gaps.deinit(a);
         a.attachments.deinit(a.gpa);
         a.file_drop.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);

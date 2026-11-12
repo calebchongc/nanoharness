@@ -251,6 +251,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_palette.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
+    @import("view_image_preview.zig").overlay(c, a, k);
     // First-run setup, over the whole window.
     @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
@@ -276,7 +277,8 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or
-        v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none;
+        v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none or
+        @import("app_image_preview.zig").isOpen(a);
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -495,6 +497,7 @@ fn keys(c: *ui.Context, a: *App) void {
     if (rebinding.recording(a)) return rebinding.capture(c, a);
     // First-run setup covers the window and has every key.
     if (@import("view_setup.zig").keys(c, a)) return;
+    if (@import("view_image_preview.zig").keys(c, a)) return;
     if (@import("view_project_setup.zig").keys(c, a)) return;
     if (@import("view_open_chooser.zig").keys(c, a)) return;
     // ⌘K, the command palette (fixed, as the GPUI app binds it); open, it

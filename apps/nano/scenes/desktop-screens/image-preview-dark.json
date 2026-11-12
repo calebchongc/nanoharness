@@ -1,0 +1,222 @@
+{
+ "width": 1200,
+ "height": 780,
+ "scale": 2,
+ "devices": [
+  {
+   "id": "d",
+   "name": "Studio",
+   "platform": "macos"
+  }
+ ],
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "d",
+   "path": "/work/fieldnotes",
+   "name": "fieldnotes"
+  },
+  {
+   "id": "s2",
+   "deviceId": "d",
+   "path": "/work/garden-planner",
+   "name": "garden-planner"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "d",
+   "title": "Polish the billing page",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "lastMessageAt": "2026-11-10T00:00:00Z",
+   "config": {
+    "harness": "graff",
+    "model": "m1"
+   }
+  }
+ ],
+ "dark": true,
+ "replies": {
+  "ListHarnesses": [
+   {
+    "id": "graff",
+    "name": "Graff",
+    "installed": true,
+    "enabled": true,
+    "reasoningLevels": [
+     "low",
+     "medium",
+     "high"
+    ]
+   },
+   {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "installed": true,
+    "enabled": false
+   },
+   {
+    "id": "codex",
+    "name": "Codex",
+    "installed": false,
+    "enabled": false
+   }
+  ],
+  "ListModels": [
+   {
+    "id": "m1",
+    "label": "Graff Fast"
+   },
+   {
+    "id": "m2",
+    "label": "Graff Pro"
+   },
+   {
+    "id": "m3",
+    "label": "Graff Max"
+   }
+  ],
+  "EngineInfo": {
+   "workspaceScope": "local"
+  },
+  "ReadAttachmentChunk": {
+   "data": "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",
+   "done": true,
+   "mimeType": "image/png"
+  },
+  "UploadChunk": {
+   "ok": true
+  },
+  "UploadCommit": {
+   "path": "/up/ui-annotated.png"
+  }
+ },
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {
+    "id": "u",
+    "role": "user",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "Make the upgrade button stand out more.\n\nAttached images (local files \u2014 open them to view):\n- /up/ui.png"
+     }
+    ]
+   },
+   {
+    "id": "r",
+    "role": "assistant",
+    "status": "complete",
+    "parts": [
+     {
+      "id": "t",
+      "kind": "text",
+      "text": "Here is the current layout with the button highlighted."
+     },
+     {
+      "id": "i",
+      "kind": "image",
+      "name": "chart.png",
+      "path": "/up/chart.png"
+     }
+    ]
+   }
+  ]
+ },
+ "steps": [
+  {
+   "snap": "chat"
+  },
+  {
+   "click": "ui.png"
+  },
+  {
+   "expect": "Annotate"
+  },
+  {
+   "expect": "1 of 2"
+  },
+  {
+   "snap": "preview-fit"
+  },
+  {
+   "press": "cmd+="
+  },
+  {
+   "press": "cmd+="
+  },
+  {
+   "snap": "preview-zoomed"
+  },
+  {
+   "press": "right"
+  },
+  {
+   "expect": "2 of 2"
+  },
+  {
+   "snap": "preview-next"
+  },
+  {
+   "press": "left"
+  },
+  {
+   "click": "Annotate"
+  },
+  {
+   "expect": "Rectangle"
+  },
+  {
+   "snap": "annotate-empty"
+  },
+  {
+   "drag": [
+    744,
+    260,
+    866,
+    304
+   ]
+  },
+  {
+   "expect": "Add a note\u2026"
+  },
+  {
+   "type": "Make this the primary button"
+  },
+  {
+   "press": "enter"
+  },
+  {
+   "snap": "annotate-box"
+  },
+  {
+   "click": "Text"
+  },
+  {
+   "clickAt": [
+    400,
+    430
+   ]
+  },
+  {
+   "type": "Add a download link here"
+  },
+  {
+   "press": "enter"
+  },
+  {
+   "snap": "annotate-text"
+  },
+  {
+   "click": "Done"
+  },
+  {
+   "snap": "composer-annotated"
+  }
+ ]
+}

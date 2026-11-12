@@ -391,7 +391,10 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
             try parseQuestions(gpa, &p, o);
         },
-        .image => try p.text.appendSlice(gpa, string(o.get("name")) orelse ""),
+        .image => {
+            try p.text.appendSlice(gpa, string(o.get("name")) orelse "");
+            if (string(o.get("path"))) |s| p.path = try gpa.dupe(u8, s);
+        },
         .visual => try p.text.appendSlice(gpa, string(o.get("title")) orelse ""),
         .delegation, .other => {},
     }
