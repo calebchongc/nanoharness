@@ -2283,9 +2283,7 @@ pub const EngineHost = struct {
             },
             .ListMcpServers => return @import("rpcw_mcp.zig").listMcpServers(self, params),
             .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
-            .ExternalHistoryImport => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"imported\":[]}") };
-            },
+            .ExternalHistoryImport => return @import("rpcw_history_import.zig").externalHistoryImport(self, params),
             .CodexConversationPreview => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"title\":\"Codex Session\",\"messages\":[]}") };
             },
