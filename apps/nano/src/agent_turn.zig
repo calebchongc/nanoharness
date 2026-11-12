@@ -235,9 +235,17 @@ pub const Turn = struct {
         }
         self.mu.lockUncancelable(self.io);
         const proc = self.proc;
-        self.proc = null;
         self.mu.unlock(self.io);
-        if (proc) |p| p.destroy();
+        if (proc) |p| {
+            // `shutdown_child`: EOF first, then TERM and KILL if it lingers.
+            p.closeStdin();
+            p.escalate(kill_grace_ms, kill_grace_ms * 2);
+            _ = p.wait();
+            self.mu.lockUncancelable(self.io);
+            self.proc = null;
+            self.mu.unlock(self.io);
+            p.destroy();
+        }
         self.finished.store(true, .release);
     }
 
