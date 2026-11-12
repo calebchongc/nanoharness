@@ -3,4 +3,6 @@
 test {
     _ = @import("rpcw_uploads.zig");
     _ = @import("rpcw_workspace_files.zig");
+    _ = @import("rpcw_keep_awake.zig");
+    _ = @import("rpcw_settings.zig");
 }

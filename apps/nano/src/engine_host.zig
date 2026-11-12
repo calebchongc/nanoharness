@@ -871,8 +871,8 @@ pub const EngineHost = struct {
     workspace_scope: []const u8 = "synced",
     keep_awake_enabled: bool = false,
     autonomy_level: []u8,
-    graff_draft_subagents: bool = true,
-    graff_compact_at: i64 = 80,
+    graff_draft_subagents: bool = false,
+    graff_compact_at: i64 = 0,
     sidebar_sort_by: []u8,
     sidebar_group_by: []u8,
     sync_budget: SyncBudget = .{},
@@ -910,7 +910,7 @@ pub const EngineHost = struct {
         errdefer gpa.free(did);
         const dname = try gpa.dupe(u8, device_name);
         errdefer gpa.free(dname);
-        const auton = try gpa.dupe(u8, "workspace");
+        const auton = try gpa.dupe(u8, "full-access");
         errdefer gpa.free(auton);
         const sort_by = try gpa.dupe(u8, "updated");
         errdefer gpa.free(sort_by);
@@ -942,6 +942,7 @@ pub const EngineHost = struct {
         const copy = try self.gpa.dupe(u8, dir);
         if (self.data_dir) |old| self.gpa.free(old);
         self.data_dir = copy;
+        @import("rpcw_settings.zig").loadInto(self);
     }
 
     pub fn deinit(self: *EngineHost) void {
@@ -967,6 +968,7 @@ pub const EngineHost = struct {
         }
         for (self.device_poll_threads.items) |th| th.join();
         self.device_poll_threads.deinit(self.gpa);
+        @import("rpcw_keep_awake.zig").release();
 
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);
@@ -1573,6 +1575,7 @@ pub const EngineHost = struct {
     }
 
     pub fn broadcastWatch(self: *EngineHost, kind: WatchKind, target_id: ?[]const u8, payload_json: []const u8) !void {
+        if (kind == .sessions) @import("rpcw_keep_awake.zig").follow(self);
         for (self.watches.items) |w| {
             if (w.kind != kind) continue;
             if (target_id) |tid| {
@@ -2167,71 +2170,16 @@ pub const EngineHost = struct {
             .PollAgentLogin => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":\"done\"}") };
             },
-            .GetAutonomy => {
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"autonomy\":{f},\"chosen\":true}}",
-                    .{json.fmt(self.autonomy_level, .{})},
-                ) };
-            },
-            .SetAutonomy => {
-                if (requireObj(params)) |obj| {
-                    if (requireStr(obj, "autonomy")) |lvl| {
-                        const copy = try self.gpa.dupe(u8, lvl);
-                        self.gpa.free(self.autonomy_level);
-                        self.autonomy_level = copy;
-                    }
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"autonomy\":{f},\"chosen\":true}}",
-                    .{json.fmt(self.autonomy_level, .{})},
-                ) };
-            },
-            .GetKeepAwake => {
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"enabled\":{},\"supported\":true}}",
-                    .{self.keep_awake_enabled},
-                ) };
-            },
-            .SetKeepAwake => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("enabled")) |v| if (v == .bool) {
-                        self.keep_awake_enabled = v.bool;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"enabled\":{},\"supported\":true}}",
-                    .{self.keep_awake_enabled},
-                ) };
-            },
-            .GetGraffDraftSubagents => {
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
-            },
-            .SetGraffDraftSubagents => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("enabled")) |v| if (v == .bool) {
-                        self.graff_draft_subagents = v.bool;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
-            },
-            .GetGraffCompactAt => {
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
-            },
-            .SetGraffCompactAt => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("percent")) |v| if (v == .integer) {
-                        self.graff_compact_at = v.integer;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
-            },
-            .GetTitleSettings, .SetTitleSettings => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"harness\":null,\"model\":null}") };
-            },
+            .GetAutonomy => return @import("rpcw_settings.zig").getAutonomy(self),
+            .SetAutonomy => return @import("rpcw_settings.zig").setAutonomy(self, params),
+            .GetKeepAwake => return @import("rpcw_settings.zig").getKeepAwake(self),
+            .SetKeepAwake => return @import("rpcw_settings.zig").setKeepAwake(self, params),
+            .GetGraffDraftSubagents => return @import("rpcw_settings.zig").getGraffDraftSubagents(self),
+            .SetGraffDraftSubagents => return @import("rpcw_settings.zig").setGraffDraftSubagents(self, params),
+            .GetGraffCompactAt => return @import("rpcw_settings.zig").getGraffCompactAt(self),
+            .SetGraffCompactAt => return @import("rpcw_settings.zig").setGraffCompactAt(self, params),
+            .GetTitleSettings => return @import("rpcw_settings.zig").getTitleSettings(self),
+            .SetTitleSettings => return @import("rpcw_settings.zig").setTitleSettings(self, params),
             .CodegraffSandboxes => {
                 const sb = @import("sandboxes_host.zig");
                 return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .list, params));
@@ -6982,11 +6930,11 @@ test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity 
     try testing.expect(!doc.queue.items[0].isAutoDeliverable(false));
 
     // 4. Autonomy & sidebar preferences round-trip.
-    const set_aut = try host.handle("SetAutonomy", try json.parseFromSliceLeaky(json.Value, a, "{\"autonomy\":\"full\"}", .{}));
+    const set_aut = try host.handle("SetAutonomy", try json.parseFromSliceLeaky(json.Value, a, "{\"autonomy\":\"full-access\"}", .{}));
     defer gpa.free(set_aut.unary_json);
     const get_aut = try host.handle("GetAutonomy", json.Value{ .object = .empty });
     defer gpa.free(get_aut.unary_json);
-    try testing.expectEqualStrings("{\"autonomy\":\"full\",\"chosen\":true}", get_aut.unary_json);
+    try testing.expectEqualStrings("{\"autonomy\":\"full-access\",\"chosen\":true}", get_aut.unary_json);
 
     const set_app = try host.handle("Mutate", try json.parseFromSliceLeaky(json.Value, a, "{\"op\":\"setAppearance\",\"sortBy\":\"created\",\"groupBy\":\"status\"}", .{}));
     defer gpa.free(set_app.unary_json);
