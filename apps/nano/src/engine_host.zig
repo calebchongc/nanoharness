@@ -2277,17 +2277,8 @@ pub const EngineHost = struct {
             .ListMcpServers => return @import("rpcw_mcp.zig").listMcpServers(self, params),
             .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
             .ExternalHistoryImport => return @import("rpcw_history_import.zig").externalHistoryImport(self, params),
-            .CodexConversationPreview => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"title\":\"Codex Session\",\"messages\":[]}") };
-            },
-            .CodexConversationImport => {
-                const ref = if (requireObj(params)) |obj| (requireStr(obj, "reference") orelse "codex-imported") else "codex-imported";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"chatId\":{f},\"alreadyImported\":false}}",
-                    .{json.fmt(ref, .{})},
-                ) };
-            },
+            .CodexConversationPreview => return @import("rpcw_codex_conversation.zig").preview(self, params),
+            .CodexConversationImport => return @import("rpcw_codex_conversation.zig").import(self, params),
             .RoomRequest => {
                 return @import("rpcw_rooms.zig").roomRequest(self, params);
             },

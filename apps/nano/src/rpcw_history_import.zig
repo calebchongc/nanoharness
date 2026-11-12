@@ -97,7 +97,7 @@ fn jsonText(arena: Allocator, v: json.Value) ![]const u8 {
 /// The `text` of each block joined with newlines; `only_text_type` keeps just
 /// blocks whose `type` is `text`. `null` when an array gives nothing and
 /// `null_if_empty` is set, or the value is neither a string nor an array.
-fn blocksText(arena: Allocator, content: json.Value, only_text_type: bool, null_if_empty: bool) !?[]const u8 {
+pub fn blocksText(arena: Allocator, content: json.Value, only_text_type: bool, null_if_empty: bool) !?[]const u8 {
     switch (content) {
         .string => |s| return s,
         .array => |arr| {
@@ -223,7 +223,7 @@ fn toolAt(t: *Transcript, calls: *const CallIndex, id: ?[]const u8) ?*Tool {
 }
 
 /// A JSONL file read line by line (`BufReader::lines`).
-const Lines = struct {
+pub const Lines = struct {
     file: std.Io.File,
     io: std.Io,
     buf: [64 * 1024]u8 = undefined,
@@ -231,7 +231,7 @@ const Lines = struct {
     line: std.Io.Writer.Allocating,
     done: bool = false,
 
-    fn open(gpa: Allocator, io: std.Io, path: []const u8) !*Lines {
+    pub fn open(gpa: Allocator, io: std.Io, path: []const u8) !*Lines {
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
         const self = try gpa.create(Lines);
@@ -240,7 +240,7 @@ const Lines = struct {
         return self;
     }
 
-    fn close(self: *Lines, gpa: Allocator) void {
+    pub fn close(self: *Lines, gpa: Allocator) void {
         self.line.deinit();
         self.file.close(self.io);
         gpa.destroy(self);
@@ -271,11 +271,11 @@ const Lines = struct {
 
 /// `json_lines`: parsed lines; malformed lines are skipped, and reading
 /// stops at an I/O error or a line that is not UTF-8.
-const JsonLines = struct {
+pub const JsonLines = struct {
     lines: *Lines,
     arena: Allocator,
 
-    fn next(self: *JsonLines) ?json.Value {
+    pub fn next(self: *JsonLines) ?json.Value {
         while (true) {
             const text = (self.lines.next() catch return null) orelse return null;
             return json.parseFromSliceLeaky(json.Value, self.arena, text, .{ .allocate = .alloc_always }) catch continue;
@@ -286,7 +286,7 @@ const JsonLines = struct {
 pub const LoadError = struct { message: []const u8 };
 
 /// `std::io::Error`'s display for what opening or reading a file can hit.
-fn ioMessage(err: anyerror) []const u8 {
+pub fn ioMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound => "No such file or directory (os error 2)",
         error.AccessDenied, error.PermissionDenied => "Permission denied (os error 13)",
@@ -613,7 +613,7 @@ fn optDupe(gpa: Allocator, s: ?[]const u8) !?[]u8 {
 
 /// `import_one`: the doc first, then the row (once it shows the chat is
 /// clickable, and its doc is already in place).
-fn importOne(host: *engine_host.EngineHost, io: std.Io, s: history.Session, err_out: *LoadError, arena: Allocator) ![]const u8 {
+pub fn importOne(host: *engine_host.EngineHost, io: std.Io, s: history.Session, err_out: *LoadError, arena: Allocator) ![]const u8 {
     const gpa = host.gpa;
     const chat_id = try std.fmt.allocPrint(arena, "ext-{s}-{s}", .{ s.source.slug(), s.id });
     const t = try load(arena, io, s, err_out);
