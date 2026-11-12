@@ -120,7 +120,12 @@ const World = struct {
         \\ "unreadFrom":{"alpha":1},"redacted":{"email":1},"stripped":0}
     ,
     room_post_status: i64 = 200,
+    /// Replies the edge gives, by HTTP method and path suffix; checked
+    /// before the defaults below.
+    room_replies: []const RoomReply = &.{},
     writes: std.ArrayList([2][]const u8) = .empty,
+
+    const RoomReply = struct { method: []const u8, path_end: []const u8, status: i64, body: []const u8 };
 
     fn engine(self: *World) link.Engine {
         return .{ .ptr = self, .vtable = &.{ .call = callFn, .subscribe = subFn } };
@@ -173,6 +178,14 @@ const World = struct {
         const eq = std.mem.eql;
         const m = u.str(params, "method") orelse "";
         const path = u.str(params, "path") orelse "";
+        for (self.room_replies) |r| {
+            if (!eq(u8, m, r.method) or !std.mem.endsWith(u8, path, r.path_end)) continue;
+            if (eq(u8, m, "POST")) try self.writes.append(self.a, .{ "RoomRequest", try self.a.dupe(u8, params_json) });
+            var o = u.obj(a);
+            try o.put("status", u.i(r.status));
+            try o.put("body", try json.parseFromSliceLeaky(Value, a, r.body, .{ .allocate = .alloc_always }));
+            return .{ .ok = o.value() };
+        }
         var status: i64 = 200;
         const body: []const u8 = if (eq(u8, m, "GET") and eq(u8, path, "rooms"))
             "{\"rooms\":[{\"id\":\"room_0123456789abcdef01234567\",\"name\":\"build\"}]}"
@@ -1259,13 +1272,43 @@ test "mcp rooms: list, create, join, read, inbox, release, archive, destroy and 
     try expectErr(try w.call("room_inbox", "{}"), "room tools speak for a Harness chat; this server has no HARNESS_CHAT_ID");
 }
 
-test "mcp rooms: the Zig engine's RoomRequest reply is passed through as it is" {
-    const f = try HostFixture.create(.{ .chat_id = "chat-beta-2" });
-    defer f.destroy();
-    // The engine answers status 200 with a string body; nothing is invented.
-    const listed = try ok(try f.call("list_rooms", "{}"));
-    try testing.expect(u.get(listed, "rooms").? == .null);
-    try expectErrStarts(try f.call("read_room", "{\"room\":\"build\"}"), "no room named \"build\" that you can see");
+test "mcp rooms: the edge's refusals read as errors, and a reply that is not an object is never a success" {
+    const w = try WorldFixture.create(.{ .chat_id = "chat-beta-2", .device_id = "dev-local" });
+    defer w.destroy();
+    // The edge's own replies (`edge/src/index.ts`: `{error, message}` with
+    // the RoomError status): a credential in a post, a claim someone else
+    // holds, and a destroy by a member who is not an owner.
+    w.world.room_replies = &.{
+        .{ .method = "POST", .path_end = "/post", .status = 422, .body = "{\"error\":\"secret_detected\",\"message\":\"the post looks like it contains a credential (api key)\"}" },
+        .{ .method = "POST", .path_end = "/release", .status = 409, .body = "{\"error\":\"claim_held\",\"message\":\"task-1 is held or done by someone else\"}" },
+        .{ .method = "POST", .path_end = "/destroy", .status = 403, .body = "{\"error\":\"owner_only\",\"message\":\"owner_only\"}" },
+    };
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"key=sk-synthetic\"}"), "room request failed (422): secret_detected: the post looks like it contains a credential (api key)");
+    try expectErr(try w.call("release_claim", "{\"room\":\"build\",\"claim_key\":\"task-1\"}"), "room request failed (409): claim_held: task-1 is held or done by someone else");
+    try expectErr(try w.call("destroy_room", "{\"room\":\"build\"}"), "room request failed (403): owner_only");
+    // A refused post queued nothing for anyone.
+    try testing.expect(w.lastWrite("QueueMessage") == null);
+
+    // A 2xx whose body is not an object: every room tool fails rather than
+    // answering nulls, and a post never reports seq 0 as sent.
+    w.world.room_replies = &.{
+        .{ .method = "GET", .path_end = "rooms", .status = 200, .body = "\"ok\"" },
+    };
+    try expectErr(try w.call("list_rooms", "{}"), "room request failed (200): the room's reply is not a JSON object");
+    try expectErr(try w.call("read_room", "{\"room\":\"build\"}"), "room request failed (200): the room's reply is not a JSON object");
+    w.world.room_replies = &.{
+        .{ .method = "POST", .path_end = "/post", .status = 200, .body = "[]" },
+        .{ .method = "GET", .path_end = "rooms/inbox", .status = 204, .body = "null" },
+    };
+    const before = w.world.writes.items.len;
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha done\"}"), "room request failed (200): the room's reply is not a JSON object");
+    // Not retried (the room answered), and nobody was woken.
+    try testing.expectEqual(before + 1, w.world.writes.items.len);
+    try testing.expect(w.lastWrite("QueueMessage") == null);
+    try expectErr(try w.call("room_inbox", "{}"), "room request failed (204): the room's reply is not a JSON object");
+    // The edge's real success replies still read through.
+    w.world.room_replies = &.{};
+    try testing.expectEqual(@as(i64, 3), u.int(try ok(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha done\"}")), "seq").?);
 }
 
 // ---- bots --------------------------------------------------------------------------------------

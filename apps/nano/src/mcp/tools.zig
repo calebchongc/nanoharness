@@ -288,6 +288,9 @@ pub const Ctx = struct {
             if (std.mem.eql(u8, message, code)) return c.fail("room request failed ({d}): {s}", .{ status, code });
             return c.fail("room request failed ({d}): {s}: {s}", .{ status, code, message });
         }
+        // Every room route answers an object; anything else is not a reply
+        // the tools can read, and must not pass as an empty success.
+        if (rbody != .object) return c.fail("room request failed ({d}): the room's reply is not a JSON object", .{status});
         return rbody;
     }
 
