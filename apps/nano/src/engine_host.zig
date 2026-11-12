@@ -2067,20 +2067,7 @@ pub const EngineHost = struct {
             .FetchToolBlob => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"content\":\"\",\"found\":false}") };
             },
-            .ListHarnesses => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "[" ++
-                        "{\"id\":\"graff\",\"name\":\"Codegraff\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":true,\"steeringMode\":\"step-boundary\",\"reasoningLevels\":[\"low\",\"medium\",\"high\",\"xhigh\"]}," ++
-                        "{\"id\":\"claude-code\",\"name\":\"Claude Code\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":true,\"steeringMode\":\"step-boundary\",\"reasoningLevels\":[\"low\",\"medium\",\"high\",\"max\"]}," ++
-                        "{\"id\":\"codex\",\"name\":\"Codex\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":true,\"steeringMode\":\"step-boundary\",\"reasoningLevels\":[\"low\",\"medium\",\"high\",\"xhigh\"]}," ++
-                        "{\"id\":\"cursor\",\"name\":\"Cursor\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":false,\"reasoningLevels\":[\"medium\",\"high\"]}," ++
-                        "{\"id\":\"opencode\",\"name\":\"OpenCode\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":false,\"reasoningLevels\":[\"medium\",\"high\"]}," ++
-                        "{\"id\":\"pi\",\"name\":\"Pi\",\"installed\":true,\"enabled\":true,\"available\":true,\"supportsSteering\":false,\"reasoningLevels\":[\"medium\",\"high\"]}," ++
-                        "{\"id\":\"mock\",\"name\":\"Mock\",\"installed\":true,\"enabled\":false,\"available\":true}" ++
-                        "]",
-                ) };
-            },
+            .ListHarnesses => return @import("rpcw_harnesses.zig").listHarnesses(self),
             .ListModels => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const harness = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
@@ -2157,6 +2144,8 @@ pub const EngineHost = struct {
                     "{\"browseRunning\":true,\"paired\":false,\"keyMismatch\":false,\"scopes\":[\"read\",\"act-own-pages\"]}",
                 ) };
             },
+            .SetHarnessEnabled => return @import("rpcw_harnesses.zig").setHarnessEnabled(self, params),
+            .CancelInstall => return @import("rpcw_harnesses.zig").cancelInstall(self, params),
             .CreateWorktree => return @import("rpcw_worktrees.zig").createWorktree(self, params),
             .DeleteWorktree => return @import("rpcw_worktrees.zig").deleteWorktree(self, params),
             .BrowseLinkPair,
@@ -2167,9 +2156,7 @@ pub const EngineHost = struct {
             .ActivateAgentAccount,
             .RemoveAgentAccount,
             .ForgetAgentAccount,
-            .SetHarnessEnabled,
             .InstallHarness,
-            .CancelInstall,
             .CompleteAgentLogin,
             .CancelAgentLogin,
             .McpServerAction,

@@ -151,6 +151,8 @@ test {
     _ = @import("engine_host.zig");
     _ = @import("rpcw_common.zig");
     _ = @import("rpcw_worktrees.zig");
+    _ = @import("rpcw_executables.zig");
+    _ = @import("rpcw_harnesses.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");
