@@ -2157,6 +2157,8 @@ pub const EngineHost = struct {
                     "{\"browseRunning\":true,\"paired\":false,\"keyMismatch\":false,\"scopes\":[\"read\",\"act-own-pages\"]}",
                 ) };
             },
+            .CreateWorktree => return @import("rpcw_worktrees.zig").createWorktree(self, params),
+            .DeleteWorktree => return @import("rpcw_worktrees.zig").deleteWorktree(self, params),
             .BrowseLinkPair,
             .BrowseLinkDisconnect,
             .CodegraffCancelJob,
@@ -2175,8 +2177,6 @@ pub const EngineHost = struct {
             .CodegraffCreateSandbox,
             .CodegraffCreateTemporarySandbox,
             .CodegraffGithubRunnerAction,
-            .CreateWorktree,
-            .DeleteWorktree,
             .SetUpSimulators,
             .BootSimulator,
             .ShutdownSimulator,
