@@ -285,20 +285,41 @@ pub const Scope = enum {
     }
 };
 
-/// Configures `auth` from `cfg` and loads the saved session; returns the
-/// scope an engine start selects (`Engine::initial_workspace_scope`).
+/// The scope an engine start selects (`Engine::initial_workspace_scope`):
+/// development without CodeGraff (a dev bearer, an empty client id, or auth
+/// turned off); synced with a saved, org-scoped session; local otherwise.
+pub fn startScope(cfg: AuthEnv, session_loaded: bool) Scope {
+    if (!cfg.codegraffEnabled()) return .development;
+    return if (session_loaded) .synced else .local;
+}
+
+/// Configures `auth` from `cfg` and loads the saved session, as `headless`
+/// does (engine_main.zig); returns `startScope`.
 pub fn loadAuth(auth: *auth_host.AuthManager, io: Io, cfg: AuthEnv, data_dir: []const u8) !Scope {
     if (cfg.codegraffEnabled()) {
         try auth.configureCodegraff(cfg.edge_url, cfg.client_id, cfg.api_base, data_dir);
         try auth.setCodegraffGateway(cfg.gateway);
-        // As `headless` decides (engine_main.zig): synced with a saved,
-        // org-scoped session; local otherwise.
-        return if (auth.loadPersistedSession(io)) .synced else .local;
+        return startScope(cfg, auth.loadPersistedSession(io));
     }
-    // Development or disabled: no session to sign in to, but the folder is
-    // still the place a stale session file would be cleared from.
+    // No session to sign in to, but the folder is still the place a stale
+    // session file would be cleared from.
     try auth.configureCodegraff(cfg.edge_url, null, cfg.api_base, data_dir);
-    return .development;
+    return startScope(cfg, false);
+}
+
+test "start scope: development without CodeGraff, synced only with a saved session" {
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try testing.expectEqual(Scope.local, startScope(AuthEnv.from(&env), false));
+    try testing.expectEqual(Scope.synced, startScope(AuthEnv.from(&env), true));
+    try env.put("HARNESS_CODEGRAFF_CLIENT_ID", "");
+    try testing.expectEqual(Scope.development, startScope(AuthEnv.from(&env), true));
+    _ = env.swapRemove("HARNESS_CODEGRAFF_CLIENT_ID");
+    try env.put("HARNESS_AUTH_DISABLED", "1");
+    try testing.expectEqual(Scope.development, startScope(AuthEnv.from(&env), false));
+    _ = env.swapRemove("HARNESS_AUTH_DISABLED");
+    try env.put("HARNESS_EDGE_TOKEN", "synthetic-bearer");
+    try testing.expectEqual(Scope.development, startScope(AuthEnv.from(&env), false));
 }
 
 pub const AccountStatus = struct {

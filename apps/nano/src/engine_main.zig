@@ -226,11 +226,11 @@ pub fn main(init: std.process.Init) !void {
         } else {
             host.workspace_scope = "local";
         }
-    } else if (edge_token) |tok| {
-        if (tok.len > 0) {
-            host.auth.signInWithKey(tok) catch {};
-            host.workspace_scope = "development";
-        }
+    } else {
+        // No CodeGraff (a development bearer, or auth turned off): the
+        // development scope, as the Rust engine without a client id.
+        if (edge_token) |tok| host.auth.signInWithKey(tok) catch {};
+        host.workspace_scope = engine_cli.startScope(auth_env, false).name();
     }
 
     // Seed any persisted chats from docs.sqlite into host.chats so they appear in the sidebar and sync outbound.
