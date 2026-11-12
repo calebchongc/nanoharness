@@ -699,10 +699,11 @@ var shared_io: ?std.Io = null;
 
 fn sendEdge(ctx: ?*anyopaque, gpa: Allocator, method: []const u8, url: []const u8, bearer: []const u8, body: ?[]const u8, timeout_ms: u64) anyerror!HttpReply {
     _ = ctx;
-    _ = timeout_ms;
     const io = shared_io orelse return error.NoIo;
     const auth_host = @import("auth_host.zig");
-    const r = try auth_host.AuthManager.edgeRequest(gpa, io, method, url, bearer, body);
+    // The caller's deadline (20, 90 or 120 s), enforced on the request.
+    const ms: u32 = @intCast(@min(timeout_ms, std.math.maxInt(u32)));
+    const r = try auth_host.AuthManager.edgeRequestTimed(null, gpa, io, method, url, bearer, &.{}, body, ms);
     return .{ .status = r.status, .body = r.body };
 }
 
@@ -1183,3 +1184,17 @@ test "sandboxes: the engine makes exactly the calls the shared plans name" {
     }
 }
 
+test "fix-sec 10: a gateway request fails at its own deadline" {
+    const server = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try server.listen(testing.io, .{ .reuse_address = true });
+    defer listener.deinit(testing.io);
+    // Accepts (the kernel backlog does) but never answers.
+    const ctx = engineCtx(testing.io, "cg_sk_synthetic", "http://127.0.0.1:1", null);
+    var ubuf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ubuf, "http://127.0.0.1:{d}/v1/sandboxes", .{listener.socket.address.getPort()});
+    const started = std.Io.Clock.awake.now(testing.io);
+    try testing.expectError(error.Timeout, ctx.transport.send(testing.allocator, "GET", url, "cg_sk_synthetic", null, 300));
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
+    try testing.expect(elapsed >= 250);
+    try testing.expect(elapsed < 5_000);
+}
