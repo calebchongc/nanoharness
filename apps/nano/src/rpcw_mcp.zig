@@ -370,6 +370,32 @@ test "rpcw_mcp McpServerAction runs graff mcp and returns its rows" {
     try testing.expect(std.mem.endsWith(u8, lines.next().?, "|1|mcp status alpha --json"));
 }
 
+test "rpcw_mcp ListMcpServers through the engine dispatch runs graff mcp status" {
+    const f = try Fx.init(true);
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const project = try std.fs.path.join(gpa, &.{ f.base, "project" });
+    defer gpa.free(project);
+    const params = try std.fmt.allocPrint(gpa, "{{\"cwd\":{f}}}", .{json.fmt(project, .{})});
+    defer gpa.free(params);
+    const out = try f.call("ListMcpServers", params);
+    defer gpa.free(out.unary_json);
+    // graff's rows, not a fixed built-in list.
+    try testing.expect(std.mem.startsWith(u8, out.unary_json, "[{\"name\":\"alpha\",\"source\":\"project\""));
+    try testing.expect(std.mem.indexOf(u8, out.unary_json, "harness-mcp") == null);
+    const log = try f.calls();
+    defer gpa.free(log);
+    try testing.expect(std.mem.startsWith(u8, log, project));
+    try testing.expect(std.mem.indexOf(u8, log, "|1|mcp status --json") != null);
+    try expectErr(try f.call("ListMcpServers", "{\"names\":\"alpha\"}"), true, "invalid type: expected a sequence for `names`");
+}
+
+test "rpcw_mcp ListMcpServers without graff says to install it" {
+    const f = try Fx.init(false);
+    defer f.deinit();
+    try expectErr(try f.call("ListMcpServers", "{}"), false, "The `graff` CLI was not found on this device — install it first.");
+}
+
 test "rpcw_mcp McpServerAction errors match mcp_servers.rs" {
     const f = try Fx.init(true);
     defer f.deinit();

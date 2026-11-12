@@ -2264,18 +2264,7 @@ pub const EngineHost = struct {
                     "{\"available\":true,\"enabled\":true,\"installations\":[],\"recentJobs\":[],\"sizes\":[{\"key\":\"standard-4vcpu\",\"cpu\":4,\"memoryGiB\":8,\"diskGiB\":20,\"pricePerHourMicroUsd\":120000}]}",
                 ) };
             },
-            .ListMcpServers => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "[{\"name\":\"harness-mcp\",\"source\":\"built-in\",\"transport\":\"stdio\",\"origin\":\"harness-engine mcp\",\"enabled\":true,\"state\":\"ready\",\"toolCount\":5,\"tools\":[" ++
-                        "{\"name\":\"list_chats\",\"description\":\"List chats in the workspace\"}," ++
-                        "{\"name\":\"read_chat\",\"description\":\"Read messages from a chat\"}," ++
-                        "{\"name\":\"send_message\",\"description\":\"Send a message to a chat\"}," ++
-                        "{\"name\":\"search_chats\",\"description\":\"Search across chat transcripts\"}," ++
-                        "{\"name\":\"create_chat\",\"description\":\"Create a new chat\"}" ++
-                        "]}]",
-                ) };
-            },
+            .ListMcpServers => return @import("rpcw_mcp.zig").listMcpServers(self, params),
             .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
             .ExternalHistoryImport => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"imported\":[]}") };
