@@ -2275,12 +2275,7 @@ pub const EngineHost = struct {
                 const sb = @import("sandboxes_host.zig");
                 return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .action, params));
             },
-            .CodegraffGithubRunners => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"available\":true,\"enabled\":true,\"installations\":[],\"recentJobs\":[],\"sizes\":[{\"key\":\"standard-4vcpu\",\"cpu\":4,\"memoryGiB\":8,\"diskGiB\":20,\"pricePerHourMicroUsd\":120000}]}",
-                ) };
-            },
+            .CodegraffGithubRunners => return @import("rpcw_github_runners.zig").githubRunners(self),
             .ListMcpServers => return @import("rpcw_mcp.zig").listMcpServers(self, params),
             .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
             .ExternalHistoryImport => return @import("rpcw_history_import.zig").externalHistoryImport(self, params),
