@@ -89,6 +89,8 @@ pub const State = struct {
     preview_read: bool = false,
     /// Running on the demo's made-up data (`--demo`): Profile says so.
     demo: bool = false,
+    /// The question panel's height as last laid out (it sits above the safe area).
+    question_h: f32 = 0,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         @import("text_buffer.zig").deinit(&s.search_query);
@@ -642,23 +644,6 @@ fn renderEmptyDetail(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
     }
 }
 
-fn findUnansweredQuestion(a: *const App) ?struct { req_id: []const u8, q: tr.Question } {
-    const entries = a.transcript.entries.items;
-    var i = entries.len;
-    while (i > 0) {
-        i -= 1;
-        const e = &entries[i];
-        for (e.parts.items) |*p| {
-            if (p.kind == .input and !p.resolved and p.questions.len > 0) {
-                if (!std.mem.eql(u8, p.request_id, a.mobile.answeredReq())) {
-                    return .{ .req_id = p.request_id, .q = p.questions[0] };
-                }
-            }
-        }
-    }
-    return null;
-}
-
 fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: bool) void {
     const chat_id = a.selected orelse return;
     const chat_hash = std.hash.Wyhash.hash(0, chat_id);
@@ -671,7 +656,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
 
     const ch_opt = a.findChat(chat_id);
     const st = a.selectedStatus();
-    const pending_q = findUnansweredQuestion(a);
+    const vq = @import("view_mobile_question.zig");
+    const asking = vq.active(a);
     const queue_count = a.queue.items.len;
 
     const top_inset = c.safe_area.top;
@@ -679,7 +665,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
     const top_chrome_h: f32 = 54;
     var bot_chrome_h: f32 = 112; // 40pt chip bar + 8pt gap + 56pt composer + margins
     if (queue_count > 0) bot_chrome_h += @min(@as(f32, @floatFromInt(queue_count)) * 34.0 + 8.0, 110.0);
-    if (pending_q != null) bot_chrome_h += 136.0;
+    // The question panel takes the chips' and the composer's place.
+    if (asking) bot_chrome_h = vq.height(a) else {
+        a.mobile.question_h = 0;
+    }
 
     // -----------------------------------------------------------------------
     // PASS 1 (`layer = 0`): Full-bleed underlap tail-virtualized transcript
@@ -831,26 +820,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
         const stack = ui.div(c).column().wFull().maxW(ios_scroll.max_content_width).gap(8);
         defer stack.end();
 
-        // 1. Active Question Panel (`26pt` squircle Liquid Glass)
-        if (pending_q) |pq| {
-            ui.key(c, "ios-question-panel");
-            const qcard = mg.styleGlassDiv(c, ui.div(c).column().wFull().p(14).gap(8), .question_panel, rt, ui.Color.transparent, null);
-            defer qcard.end();
-            ui.text(c, pq.q.question, .{ .size = 14, .weight = .semibold, .color = k.text });
-            const opts_row = ui.div(c).row().wFull().gap(6);
-            defer opts_row.end();
-            for (pq.q.options, 0..) |opt_txt, o_idx| {
-                if (o_idx >= 3) break;
-                const ok_key = c.print("ios-q-opt-{d}", .{o_idx});
-                if (mg.pillButton(c, ok_key, .write_toolbar_pill, null, opt_txt, null, k.text, o_idx == 0, k.accent, rt).clicked) {
-                    const now_ms = nowEpochMs(a);
-                    a.mobile.markAnswered(pq.req_id, now_ms);
-                    a.composer.set(opt_txt);
-                    a.send();
-                    a.mobile.stick_to_bottom = true;
-                    nanoui.haptics.notify(.success);
-                }
-            }
+        // 1. The agent's question, in the composer's place (view_mobile_question.zig).
+        if (asking) {
+            vq.panel(a, c, k, rt);
+            return;
         }
 
         // 2. Queued Follow-Up Messages Tray

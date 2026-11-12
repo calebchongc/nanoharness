@@ -7,4 +7,6 @@ test {
     _ = @import("app_mobile_auth.zig");
     _ = @import("view_mobile_signin.zig");
     _ = @import("view_mobile_profile.zig");
+    _ = @import("mobile_question.zig");
+    _ = @import("view_mobile_question.zig");
 }

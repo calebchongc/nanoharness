@@ -351,6 +351,19 @@ pub fn seedSyntheticDemo(host: *engine_host.EngineHost) !void {
         true,
     );
     _ = try doc_lean.appendPartDelta("lean-a-1", "lean-pa-1", "text", "Verified `Nano.IosLiquidGlassScroll` and `HarnessProofs.MobileIosParity` with **0 `sorry`** — checking final Simulator telemetry invariants now…");
+    {
+        // A tool approval waiting for the phone (the engine's "Approve tool").
+        var ap_part: @import("session_doc.zig").PartItem = .{
+            .id = try gpa.dupe(u8, "req-lean-approve"),
+            .kind = try gpa.dupe(u8, "input"),
+            .call_json = try gpa.dupe(
+                u8,
+                "[{\"id\":\"approve\",\"header\":\"Approve tool\",\"question\":\"Claude wants to use Bash on `lake exe cache get`. Allow it?\",\"options\":[\"Yes\",\"No\"]}]",
+            ),
+        };
+        errdefer ap_part.deinit(gpa);
+        try doc_lean.messages.items[doc_lean.messages.items.len - 1].parts.append(gpa, ap_part);
+    }
 
     // 3. Populate interactive question session (`chat-question-gate`)
     const doc_q = try host.getOrCreateDoc("chat-question-gate");
@@ -359,11 +372,12 @@ pub fn seedSyntheticDemo(host: *engine_host.EngineHost) !void {
     _ = try doc_q.appendPartDelta("q-a-1", "q-pa-1", "text", "Before finalizing the bundle step, pick which targets should be built by default:");
     {
         var req_part: @import("session_doc.zig").PartItem = .{
-            .id = try gpa.dupe(u8, "q-pi-1"),
+            // An input part's id is its request; its call is the questions array.
+            .id = try gpa.dupe(u8, "req-ios-targets"),
             .kind = try gpa.dupe(u8, "input"),
             .call_json = try gpa.dupe(
                 u8,
-                "{\"requestId\":\"req-ios-targets\",\"questions\":[{\"id\":\"targets\",\"header\":\"Targets\",\"question\":\"Which iOS targets should we build and verify?\",\"options\":[\"Simulator + Device (Recommended)\",\"iOS Simulator only\",\"Physical iPhone only\"]}]}",
+                "[{\"id\":\"targets\",\"header\":\"Targets\",\"question\":\"Which iOS targets should we build and verify?\",\"options\":[\"Simulator + Device (Recommended)\",\"iOS Simulator only\",\"Physical iPhone only\"]}]",
             ),
         };
         errdefer req_part.deinit(gpa);

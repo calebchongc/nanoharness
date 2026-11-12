@@ -50,6 +50,8 @@ pub const OrgRow = struct {
 
 pub const State = struct {
     w_auth: ?u64 = null,
+    /// A watch the engine refused is asked again from then (seconds, `App.now`).
+    retry_at: f64 = 0,
     engine_state: ma.EngineState = .unknown,
     /// `signInBusy`: from the button until an organization is chosen.
     busy: bool = false,
@@ -96,7 +98,7 @@ fn nowMs(a: *const App) i64 {
 /// sheet's answer taken when it came.
 pub fn poll(a: *App) void {
     const s = st(a);
-    if (s.w_auth == null and a.engine.up()) {
+    if (s.w_auth == null and a.engine.up() and a.now >= s.retry_at) {
         s.w_auth = a.send_(requests.none("AuthStatus"), .of(App, a, onAuth));
     }
     if (web.take()) |outcome| {
@@ -139,7 +141,11 @@ fn onAuth(a: *App, _: u64, r: rpc.Reply) void {
                 .unknown => {},
             }
         },
-        .done, .err => s.w_auth = null,
+        .done => s.w_auth = null,
+        .err => {
+            s.w_auth = null;
+            s.retry_at = a.now + 2;
+        },
         .ok => {},
     }
     a.redraw();
