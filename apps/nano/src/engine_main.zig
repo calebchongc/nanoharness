@@ -416,6 +416,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const device_relay = @import("relay_engine.zig").start(gpa, io, &host);
+    defer if (device_relay) |r| r.stop();
+
     const ClientWorker = struct {
         gpa: Allocator,
         io: Io,

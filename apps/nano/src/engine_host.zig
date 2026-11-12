@@ -2528,11 +2528,7 @@ pub const EngineHost = struct {
             .WatchToolProgress => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"items\":[]}"));
             },
-            .RelayCommand => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"relayed\":true}") };
-            },
+            .RelayCommand => return @import("relay_command.zig").handle(self, params),
             .RetryDelivery => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };

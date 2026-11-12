@@ -1,0 +1,331 @@
+{
+  "$comment": "Device-room relay frame codec: uleb128(header byte length) || UTF-8 JSON header {s,k,to?,from?} || payload. See protocol/README.md.",
+  "kinds": {
+    "relay": " relay",
+    "rpc": "rpc",
+    "nudge": "nudge",
+    "nudgeAck": "nudgeAck",
+    "echo": "echo"
+  },
+  "relayErrors": [
+    "host_offline",
+    "host_closed",
+    "client_gone",
+    "client_closed"
+  ],
+  "encode": [
+    {
+      "name": "minimal rpc frame",
+      "header": {
+        "s": "a",
+        "k": "rpc"
+      },
+      "payloadHex": "0102",
+      "bytesHex": "137b2273223a2261222c226b223a22727063227d0102"
+    },
+    {
+      "name": "routed to a client",
+      "header": {
+        "s": "s1",
+        "k": "term",
+        "to": "c9"
+      },
+      "payloadHex": "78",
+      "bytesHex": "1f7b2273223a227331222c226b223a227465726d222c22746f223a226339227d78"
+    },
+    {
+      "name": "stamped from a client",
+      "header": {
+        "s": "rpc",
+        "k": "rpc",
+        "from": "conn-1"
+      },
+      "payloadHex": "7b226964223a312c226d6574686f64223a224c6973744861726e6573736573222c22706172616d73223a7b7d7d",
+      "bytesHex": "257b2273223a22727063222c226b223a22727063222c2266726f6d223a22636f6e6e2d31227d7b226964223a312c226d6574686f64223a224c6973744861726e6573736573222c22706172616d73223a7b7d7d"
+    },
+    {
+      "name": "both routing keys keep s,k,to,from order",
+      "header": {
+        "s": "x",
+        "k": "y",
+        "to": "t",
+        "from": "f"
+      },
+      "payloadHex": "",
+      "bytesHex": "257b2273223a2278222c226b223a2279222c22746f223a2274222c2266726f6d223a2266227d"
+    },
+    {
+      "name": "empty payload",
+      "header": {
+        "s": "rpc",
+        "k": "rpc",
+        "to": "c1"
+      },
+      "payloadHex": "",
+      "bytesHex": "1f7b2273223a22727063222c226b223a22727063222c22746f223a226331227d"
+    },
+    {
+      "name": "binary payload bytes",
+      "header": {
+        "s": "term-42",
+        "k": "term",
+        "to": "conn-9"
+      },
+      "payloadHex": "010203faff",
+      "bytesHex": "287b2273223a227465726d2d3432222c226b223a227465726d222c22746f223a22636f6e6e2d39227d010203faff"
+    },
+    {
+      "name": "200-char stream id needs a two-byte length",
+      "header": {
+        "s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "k": "rpc",
+        "from": "conn-1"
+      },
+      "payloadHex": "",
+      "bytesHex": "ea017b2273223a227878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878222c226b223a22727063222c2266726f6d223a22636f6e6e2d31227d"
+    },
+    {
+      "name": "relay control kind has a leading space",
+      "header": {
+        "s": "rpc",
+        "k": " relay"
+      },
+      "payloadHex": "7b226572726f72223a22686f73745f6f66666c696e65227d",
+      "bytesHex": "187b2273223a22727063222c226b223a222072656c6179227d7b226572726f72223a22686f73745f6f66666c696e65227d"
+    },
+    {
+      "name": "host_closed to every client",
+      "header": {
+        "s": "",
+        "k": " relay"
+      },
+      "payloadHex": "7b226572726f72223a22686f73745f636c6f736564227d",
+      "bytesHex": "157b2273223a22222c226b223a222072656c6179227d7b226572726f72223a22686f73745f636c6f736564227d"
+    },
+    {
+      "name": "client_closed to the host",
+      "header": {
+        "s": "",
+        "k": " relay",
+        "from": "c1"
+      },
+      "payloadHex": "7b226572726f72223a22636c69656e745f636c6f736564227d",
+      "bytesHex": "217b2273223a22222c226b223a222072656c6179222c2266726f6d223a226331227d7b226572726f72223a22636c69656e745f636c6f736564227d"
+    },
+    {
+      "name": "client_gone bounced to the host",
+      "header": {
+        "s": "rpc",
+        "k": " relay",
+        "to": "c1"
+      },
+      "payloadHex": "7b226572726f72223a22636c69656e745f676f6e65227d",
+      "bytesHex": "227b2273223a22727063222c226b223a222072656c6179222c22746f223a226331227d7b226572726f72223a22636c69656e745f676f6e65227d"
+    },
+    {
+      "name": "nudge from the relay",
+      "header": {
+        "s": "chat-1",
+        "k": "nudge"
+      },
+      "payloadHex": "7b22636861744964223a22636861742d31222c22746f6b656e223a22742d31227d",
+      "bytesHex": "1a7b2273223a22636861742d31222c226b223a226e75646765227d7b22636861744964223a22636861742d31222c22746f6b656e223a22742d31227d"
+    },
+    {
+      "name": "nudge ack from the host echoes the payload",
+      "header": {
+        "s": "chat-1",
+        "k": "nudgeAck"
+      },
+      "payloadHex": "7b22636861744964223a22636861742d31222c22746f6b656e223a22742d31227d",
+      "bytesHex": "1d7b2273223a22636861742d31222c226b223a226e7564676541636b227d7b22636861744964223a22636861742d31222c22746f6b656e223a22742d31227d"
+    },
+    {
+      "name": "echo reply from the host",
+      "header": {
+        "s": "echo",
+        "k": "echo",
+        "to": "c1"
+      },
+      "payloadHex": "",
+      "bytesHex": "217b2273223a226563686f222c226b223a226563686f222c22746f223a226331227d"
+    },
+    {
+      "name": "escapes quote, backslash and controls; keeps slash and non-ASCII",
+      "header": {
+        "s": "q\"b\\s/\t\n\r\b\f\u0001\u001f",
+        "k": "é😀 "
+      },
+      "payloadHex": "",
+      "bytesHex": "377b2273223a22715c22625c5c732f5c745c6e5c725c625c665c75303030315c75303031667f222c226b223a22c3a9f09f9880e280a8227d"
+    }
+  ],
+  "decodeRejects": [
+    {
+      "name": "empty input: truncated uleb128",
+      "bytesHex": ""
+    },
+    {
+      "name": "continuation bit with no next byte",
+      "bytesHex": "85"
+    },
+    {
+      "name": "header shorter than its length",
+      "bytesHex": "0a7b"
+    },
+    {
+      "name": "header cut mid-JSON",
+      "bytesHex": "0f7b2273223a2261222c226b223a2262"
+    },
+    {
+      "name": "uleb128 length past 32 bits",
+      "bytesHex": "ffffffffff01"
+    },
+    {
+      "name": "header is not JSON",
+      "bytesHex": "086e6f74206a736f6e"
+    },
+    {
+      "name": "header missing k",
+      "bytesHex": "097b2273223a2261227d",
+      "typedOnly": true
+    },
+    {
+      "name": "stream id not a string",
+      "bytesHex": "117b2273223a312c226b223a22727063227d",
+      "typedOnly": true
+    },
+    {
+      "name": "header is an array",
+      "bytesHex": "0b5b2261222c22727063225d",
+      "typedOnly": true
+    },
+    {
+      "name": "header is not valid UTF-8",
+      "bytesHex": "137b2273223a22ff222c226b223a22727063227d",
+      "typedOnly": true
+    }
+  ],
+  "decodeAccepts": [
+    {
+      "name": "unknown header keys are ignored",
+      "bytesHex": "1f7b2273223a2261222c226b223a2262222c2278223a7b2279223a5b315d7d7d09",
+      "header": {
+        "s": "a",
+        "k": "b"
+      },
+      "payloadHex": "09"
+    },
+    {
+      "name": "whitespace inside the header",
+      "bytesHex": "267b20227322203a20226122202c20226b22203a20226222202c2022746f22203a20226322207d",
+      "header": {
+        "s": "a",
+        "k": "b",
+        "to": "c"
+      },
+      "payloadHex": ""
+    },
+    {
+      "name": "keys in any order",
+      "bytesHex": "207b2266726f6d223a2266222c226b223a22727063222c2273223a22727063227d7b7d",
+      "header": {
+        "s": "rpc",
+        "k": "rpc",
+        "from": "f"
+      },
+      "payloadHex": "7b7d"
+    },
+    {
+      "name": "non-minimal uleb128 length",
+      "bytesHex": "91007b2273223a2261222c226b223a2262227d07",
+      "header": {
+        "s": "a",
+        "k": "b"
+      },
+      "payloadHex": "07"
+    },
+    {
+      "name": "escaped unicode in the header",
+      "bytesHex": "297b2273223a225c75303065395c75643833645c7564653030222c226b223a225c75303037327063227d",
+      "header": {
+        "s": "é😀",
+        "k": "rpc"
+      },
+      "payloadHex": ""
+    }
+  ],
+  "relayErrorCode": [
+    {
+      "name": "relay error payload",
+      "payload": "{\"error\":\"host_offline\"}",
+      "code": "host_offline"
+    },
+    {
+      "name": "extra keys are ignored",
+      "payload": "{\"error\":\"client_gone\",\"detail\":1}",
+      "code": "client_gone"
+    },
+    {
+      "name": "not JSON",
+      "payload": "not json",
+      "code": null
+    },
+    {
+      "name": "error is not a string",
+      "payload": "{\"error\":5}",
+      "code": null
+    },
+    {
+      "name": "no error key",
+      "payload": "{}",
+      "code": null
+    }
+  ],
+  "wsUrl": [
+    {
+      "edgeUrl": "https://edge.example/",
+      "deviceId": "dev-1",
+      "role": "client",
+      "connId": "c1",
+      "token": "tok",
+      "url": "wss://edge.example/device/dev-1/ws?role=client&connId=c1&token=tok"
+    },
+    {
+      "edgeUrl": "http://localhost:26640",
+      "deviceId": "d",
+      "role": "host",
+      "connId": null,
+      "token": "t",
+      "url": "ws://localhost:26640/device/d/ws?role=host&token=t"
+    }
+  ],
+  "hostUrlSuffix": "&nudgeAck=1",
+  "bearerFromQuery": [
+    {
+      "url": "wss://edge.example/device/d1/ws?role=host&token=abc.def-ghi&connId=c1",
+      "target": "/device/d1/ws?role=host&connId=c1",
+      "authorization": "Bearer abc.def-ghi"
+    },
+    {
+      "url": "wss://edge.example/device/d1/ws?role=host&token=t0k&nudgeAck=1",
+      "target": "/device/d1/ws?role=host&nudgeAck=1",
+      "authorization": "Bearer t0k"
+    },
+    {
+      "url": "wss://edge.example/chat2/x/ws?token=t0k",
+      "target": "/chat2/x/ws",
+      "authorization": "Bearer t0k"
+    },
+    {
+      "url": "ws://localhost:1/registry/o/ws?token=user%40org&device=d",
+      "target": "/registry/o/ws?device=d",
+      "authorization": "Bearer user@org"
+    },
+    {
+      "url": "wss://edge.example/registry/o/ws?device=d",
+      "target": "/registry/o/ws?device=d",
+      "authorization": null
+    }
+  ]
+}
