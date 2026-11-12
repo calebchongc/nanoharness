@@ -764,6 +764,14 @@ pub const SessionDoc = struct {
                     try w.writeAll(",\"output\":");
                     try json.Stringify.encodeJsonString(out_s, .{}, w);
                 }
+            } else if (std.mem.eql(u8, p.kind, "input")) {
+                // `{id: requestId, kind: "input", questions, resolved}` (`crates/doc/src/schema.rs`).
+                try w.writeAll(",\"requestId\":");
+                try json.Stringify.encodeJsonString(p.id, .{}, w);
+                try w.print(",\"questions\":{s},\"resolved\":{}", .{ p.call_json orelse "[]", p.resolved });
+            } else if (std.mem.eql(u8, p.kind, "error")) {
+                try w.writeAll(",\"message\":");
+                try json.Stringify.encodeJsonString(p.text.items, .{}, w);
             } else {
                 try w.writeAll(",\"text\":");
                 try json.Stringify.encodeJsonString(p.text.items, .{}, w);
@@ -1101,6 +1109,12 @@ pub const SessionDoc = struct {
                             }
                             if (po.get("output")) |out_v| if (out_v == .string) {
                                 part.output = try self.gpa.dupe(u8, out_v.string);
+                            };
+                            if (std.mem.eql(u8, pkind, "input")) if (po.get("questions")) |qv| if (qv == .array) {
+                                part.call_json = try json.Stringify.valueAlloc(self.gpa, qv, .{});
+                            };
+                            if (std.mem.eql(u8, pkind, "error")) if (po.get("message")) |mv| if (mv == .string) {
+                                try part.text.appendSlice(self.gpa, mv.string);
                             };
 
                             try msg.parts.append(self.gpa, part);

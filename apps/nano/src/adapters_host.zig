@@ -294,3 +294,13 @@ test "Claude, Codex, Pi/Cursor normalizers and External History Importer (contin
     try testing.expectEqual(@as(usize, 2), res.imported_messages);
     try testing.expectEqual(@as(usize, 2), imported_doc.messages.items.len);
 }
+
+test {
+    _ = @import("agent_proc.zig");
+    _ = @import("agent_turn.zig");
+}
+
+test {
+    _ = @import("agent_claude.zig");
+    _ = @import("turn_host.zig");
+}

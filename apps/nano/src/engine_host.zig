@@ -15,6 +15,7 @@ const session_doc = @import("session_doc.zig");
 const docs_store = @import("docs_store.zig");
 const acp_host = @import("acp_host.zig");
 const adapters_host = @import("adapters_host.zig");
+const turn_host = @import("turn_host.zig");
 const workspace_files_host = @import("workspace_files_host.zig");
 const git_host = @import("git_host.zig");
 const terminals_host = @import("terminals_host.zig");
@@ -928,6 +929,7 @@ pub const EngineHost = struct {
 
     pub fn deinit(self: *EngineHost) void {
         self.stop_requested = true;
+        turn_host.shutdownHost(self);
         _ = self.device_poll_gen.fetchAdd(1, .acq_rel);
         if (self.oauth_capture) |cap| {
             self.oauth_capture = null;
@@ -2547,7 +2549,6 @@ pub const EngineHost = struct {
                         if (req_val != .object) return .{ .err = .{ .bad_params = "request must be object" } };
                         const prompt = requireStr(req_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
                         const cwd = requireStr(req_val.object, "cwd") orelse self.chatWorkspacePath(chat_id);
-                        const req_model: ?[]const u8 = requireStr(req_val.object, "model");
 
                         if (try self.store.markCommandProcessed(msg_id, now)) {
                             for (self.chats.items) |*c| {
@@ -2606,131 +2607,16 @@ pub const EngineHost = struct {
                                 try self.broadcastWatch(.doc_messages, chat_id, initial_frame);
                             }
 
-                            if (self.io != null and self.graff_exe != null) {
-                                const StreamCtx = struct {
-                                    host: *EngineHost,
-                                    cid: []const u8,
-                                    asst: []const u8,
-                                    sdoc: *session_doc.SessionDoc,
-                                    /// Lean Theorem `incremental_strictly_smaller_with_history`:
-                                    /// emit O(|delta|) `toAppendDeltaFrameJson` once the part exists on the client,
-                                    /// and `toUpsertEntryFrameJson` when a new part starts.
-                                    fn onChunk(raw: *anyopaque, ev: acp_host.AcpEvent) void {
-                                        const ctx: *@This() = @ptrCast(@alignCast(raw));
-                                        const frame = switch (ev) {
-                                            .text_delta => |d| if (d.total_len > d.delta.len)
-                                                ctx.sdoc.toAppendDeltaFrameJson(ctx.host.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch return
-                                            else
-                                                ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                            .reasoning_delta, .tool_update, .turn_complete => ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                            .ignored => return,
-                                        };
-                                        defer ctx.host.gpa.free(frame);
-                                        ctx.host.broadcastWatch(.doc_messages, ctx.cid, frame) catch {};
-                                    }
-                                };
-                                var sctx = StreamCtx{ .host = self, .cid = chat_id, .asst = asst_id, .sdoc = doc };
-                                const has_qualified_model = if (req_model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
-                                const argv_with_model = [_][]const u8{ self.graff_exe.?, "acp", "--yolo", "--model", req_model orelse "" };
-                                const argv_default = [_][]const u8{ self.graff_exe.?, "acp", "--yolo" };
-                                const argv: []const []const u8 = if (has_qualified_model) &argv_with_model else &argv_default;
-
-                                acp_host.runSubprocessTurn(
-                                    self.gpa,
-                                    self.io.?,
-                                    argv,
-                                    cwd,
-                                    doc,
-                                    asst_id,
-                                    chat_id,
-                                    prompt,
-                                    &sctx,
-                                    StreamCtx.onChunk,
-                                ) catch {
-                                    _ = try doc.appendPartDelta(asst_id, "part-text", "text", "Processed by Zig engine.");
-                                    try doc.setMessageStatus(asst_id, "complete");
-                                };
-                            } else {
-                                const reply_text = try std.fmt.allocPrint(self.gpa, "Ack from {s}: {s}", .{ self.device_id, prompt });
-                                defer self.gpa.free(reply_text);
-                                _ = try doc.appendPartDelta(asst_id, "part-text", "text", reply_text);
-                                try doc.setMessageStatus(asst_id, "complete");
-                            }
-                            try self.journal.recordFinish(chat_id, asst_id, "complete");
-
-                            const finish_now = self.nowMs();
-                            const snap = try doc.exportSnapshot(self.gpa);
-                            defer self.gpa.free(snap);
-                            try self.store.saveSnapshot(chat_id, snap, finish_now);
-
-                            const batch_id = try std.fmt.allocPrint(self.gpa, "{s}-b-{d}", .{ self.device_id, doc.local_seq });
-                            defer self.gpa.free(batch_id);
-                            try self.store.enqueueChatUpdate(chat_id, batch_id, snap);
-
-                            if (doc.toTailMessagesArrayJson(self.gpa, session_doc.tail_message_count)) |tail_arr| {
-                                _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
-                            } else |_| {}
-                            self.markChatTailDirty(chat_id);
-
-                            for (self.chats.items) |*c| {
-                                if (std.mem.eql(u8, c.id, chat_id)) {
-                                    c.last_message_at_ms = finish_now;
-                                    if (doc.latestTextPreview(140)) |prev_slice| {
-                                        if (self.gpa.dupe(u8, prev_slice)) |p_copy| {
-                                            if (c.preview) |old_p| self.gpa.free(old_p);
-                                            c.preview = p_copy;
-                                        } else |_| {}
-                                    }
-                                    if (self.gpa.dupe(u8, "idle")) |idle_copy| {
-                                        if (c.activity_status) |old_s| self.gpa.free(old_s);
-                                        c.activity_status = idle_copy;
-                                    } else |_| {}
-                                    c.activity_updated_at_ms = finish_now;
-                                    self.enqueueChatUpsertOp(c.*);
-                                    self.enqueueSessionUpsertOp(c.*);
-                                    break;
-                                }
-                            }
-
-                            const reset_frame = try doc.toResetFrameJson(self.gpa);
-                            defer self.gpa.free(reset_frame);
-                            try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
-                            if (self.chatsJson()) |chj| {
-                                defer self.gpa.free(chj);
-                                self.broadcastWatch(.chats, null, chj) catch {};
-                            } else |_| {}
-                            if (self.sessionsJson()) |sj| {
-                                defer self.gpa.free(sj);
-                                self.broadcastWatch(.sessions, null, sj) catch {};
-                            } else |_| {}
-                            self.saveRegistryCacheFile();
-                            self.wakeBgSync();
+                            try turn_host.dispatchRun(self, chat_id, asst_id, prompt, cwd, req_val.object);
                         }
                     },
                     .steer => {
                         const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-steer";
                         const prompt = requireStr(cmd_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
-                        if (try self.store.markCommandProcessed(msg_id, now)) {
-                            const disp = session_doc.evaluateCommand(.pending, false, .steer, now, null, true);
-                            std.debug.assert(disp == .execute);
-                            try doc.enqueueCommand(msg_id, "steer", prompt, "completed", now);
-                            try doc.appendUserMessage(msg_id, "part-steer", prompt, now);
-                            for (self.chats.items) |*c| {
-                                if (std.mem.eql(u8, c.id, chat_id)) {
-                                    c.last_prompt_at_ms = now;
-                                    c.last_message_at_ms = now;
-                                    self.enqueueChatUpsertOp(c.*);
-                                    break;
-                                }
-                            }
-                            self.markChatTailDirty(chat_id);
-                            self.wakeBgSync();
-                            const reset_frame = try doc.toResetFrameJson(self.gpa);
-                            defer self.gpa.free(reset_frame);
-                            try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
-                        }
+                        try turn_host.steer(self, chat_id, msg_id, prompt, now);
                     },
                     .interrupt => {
+                        if (turn_host.interrupt(self, chat_id)) return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
                         self.turn_counter += 1;
                         const cmd_id = try std.fmt.allocPrint(self.gpa, "cmd-interrupt-{d}", .{self.turn_counter});
                         defer self.gpa.free(cmd_id);
@@ -2757,11 +2643,13 @@ pub const EngineHost = struct {
                         const req_id = requireStr(cmd_val.object, "requestId") orelse requireStr(cmd_val.object, "messageId") orelse return .{ .err = .{ .bad_params = "missing requestId" } };
                         const part_id = requireStr(cmd_val.object, "partId") orelse req_id;
                         try doc.enqueueCommand(req_id, "respondInput", part_id, "completed", now);
+                        _ = try turn_host.respondInput(self, chat_id, req_id, cmd_val.object.get("answers"));
                     },
                     .dismiss_input => {
                         const req_id = requireStr(cmd_val.object, "requestId") orelse requireStr(cmd_val.object, "messageId") orelse return .{ .err = .{ .bad_params = "missing requestId" } };
                         const part_id = requireStr(cmd_val.object, "partId") orelse req_id;
                         try doc.enqueueCommand(req_id, "dismissInput", part_id, "completed", now);
+                        _ = try turn_host.dismissInput(self, chat_id, req_id);
                     },
                 }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
