@@ -488,6 +488,9 @@ pub fn createWorktreeForTask(
     branch: []const u8,
     task: []const u8,
 ) !Result(Worktree) {
+    // A base or path git would read as an option is never passed to it.
+    if (std.mem.startsWith(u8, branch, "-")) return .{ .failed = common.errText("Invalid worktree base: {s}", .{branch}) };
+    if (std.mem.startsWith(u8, repo_path, "-")) return .{ .failed = common.errText("Invalid repository path: {s}", .{repo_path}) };
     const lock = try lockMutations(gpa, io, repo_path);
     const guard = switch (lock) {
         .failed => |m| return .{ .failed = m },
@@ -549,7 +552,7 @@ pub fn createWorktreeForTask(
     const branch_name = try std.fmt.allocPrint(gpa, own_branch_prefix ++ "{s}", .{wt_name});
     defer gpa.free(branch_name);
 
-    const add = try common.git(gpa, io, &.{ "worktree", "add", "-b", branch_name, path, base_ref }, repo_path);
+    const add = try common.git(gpa, io, &.{ "worktree", "add", "-b", branch_name, "--", path, base_ref }, repo_path);
     defer add.deinit(gpa);
     if (add == .failed) {
         // Only release our empty reservation; a hook may have written files.
@@ -585,6 +588,7 @@ pub fn createWorktreeForTask(
 
 /// `Repos::delete_worktree`.
 pub fn deleteWorktreeAt(gpa: Allocator, io: std.Io, device_id: []const u8, repo_path: []const u8, worktree_path: []const u8) !?[]const u8 {
+    if (std.mem.startsWith(u8, worktree_path, "-")) return common.errText("Invalid worktree path: {s}", .{worktree_path});
     const lock = try lockMutations(gpa, io, repo_path);
     const guard = switch (lock) {
         .failed => |m| return m,
@@ -607,7 +611,7 @@ pub fn deleteWorktreeAt(gpa: Allocator, io: std.Io, device_id: []const u8, repo_
     if (exists) {
         // Git validates that this is a linked worktree of this repository;
         // a refusal is never bypassed with recursive deletion.
-        const r = try common.git(gpa, io, &.{ "worktree", "remove", "--force", worktree_path }, repo_path);
+        const r = try common.git(gpa, io, &.{ "worktree", "remove", "--force", "--", worktree_path }, repo_path);
         defer r.deinit(gpa);
         if (r == .failed) return r.failed;
     }
@@ -1027,4 +1031,28 @@ test "rpcw_worktrees runPrepare reports failure and leaves a slow script running
     try testing.expectEqual(PrepareOutcome.still_running, (try runPrepare(f.gpa, f.io, slow, 100)).?);
     try testing.expectEqual(PrepareOutcome.failed, (try runPrepare(f.gpa, f.io, fail, 10_000)).?);
     try testing.expect((try runPrepare(f.gpa, f.io, f.base, 100)) == null);
+}
+
+test "fix-sec 12: a base or worktree path that looks like an option never reaches git" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const gpa = f.gpa;
+    var host = try testHost(f);
+    defer host.deinit();
+    const a = f.a();
+
+    var opt_base = try json.parseFromSlice(json.Value, gpa, try std.fmt.allocPrint(a, "{{\"repoPath\":{f},\"branch\":\"--detach\"}}", .{json.fmt(f.repo, .{})}), .{});
+    defer opt_base.deinit();
+    try expectExecError(try host.handle("CreateWorktree", opt_base.value), "Invalid worktree base: --detach");
+
+    var opt_path = try json.parseFromSlice(json.Value, gpa, try std.fmt.allocPrint(a, "{{\"repoPath\":{f},\"worktreePath\":\"--force\"}}", .{json.fmt(f.repo, .{})}), .{});
+    defer opt_path.deinit();
+    try expectExecError(try host.handle("DeleteWorktree", opt_path.value), "Invalid worktree path: --force");
+
+    // An ordinary base still works, its path after `--`.
+    var ok = try json.parseFromSlice(json.Value, gpa, try std.fmt.allocPrint(a, "{{\"repoPath\":{f},\"branch\":\"main\"}}", .{json.fmt(f.repo, .{})}), .{});
+    defer ok.deinit();
+    const created = try host.handle("CreateWorktree", ok.value);
+    defer gpa.free(created.unary_json);
+    try testing.expect(std.mem.indexOf(u8, created.unary_json, "\"branch\":\"task/changes\"") != null);
 }
