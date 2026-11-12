@@ -5,7 +5,7 @@ const build_rules = @import("src/build_rules.zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const lib_optimize: std.builtin.Optimize = if (optimize == .debug) .debug else .small;
+    const lib_optimize = build_rules.httpZigOptimize(optimize, target.result.os.tag);
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
     const gate = b.addExecutable(.{ .name = "no-rust-gate", .root_module = b.createModule(.{
         .root_source_file = b.path("src/no_rust_gate.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     }) });
     gate.use_llvm = true;
     const run_gate = b.addRunArtifact(gate);
@@ -234,7 +234,7 @@ fn linkSqlite(b: *std.Build, module: *std.Build.Module, target: std.Build.Resolv
     };
     const lib = State.lib orelse blk: {
         const dep = b.lazyDependency("sqlite", .{}) orelse return;
-        const sqlite_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true });
+        const sqlite_module = b.createModule(.{ .target = target, .optimize = .fast, .link_libc = true });
         sqlite_module.addCSourceFile(.{ .file = dep.path("sqlite3.c"), .flags = &build_rules.sqlite_flags });
         const lib = b.addLibrary(.{ .name = "sqlite3", .linkage = .static, .root_module = sqlite_module });
         State.lib = lib;

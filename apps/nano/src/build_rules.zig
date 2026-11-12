@@ -18,6 +18,15 @@ pub const sqlite_flags = [_][]const u8{
     "-DSQLITE_DQS=0",
 };
 
+/// The mode http-zig is built in. Small on Apple platforms (the app's own
+/// HTTPS only). Elsewhere nanoui imports http-zig itself, in the app's mode,
+/// and the app must ask for the same instance: two would put one file in two
+/// modules ("file exists in modules 'http_zig' and 'http_zig0'").
+pub fn httpZigOptimize(optimize: std.builtin.Optimize, os: std.Target.Os.Tag) std.builtin.Optimize {
+    if (optimize == .debug or !os.isDarwin()) return optimize;
+    return .small;
+}
+
 const testing = std.testing;
 
 test "SQLite comes from the SDK on Apple platforms and from source elsewhere" {
@@ -25,4 +34,12 @@ test "SQLite comes from the SDK on Apple platforms and from source elsewhere" {
     try testing.expect(!sqliteFromSource(.ios));
     try testing.expect(sqliteFromSource(.linux));
     try testing.expect(sqliteFromSource(.windows));
+}
+
+test "http-zig shares nanoui's instance off Apple platforms, small on them" {
+    try testing.expectEqual(std.builtin.Optimize.small, httpZigOptimize(.safe, .macos));
+    try testing.expectEqual(std.builtin.Optimize.small, httpZigOptimize(.fast, .ios));
+    try testing.expectEqual(std.builtin.Optimize.debug, httpZigOptimize(.debug, .macos));
+    try testing.expectEqual(std.builtin.Optimize.safe, httpZigOptimize(.safe, .linux));
+    try testing.expectEqual(std.builtin.Optimize.safe, httpZigOptimize(.safe, .windows));
 }
