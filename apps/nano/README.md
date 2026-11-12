@@ -106,6 +106,23 @@ wait for an engine instead. `sh scripts/bundle.sh` packages only the app;
 harness-nano connects to `127.0.0.1:27664`. Set `HARNESS_IPC_PORT` to use
 another engine.
 
+## Proving it builds and runs with Zig alone
+
+```sh
+HARNESS_HEAVY_BUILD_LOCK=/path/to/a.lock scripts/prove-zig.sh   # from the repository root
+```
+
+One command, on the committed tree: `zig build no-rust`; the full test suite
+in a fresh cache from a copy of HEAD with no `crates/`, `Cargo.toml` or
+`Cargo.lock`; the macOS bundle, checked to hold `harness-engine` and no Rust
+binary; the bundle's own engine under a temporary HOME, data folder and port
+(a project, a chat on the `mock` harness, a turn and its reply, a terminal's
+`echo`, git status and diff after an edit, through `scripts/prove_engine.py`);
+and the desktop app rendered offscreen showing that chat. Every step has a
+deadline, everything it starts is stopped, and it never touches the real
+HOME, data folder, engine port or the preview port 7331. It writes
+`docs/proof/REPORT.md` and the image, and exits non-zero on any failure.
+
 ## Trying it against a throwaway engine
 
 To keep your own chats out of it, run a second engine with its own port, data

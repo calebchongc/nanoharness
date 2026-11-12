@@ -314,6 +314,20 @@ pub fn shutdown(host: *EngineHost) void {
 }
 
 /// `WatchPreviews {chatId}`. Called from the dispatcher with `host.mutex` held.
+/// The proxy's port: `HARNESS_PREVIEW_PORT` when set (0: any free port, for
+/// an isolated engine that must not take the person's 7331), else 7331.
+pub fn proxyPortFrom(env_value: ?[]const u8) u16 {
+    const v = std.mem.trim(u8, env_value orelse return catalog_mod.proxy_port_default, " \t");
+    return std.fmt.parseInt(u16, v, 10) catch catalog_mod.proxy_port_default;
+}
+
+test "previews_host: HARNESS_PREVIEW_PORT moves the proxy off 7331" {
+    try testing.expectEqual(catalog_mod.proxy_port_default, proxyPortFrom(null));
+    try testing.expectEqual(@as(u16, 0), proxyPortFrom("0"));
+    try testing.expectEqual(@as(u16, 49170), proxyPortFrom(" 49170 "));
+    try testing.expectEqual(catalog_mod.proxy_port_default, proxyPortFrom("x"));
+}
+
 pub fn watch(host: *EngineHost, call_id: u64, params: json.Value) !RpcOutcome {
     if (params != .object) return .{ .err = .{ .bad_params = "expected object" } };
     const chat_v = params.object.get("chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
@@ -324,7 +338,9 @@ pub fn watch(host: *EngineHost, call_id: u64, params: json.Value) !RpcOutcome {
         if (std.mem.eql(u8, c.id, chat_id)) found = true;
     }
     if (!found) return .{ .err = .{ .exec_error = "Project session not found" } };
-    const s = ensureWith(host, .native()) catch return .{ .err = .{ .exec_error = "Preview discovery unavailable" } };
+    var config: Config = .native();
+    config.port = proxyPortFrom(@import("../rpcw_common.zig").getenv("HARNESS_PREVIEW_PORT"));
+    const s = ensureWith(host, config) catch return .{ .err = .{ .exec_error = "Preview discovery unavailable" } };
     const first = try viewForChat(s, chat_id);
     errdefer s.gpa.free(first);
     if (call_id != 0) {
