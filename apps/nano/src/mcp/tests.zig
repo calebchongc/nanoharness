@@ -973,7 +973,7 @@ test "mcp get_chat and read_chat: metadata, transcript window and pending input"
 test "mcp create_chat: writes the row, records the parent, validates harness, model, reasoning and sandbox" {
     const f = try HostFixture.create(.{ .chat_id = "chat-beta-2", .device_id = "dev-local" });
     defer f.destroy();
-    const v = try ok(try f.call("create_chat", "{\"project\":\"comet\",\"harness\":\"claude-code\",\"model\":\"claude-sonnet-5-5\",\"reasoning\":\"high\",\"title\":\"  Spawned  \",\"branch\":\"feat\"}"));
+    const v = try ok(try f.call("create_chat", "{\"project\":\"comet\",\"harness\":\"claude-code\",\"model\":\"claude-opus-5-5\",\"reasoning\":\"high\",\"title\":\"  Spawned  \",\"branch\":\"feat\"}"));
     const new_id = u.str(v, "chatId").?;
     try testing.expectEqual(@as(usize, 36), new_id.len);
     try testing.expectEqualStrings("chat-beta-2", u.str(v, "parentChatId").?);
@@ -1558,10 +1558,10 @@ test "mcp run_bot and run_due_bots: graff chats that open with the bot's standin
 
     const routine = try ok(try f.call("run_bot", "{\"bot\":\"triage\",\"routine\":\"r1\"}"));
     try testing.expectEqualStrings("triage: r1", u.str(routine, "title").?);
-    // A model this device does not offer is dropped, and said so.
+    // The stand-in graff lists no models (its catalog probe fails), so the
+    // bot's model cannot be checked and is kept, as Rust keeps it.
     const notes = try ok(try f.call("run_bot", "{\"bot\":\"notes\",\"message\":\"go\"}"));
-    try testing.expectEqualStrings("gpt-9", u.str(notes, "modelIgnored").?);
-    try testing.expect(u.get(notes, "model").? == .null);
+    try testing.expect(u.get(notes, "modelIgnored") == null);
 
     try expectErr(try f.call("run_bot", "{\"bot\":\"triage\"}"), "pass message or routine, one of them");
     try expectErr(try f.call("run_bot", "{\"bot\":\"triage\",\"message\":\"a\",\"routine\":\"r1\"}"), "pass message or routine, one of them");
