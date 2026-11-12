@@ -2511,16 +2511,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"retried\":true}") };
             },
             .ShowImage => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "img-1";
-                const path = requireStr(obj, "path") orelse "image.png";
-                const mime = inferAttachmentMime(path);
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"attached\":true,\"id\":{f},\"name\":{f},\"mimeType\":{f}}}",
-                    .{ json.fmt(id, .{}), json.fmt(std.fs.path.basename(path), .{}), json.fmt(mime, .{}) },
-                ) };
+                return @import("show_media_host.zig").showImage(self, params);
             },
             .ShowVisual => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
