@@ -219,6 +219,12 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         return;
     }
 
+    // "Latest turn" diffs start from the checkout's tree as this turn begins
+    // (`CheckoutDiffSync::note_turn_start`); a folder outside a checkout
+    // records nothing.
+    @import("rpcg_watch.zig").noteTurnStart(host, chat_id, cwd) catch |err|
+        std.log.warn("harness-engine: recording the turn's start tree failed: {t}", .{err});
+
     const live = try host.gpa.create(Live);
     errdefer host.gpa.destroy(live);
     const turn = try Turn.create(host.gpa, io, adapter, .{ .ctx = live, .emitFn = emit }, asst_id);

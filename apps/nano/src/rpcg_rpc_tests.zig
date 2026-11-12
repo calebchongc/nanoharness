@@ -356,3 +356,32 @@ test "rpcg_rpc WatchCheckoutDiffs and WatchWorkspaceGitStatus publish changes" {
         f.host.cancelWatch(id);
     }
 }
+
+test "rpcg_rpc a turn the engine runs records its start, so the \"turn\" diff answers" {
+    if (comptime !std.process.can_spawn) return;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const repo = f.t.repo;
+    _ = try f.addChat("chat-run", "dev-synthetic", null, repo);
+    try testing.expectEqualStrings("no turn recorded", try f.err("GetCheckoutDiff", try f.params("{{\"cwd\":\"{s}\",\"mode\":\"turn\",\"chatId\":\"chat-run\"}}", .{repo})));
+
+    // A run on the `mock` harness, through the engine's own command path.
+    _ = try f.ok("QueueCommand", try f.params("{{\"chatId\":\"chat-run\",\"command\":{{\"kind\":\"run\",\"messageId\":\"m-1\",\"request\":{{\"prompt\":\"hello\",\"cwd\":\"{s}\"}}}}}}", .{repo}));
+    const root = (try g.checkoutIdentity(f.arena.allocator(), testing.io, "dev-synthetic", repo)).ok.root;
+    var waited: usize = 0;
+    while (true) : (waited += 50) {
+        if (waited >= 15_000) return error.TurnStartNeverRecorded;
+        f.host.mutex.lockUncancelable(testing.io);
+        const tree = try watch.turnTree(&f.host, testing.allocator, "chat-run", root);
+        f.host.mutex.unlock(testing.io);
+        if (tree) |t| {
+            testing.allocator.free(t);
+            break;
+        }
+        try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    }
+    try f.t.sh("cd repo && printf 'during the turn\\n' > turn.txt");
+    const turn = try f.ok("GetCheckoutDiff", try f.params("{{\"cwd\":\"{s}\",\"mode\":\"turn\",\"chatId\":\"chat-run\"}}", .{repo}));
+    try testing.expectEqual(@as(usize, 1), turn.object.get("files").?.array.items.len);
+    try testing.expectEqualStrings("turn.txt", turn.object.get("files").?.array.items[0].object.get("path").?.string);
+}
