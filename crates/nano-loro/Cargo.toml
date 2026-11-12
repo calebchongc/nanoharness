@@ -6,7 +6,7 @@ license-file.workspace = true
 publish = false
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 harness-doc.workspace = true

@@ -2,14 +2,15 @@
 # macOS packaging: build the Zig app and engine for the host arch and produce
 #   target/package/harness-<version>-macos-<arch>.dmg          (user download)
 #   target/package/harness-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Harness.app (unsigned unless CODESIGN_IDENTITY is set). Only Zig
-# output ships: Contents/MacOS/harness-nano (the app, CFBundleExecutable) and
-# Contents/MacOS/harness-engine (the engine the app starts and the daemon
-# runs). No cargo, no Rust binary.
+# containing Harness.app (ad-hoc unless CODESIGN_IDENTITY is set). The app
+# and engine are Zig. HARNESS_LORO_PREBUILT optionally ships a separate Rust
+# retained-Loro dylib beside them; no Cargo/Rust toolchain is invoked here.
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        GRAFF_BINARY=/absolute/path/to/graff to bundle an exact CLI build.
+#        HARNESS_LORO_PREBUILT=/trusted/absolute/libharness_nano_loro.dylib
+#        opts into retained Loro; no artifact download or legacy fallback.
 #        OPTIMIZE=ReleaseFast|ReleaseSafe|ReleaseSmall for the Zig build
 #        (default ReleaseSafe, what ships).
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
@@ -37,14 +38,22 @@ mkdir -p "$OUT_DIR"
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # One build installs both: harness-nano and harness-engine (apps/nano/build.zig).
-(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize="${OPTIMIZE:-ReleaseSafe}")
+LORO_ARGS=()
+if [[ -n "${HARNESS_LORO_PREBUILT:-}" ]]; then
+  [[ "$HARNESS_LORO_PREBUILT" == /* && -f "$HARNESS_LORO_PREBUILT" ]] || { echo "HARNESS_LORO_PREBUILT must be a trusted absolute dylib file" >&2; exit 1; }
+  LORO_ARGS+=("-Dloro-dylib=$HARNESS_LORO_PREBUILT")
+fi
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize="${OPTIMIZE:-ReleaseSafe}" "${LORO_ARGS[@]}")
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-engine" "$APP/Contents/MacOS/harness-engine"
+if [[ -n "${HARNESS_LORO_PREBUILT:-}" ]]; then
+  install -m 755 "$ROOT/apps/nano/zig-out/bin/libharness_nano_loro.dylib" "$APP/Contents/MacOS/libharness_nano_loro.dylib"
+fi
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 # The app is the Zig binary; the template still names the old executable.
 plutil -replace CFBundleExecutable -string harness-nano "$APP/Contents/Info.plist"
 [[ "$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")" == "harness-nano" ]]
-# No Rust binary may ship: nothing in the bundle is named `harness`.
+# No old Rust engine may ship: the optional Rust library is not an engine.
 if [[ -e "$APP/Contents/MacOS/harness" ]]; then
   echo "error: a Rust harness binary is in the bundle" >&2
   exit 1
@@ -127,7 +136,11 @@ rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
-  # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
+  # Sign the optional dylib with the SAME identity before the executables:
+  # hardened library validation must not be disabled to load a foreign team.
+  if [[ -f "$APP/Contents/MacOS/libharness_nano_loro.dylib" ]]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/libharness_nano_loro.dylib"
+  fi
   # graff keeps codegraff's notarized signature unless it isn't Developer ID
   # signed yet (a local GRAFF_BINARY build).
   codesign --verify --strict "$APP/Contents/Resources/bin/graff" 2>/dev/null &&

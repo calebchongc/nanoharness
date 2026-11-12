@@ -9,6 +9,14 @@
  * Input spans are borrowed only for the duration of a call; max 128 MiB.
  * Return: 0 success, 1 causally pending (import/pending-query), <0 error.
  * Error buffer is UTF-8; successful buffers follow the operation below. */
+/* Handshake before any handle calls. ABI 1 requires capability bits 0..5:
+ * retained schema, snapshot/update import, binary VV, durable pending imports,
+ * atomic private persistence, and command evaluation. Unknown extra bits are OK.
+ * Keep the loaded library alive until all its handles and buffers are freed. */
+uint32_t harness_loro_abi_version(void);
+uint64_t harness_loro_capabilities(void);
+#define HARNESS_LORO_ABI_VERSION 1
+#define HARNESS_LORO_REQUIRED_CAPABILITIES UINT64_C(0x3f)
 typedef struct HarnessLoro HarnessLoro;
 typedef struct { uint8_t *ptr; size_t len; } HarnessLoroBuffer;
 int32_t harness_loro_new(const uint8_t *, size_t, HarnessLoro **, HarnessLoroBuffer *);

@@ -18,7 +18,10 @@ import { Rpc } from "./rpc.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "../..");
 const EDGE_DIR = path.join(ROOT, "edge");
-const BIN = path.join(ROOT, "apps/nano/zig-out/bin");
+// Optional explicit relocatable bundle under test, never an ambient engine
+// search. Normal/local builds keep using this checkout's own artifacts.
+const BIN = process.env.LOCAL_LORO_BIN_DIR ?? path.join(ROOT, "apps/nano/zig-out/bin");
+if (!path.isAbsolute(BIN)) throw new Error("LOCAL_LORO_BIN_DIR must be absolute");
 const WRANGLER = path.join(EDGE_DIR, "node_modules/.bin/wrangler");
 const POINTER = path.join(os.tmpdir(), "harness-local-edge.current");
 /** Ports the installed app and the edge's defaults hold: never ours. */

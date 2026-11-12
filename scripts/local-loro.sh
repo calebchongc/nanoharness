@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Native full-sync acceptance. Unlike prove-zig.sh's LEGACY/OFFLINE mode,
-# this intentionally retains Rust's Loro implementation and requires Rust.
+# this retains a prebuilt Rust/Loro dylib. Producers/check peers need Rust;
+# build/up can consume HARNESS_LORO_PREBUILT without Cargo or Rust installed.
 # Usage: scripts/local-loro.sh check [--keep] | build | up [--phone] | down | status
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,8 +17,13 @@ case "$cmd" in
       if [[ ! -x "$root/edge/node_modules/.bin/wrangler" ]]; then
         (cd "$root/edge" && npm ci --no-audit --no-fund)
       fi
-      bash "$root/scripts/build-loro.sh"
-      (cd "$root/apps/nano" && "$root/scripts/heavy-build.sh" zig build install -Dloro-lib="$root/target/nano-loro/debug/libharness_nano_loro.a")
+      artifact="${HARNESS_LORO_PREBUILT:-}"
+      if [[ -z "$artifact" ]]; then
+        bash "$root/scripts/build-loro.sh"
+        artifact="$root/target/nano-loro/prebuilt/macos-$(uname -m)/libharness_nano_loro.dylib"
+      fi
+      [[ "$artifact" == /* && -f "$artifact" ]] || { echo "HARNESS_LORO_PREBUILT must name a trusted absolute dylib file" >&2; exit 1; }
+      (cd "$root/apps/nano" && "$root/scripts/heavy-build.sh" zig build install -Dloro-dylib="$artifact")
       if [[ "$cmd" == check && "$(uname -s)" == Darwin && -d /Applications/Xcode.app ]]; then
         "$root/scripts/check-loro-swift.sh"
       fi

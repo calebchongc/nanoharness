@@ -376,6 +376,18 @@ impl Buffer {
     }
 }
 
+/// Stable, allocation-free handshake. Changes to C layouts or operation
+/// semantics require a new ABI version; capabilities can grow additively.
+#[unsafe(no_mangle)]
+pub extern "C" fn harness_loro_abi_version() -> u32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn harness_loro_capabilities() -> u64 {
+    0x3f
+}
+
 /// # Safety
 /// Non-null input spans and output pointers must be valid for the call; the
 /// returned handle is exclusively owned until harness_loro_free. A handle

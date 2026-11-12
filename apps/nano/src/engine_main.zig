@@ -97,6 +97,7 @@ test "graff: the kept copy first, then the one shipped beside the engine" {
 }
 
 pub fn main(init: std.process.Init) !void {
+    try @import("loro.zig").validate();
     const gpa = init.gpa;
     const io = init.io;
     const port = engine_mod.Engine.portFrom(init.environ_map);

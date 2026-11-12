@@ -68,10 +68,11 @@ try {
   await step("loopback Worker + explicit retained-Loro Zig engine", async () => {
     await startEdge(run);
     const first = await startEngine(run, "a"); a = first.rpc;
-    if (first.info.loroSync !== true) throw new Error("engine was not built with -Dloro-lib; refusing legacy/tail-only demo");
+    if (first.info.loroSync !== true) throw new Error("engine was not built with retained Loro; refusing legacy/tail-only demo");
+    if (first.info.loroDynamic !== true && process.env.LOCAL_LORO_ALLOW_STATIC !== "1") throw new Error("acceptance requires the sideloaded dylib (explicit LOCAL_LORO_ALLOW_STATIC=1 permits static developer tests)");
     ({ repo } = await seedProject(run, a, first.info.deviceId));
     await a.call("Mutate", { op: "createChat", chatId: chat, spaceId: "space-synthetic-demo", config: { harness: "mock", modelOptions: {}, sandbox: "workspace-write" } });
-    return { engine: first.info.version, realLoro: first.info.loroSync };
+    return { engine: first.info.version, realLoro: first.info.loroSync, dynamicLibrary: first.info.loroDynamic === true };
   });
   await step("retained Rust binary doc -> Worker rows -> native full history", async () => {
     const pending = peer("seed-pending");

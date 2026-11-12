@@ -16,6 +16,7 @@ const crash_log = @import("crash_log.zig");
 pub const std_options: std.Options = .{ .log_level = .warn, .enable_segfault_handler = true };
 
 pub fn main(init: std.process.Init) !void {
+    try @import("loro.zig").validate();
     const builtin = @import("builtin");
     var mobile_flag = (builtin.os.tag == .ios);
     var demo_flag = false;

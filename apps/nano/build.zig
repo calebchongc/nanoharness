@@ -8,8 +8,17 @@ pub fn build(b: *std.Build) void {
     // An explicit, project-owned C ABI archive built by scripts/build-loro.sh.
     // The default remains legacy/offline mode; a Loro build is NOT all-Zig.
     const loro_lib = b.option([]const u8, "loro-lib", "Retained Loro C ABI static library (requires Rust)");
+    const loro_dylib = b.option([]const u8, "loro-dylib", "Prebuilt macOS retained-Loro dylib (no Rust toolchain needed)");
+    if (loro_lib != null and loro_dylib != null) @panic("choose static -Dloro-lib OR dynamic -Dloro-dylib");
+    if (loro_dylib) |path| {
+        if (target.result.os.tag != .macos) @panic("sideloaded Loro currently supports macOS only");
+        if (!std.fs.path.isAbsolute(path)) @panic("-Dloro-dylib requires a trusted absolute artifact path");
+        const install_lib = b.addInstallFileWithDir(.{ .cwd_relative = path }, .bin, "libharness_nano_loro.dylib");
+        b.getInstallStep().dependOn(&install_lib.step);
+    }
     const sync_opts = b.addOptions();
-    sync_opts.addOption(bool, "loro_enabled", loro_lib != null);
+    sync_opts.addOption(bool, "loro_enabled", loro_lib != null or loro_dylib != null);
+    sync_opts.addOption(bool, "loro_dynamic", loro_dylib != null);
     const lib_optimize = build_rules.httpZigOptimize(optimize, target.result.os.tag);
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
@@ -106,7 +115,7 @@ pub fn build(b: *std.Build) void {
     gate.use_llvm = true;
     const run_gate = b.addRunArtifact(gate);
     run_gate.addDirectoryArg(b.path("."));
-    if (loro_lib != null) run_gate.addArg("--with-loro");
+    if (loro_lib != null or loro_dylib != null) run_gate.addArg("--with-loro");
     b.step("no-rust", "Fail if the build, scripts or tests need Rust").dependOn(&run_gate.step);
 
     const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
@@ -148,7 +157,8 @@ pub fn build(b: *std.Build) void {
     // This folder, for the zero-Rust gate's test (src/no_rust_gate.zig).
     opts.addOption([]const u8, "nano_dir", b.root.joinString(b.allocator, ".") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
-    b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
+    const run_tests = b.addRunArtifact(tests);
+    b.step("test", "Run harness-nano tests").dependOn(&run_tests.step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen
     // from a made-up scene, a PNG per step asked for (src/snap.zig).
@@ -205,6 +215,15 @@ pub fn build(b: *std.Build) void {
     const run_engine = b.addRunArtifact(engine_exe);
     run_engine.addPassthruArgs();
     b.step("engine", "Run the Zig harness-engine daemon").dependOn(&run_engine.step);
+
+    // Cache executables used by build run/test do not sit beside installed
+    // libraries. Supply the explicit developer path ONLY to these commands,
+    // never in the binary/options embedded in a distributable.
+    if (loro_dylib) |path| {
+        inline for (.{ run, run_tests, run_engine, run_snap }) |runner| {
+            runner.setEnvironmentVariable("HARNESS_NANO_LORO_LIBRARY", path);
+        }
+    }
 
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors, engine_exe }) |artifact| {

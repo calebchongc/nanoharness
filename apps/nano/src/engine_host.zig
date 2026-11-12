@@ -1843,8 +1843,8 @@ pub const EngineHost = struct {
             .EngineInfo => {
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
-                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"loroSync\":{},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\",\"harness-updates-v1\"]}}",
-                    .{ json.fmt(build_info.version, .{}), json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(self.workspace_scope, .{}), @import("loro.zig").enabled },
+                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"loroSync\":{},\"loroDynamic\":{},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\",\"harness-updates-v1\"]}}",
+                    .{ json.fmt(build_info.version, .{}), json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(self.workspace_scope, .{}), @import("loro.zig").enabled, @import("loro.zig").dynamic },
                 ) };
             },
             .LocalDevice => {

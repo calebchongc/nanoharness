@@ -6,6 +6,10 @@ cd "$(dirname "$0")/.."
 # corrupting memory, for 0.1 MB and no measurable CPU in the resource replay
 # (8.9% streaming against ReleaseFast's 9.7%, the same within noise).
 zig build --release=safe -j1 "$@"
+dynamic_loro=false
+for arg in "$@"; do
+    case "$arg" in -Dloro-dylib=*) dynamic_loro=true ;; esac
+done
 # Use the version embedded in the executable: build.zig.zon's `.version`
 # (build.zig). Refuse a placeholder bundle when it is missing or malformed.
 version=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)",[[:space:]]*$/\1/p' build.zig.zon | head -n 1)
@@ -20,6 +24,9 @@ if [ ! -f "$icon_png" ]; then
     exit 1
 fi
 app="zig-out/Harness Nano.app/Contents"
+# Rebuild only this generated bundle's contents: old local bundles may still
+# contain a retired engine or nested signatures from a different build mode.
+rm -rf "$app"
 mkdir -p "$app/MacOS" "$app/Resources"
 cp zig-out/bin/harness-nano "$app/MacOS/"
 # The engine the app starts: the one beside its own executable, so the two
@@ -29,6 +36,13 @@ if [ ! -x zig-out/bin/harness-engine ]; then
     exit 1
 fi
 cp zig-out/bin/harness-engine "$app/MacOS/"
+# Only an explicitly selected dynamic build ships a library; never infer mode
+# from an old zig-out file left behind by a previous installation.
+rm -f "$app/MacOS/libharness_nano_loro.dylib"
+if "$dynamic_loro"; then
+    cp zig-out/bin/libharness_nano_loro.dylib "$app/MacOS/"
+    codesign --force --sign - "$app/MacOS/libharness_nano_loro.dylib"
+fi
 iconset_dir=$(mktemp -d)
 trap 'rm -rf "$iconset_dir"' EXIT
 iconset="$iconset_dir/AppIcon.iconset"
@@ -56,5 +70,7 @@ cat > "$app/Info.plist" <<PLIST
 PLIST
 # Copying over a linker-signed executable can invalidate its mapped pages.
 # Re-seal the complete bundle after the executable, icon and plist are final.
+codesign --force --sign - "$app/MacOS/harness-engine"
+codesign --force --sign - "$app/MacOS/harness-nano"
 codesign --force --sign - "zig-out/Harness Nano.app"
 echo "zig-out/Harness Nano.app"
