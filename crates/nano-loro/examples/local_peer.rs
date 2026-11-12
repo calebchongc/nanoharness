@@ -262,7 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if mode == "compare" {
+    if mode == "compare" || mode == "compare-swift" {
         let db = rusqlite::Connection::open_with_flags(
             &args[5],
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -287,9 +287,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             zv.includes_vv(&rv) && rv.includes_vv(&zv),
             "mutual binary VV containment"
         );
+        if mode == "compare-swift" {
+            use loro::ToJson;
+            let meta = zig
+                .retained_doc()
+                .doc()
+                .get_map("meta")
+                .get_deep_value()
+                .to_json_value();
+            assert_eq!(meta["swiftCompatibility"], "Swift 1.13.3 🦀");
+            let meta = rust.doc().get_map("meta").get_deep_value().to_json_value();
+            assert_eq!(meta["swiftCompatibility"], "Swift 1.13.3 🦀");
+        }
         println!(
             "RESULT:{}",
-            json!({"typedConverged":true,"mutualVV":true,"zigCursor":cursor,"messages":rust.read_entries()?.len()})
+            json!({"typedConverged":true,"mutualVV":true,"swiftUpdateApplied":mode=="compare-swift","zigCursor":cursor,"messages":rust.read_entries()?.len()})
         );
         return Ok(());
     }

@@ -119,7 +119,7 @@ pub fn attachPart(host: *EngineHost, chat_id: []const u8, doc: *session_doc.Sess
     const frame = try doc.toUpsertEntryFrameJson(host.gpa, msg_id);
     defer host.gpa.free(frame);
     host.broadcastWatch(.doc_messages, chat_id, frame) catch {};
-    const snap = try doc.exportSnapshot(host.gpa);
+    const snap = try doc.exportPersisted(host.gpa);
     defer host.gpa.free(snap);
     try host.store.saveSnapshot(chat_id, snap, host.nowMs());
     host.markChatTailDirty(chat_id);

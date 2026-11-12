@@ -249,6 +249,12 @@ pub fn main(init: std.process.Init) !void {
         // development scope, as the Rust engine without a client id.
         try @import("dev_edge_auth.zig").configure(&host.auth, io, auth_env, init.environ_map.get("HARNESS_ORG_ID"), resolved_data_dir);
         host.workspace_scope = engine_cli.startScope(auth_env, false).name();
+        if (@import("loro.zig").enabled and host.auth.signed_in) {
+            // Full document replicas now exist on non-host devices too.
+            // Restore registry ownership before considering saved documents;
+            // a replica's SQLite snapshot does not make it the chat's host.
+            _ = host.loadPersistedRegistryCache(io);
+        }
     }
 
     // Seed any persisted chats from docs.sqlite into host.chats so they appear in the sidebar and sync outbound.
@@ -261,6 +267,13 @@ pub fn main(init: std.process.Init) !void {
                 exists = true;
                 break;
             }
+        }
+        if (!exists and @import("loro.zig").enabled) {
+            // Preserve an unreferenced replica on disk; wait for its registry
+            // row rather than claiming another device's chat after restart.
+            const doc = try host.getOrCreateDoc(cid);
+            _ = doc;
+            continue;
         }
         if (!exists) {
             const id_copy = try gpa.dupe(u8, cid);
@@ -377,6 +390,7 @@ pub fn main(init: std.process.Init) !void {
                 var bot_tick_cycles: usize = 0;
                 if (!ctx.host.stop_requested) {
                     _ = ctx.host.syncFromEdgeRegistryUnlocked(ctx.io);
+                    @import("loro_sync.zig").sync(ctx.host, ctx.io) catch |err| std.log.warn("Loro sync: {s}", .{@errorName(err)});
                     if (!ctx.host.stop_requested) {
                         ctx.host.prefetchRecentChatTailsUnlocked(ctx.io, 16);
                     }
@@ -395,6 +409,7 @@ pub fn main(init: std.process.Init) !void {
                     if (ctx.host.syncFromEdgeRegistryUnlocked(ctx.io) and !ctx.host.stop_requested) {
                         ctx.host.prefetchRecentChatTailsUnlocked(ctx.io, 16);
                     }
+                    @import("loro_sync.zig").sync(ctx.host, ctx.io) catch |err| std.log.warn("Loro sync: {s}", .{@errorName(err)});
                     bot_tick_cycles += 1;
                     if (bot_tick_cycles >= 24 and !ctx.host.stop_requested) {
                         bot_tick_cycles = 0;

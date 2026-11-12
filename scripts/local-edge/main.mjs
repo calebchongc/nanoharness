@@ -150,7 +150,7 @@ function outboundOf(pids) {
 async function http(method, url, { bearer, body, timeoutMs = 10_000, headers = {} } = {}) {
   const h = { ...headers };
   if (bearer) h.authorization = `Bearer ${bearer}`;
-  if (body !== undefined && typeof body !== "string") { h["content-type"] = "application/json"; body = JSON.stringify(body); }
+  if (body !== undefined && typeof body !== "string" && !ArrayBuffer.isView(body) && !(body instanceof ArrayBuffer)) { h["content-type"] = "application/json"; body = JSON.stringify(body); }
   const res = await fetch(url, { method, headers: h, body, signal: AbortSignal.timeout(timeoutMs) });
   const text = await res.text();
   let json;
@@ -836,15 +836,21 @@ async function main() {
 
 // A check's processes never outlive it, and neither do those of an `up`
 // that is still starting; a finished `up` hands its own to `down`.
-for (const sig of ["SIGINT", "SIGTERM"]) {
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+for (const sig of isMain ? ["SIGINT", "SIGTERM"] : []) {
   process.on(sig, async () => {
     if (activeRun) await activeRun.stopAll();
     process.exit(130);
   });
 }
 
-main().then((code) => process.exit(code), async (e) => {
-  console.error(`local-edge: ${e.message}`);
-  if (activeRun) await activeRun.stopAll();
-  process.exit(1);
-});
+// Reuse the same isolated process/profile/auth machinery for the retained
+// Loro acceptance driver, without spawning the normal CLI on import.
+export { Run, startEdge, startEngine, engineEnv, newIdentity, edgeUrl, seedProject, runPrompt, http, until, portListening, groupAlive };
+if (isMain) {
+  main().then((code) => process.exit(code), async (e) => {
+    console.error(`local-edge: ${e.message}`);
+    if (activeRun) await activeRun.stopAll();
+    process.exit(1);
+  });
+}

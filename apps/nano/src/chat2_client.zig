@@ -26,6 +26,9 @@ pub const Chat2RoomClient = struct {
     doc: *session_doc.SessionDoc,
     store: *docs_store.DocsStore,
     retry_after_ms: ?u64 = null,
+    /// Transport contiguity may progress beyond the applied cursor while
+    /// causal dependencies are parked. This is never persisted as applied.
+    received_cursor: ?u64 = null,
 
     pub fn buildHelloFrame(self: *const Chat2RoomClient, token: []const u8, device_id: []const u8) ![]u8 {
         const cursor = self.store.snapshotCursor(self.doc_id) orelse 0;
@@ -73,13 +76,30 @@ pub const Chat2RoomClient = struct {
             chat2_wire.FrameType.row => {
                 const seq: u64 = if (hdr.get("seq")) |v| (if (v == .integer) @intCast(@max(0, v.integer)) else 0) else 0;
                 const prev_cursor = self.store.snapshotCursor(self.doc_id) orelse 0;
-                const next_cursor = chat2_wire.nextRowCursor(prev_cursor, seq) orelse return error.Chat2GapDetected;
+                const next_cursor = chat2_wire.nextRowCursor(@max(self.received_cursor orelse prev_cursor, prev_cursor), seq) orelse return error.Chat2GapDetected;
                 if (decoded.payload.len > 0) {
-                    self.doc.importSnapshot(decoded.payload) catch {};
+                    self.doc.importSnapshot(decoded.payload) catch |err| {
+                        if (err == error.PendingDependencies) {
+                            self.received_cursor = next_cursor;
+                            // Ordinary Loro snapshots omit parked imports. Keep
+                            // raw pending bytes AND the held cursor atomically.
+                            const state = try self.doc.exportPersisted(self.gpa);
+                            defer self.gpa.free(state);
+                            try self.store.saveSnapshotWithCursor(self.doc_id, state, prev_cursor, self.store.snapshotEpoch(self.doc_id) orelse 2, now_ms);
+                        }
+                        return err;
+                    };
                 }
                 const prev_epoch = self.store.snapshotEpoch(self.doc_id) orelse 2;
-                const snap = try self.doc.exportSnapshot(self.gpa);
+                const snap = try self.doc.exportPersisted(self.gpa);
                 defer self.gpa.free(snap);
+                self.received_cursor = next_cursor;
+                if (try self.doc.hasPendingLoro()) {
+                    // Even an empty/no-op row cannot certify earlier parked
+                    // operations. Preserve the same applied boundary.
+                    try self.store.saveSnapshotWithCursor(self.doc_id, snap, prev_cursor, prev_epoch, now_ms);
+                    return error.PendingDependencies;
+                }
                 try self.store.saveSnapshotWithCursor(self.doc_id, snap, next_cursor, prev_epoch, now_ms);
                 return .{ .row_applied = next_cursor };
             },
@@ -90,9 +110,11 @@ pub const Chat2RoomClient = struct {
                     self.store.acknowledgeChatUpdate(self.doc_id, batch_id);
                 }
                 const prev_cursor = self.store.snapshotCursor(self.doc_id) orelse 0;
-                const next_cursor = chat2_wire.nextRowCursor(prev_cursor, seq) orelse @max(prev_cursor, seq);
+                // An ACK proves our write, not the unread remote rows before
+                // it. Hold on a gap; the normal row pull will fill it.
+                const next_cursor = if (try self.doc.hasPendingLoro()) prev_cursor else chat2_wire.nextRowCursor(prev_cursor, seq) orelse prev_cursor;
                 const prev_epoch = self.store.snapshotEpoch(self.doc_id) orelse 2;
-                const snap = try self.doc.exportSnapshot(self.gpa);
+                const snap = try self.doc.exportPersisted(self.gpa);
                 defer self.gpa.free(snap);
                 try self.store.saveSnapshotWithCursor(self.doc_id, snap, next_cursor, prev_epoch, now_ms);
                 return .{ .ack_processed = next_cursor };
@@ -109,6 +131,42 @@ pub const Chat2RoomClient = struct {
         }
     }
 };
+
+test "retained Loro: an ACK cannot skip unread remote rows" {
+    const gpa = testing.allocator;
+    var store = docs_store.DocsStore.init(gpa);
+    defer store.deinit();
+    var doc = try session_doc.SessionDoc.init(gpa, "chat-ack-gap", "dev-local");
+    defer doc.deinit();
+    try store.saveSnapshotWithCursor(doc.chat_id, "HZD1{}", 0, 2, 1000);
+    try store.enqueueChatUpdate(doc.chat_id, "own-batch", "own update");
+    var client = Chat2RoomClient{ .gpa = gpa, .doc_id = doc.chat_id, .doc = &doc, .store = &store };
+    var hdr = try json.parseFromSlice(json.Value, gpa, "{\"seq\":3,\"batchId\":\"own-batch\"}", .{});
+    defer hdr.deinit();
+    const frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.ack, hdr.value, "");
+    defer gpa.free(frame);
+    _ = try client.handleServerFrame(frame, 1001);
+    try testing.expectEqual(@as(?u64, 0), store.snapshotCursor(doc.chat_id));
+    try testing.expect(!store.hasPendingChatUpdates(doc.chat_id));
+}
+
+test "retained Loro: an invalid import cannot advance the durable row cursor" {
+    const gpa = testing.allocator;
+    var store = docs_store.DocsStore.init(gpa);
+    defer store.deinit();
+    var doc = try session_doc.SessionDoc.init(gpa, "chat-rejected-row", "dev-local");
+    defer doc.deinit();
+    try store.saveSnapshotWithCursor(doc.chat_id, "HZD1{}", 0, 2, 1000);
+    var client = Chat2RoomClient{ .gpa = gpa, .doc_id = doc.chat_id, .doc = &doc, .store = &store };
+    var hdr = try json.parseFromSlice(json.Value, gpa, "{\"seq\":1}", .{});
+    defer hdr.deinit();
+    const frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.row, hdr.value, "loro-invalid-synthetic");
+    defer gpa.free(frame);
+    if (client.handleServerFrame(frame, 1001)) |_| {
+        return error.InvalidImportWasAcknowledged;
+    } else |_| {}
+    try testing.expectEqual(@as(?u64, 0), store.snapshotCursor(doc.chat_id));
+}
 
 test "Chat2RoomClient handles state catch-up planning, row C2 commit, ack outbox drain, and quota backoff" {
     const gpa = testing.allocator;

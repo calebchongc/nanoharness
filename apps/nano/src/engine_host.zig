@@ -1709,7 +1709,7 @@ pub const EngineHost = struct {
                     self.gpa.free(kv.key);
                 }
                 if (doc.local_seq > 0 or self.store.loadSnapshot(kv.key) != null) {
-                    if (doc.exportSnapshot(self.gpa)) |snap| {
+                    if (doc.exportPersisted(self.gpa)) |snap| {
                         defer self.gpa.free(snap);
                         self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch |err|
                             std.log.warn("snapshot save failed: chat={s} error={s}", .{ kv.key, @errorName(err) });
@@ -1736,7 +1736,8 @@ pub const EngineHost = struct {
             var doc = try session_doc.SessionDoc.init(self.gpa, chat_id, self.device_id);
             errdefer doc.deinit();
             if (self.store.loadSnapshot(chat_id)) |snap_bytes| {
-                doc.importSnapshot(snap_bytes) catch {};
+                // Never turn a refused legacy/Loro lineage into an empty doc.
+                try doc.importSnapshot(snap_bytes);
             }
             doc.last_access_seq = self.doc_access_clock;
             gop.key_ptr.* = key_copy;
@@ -1842,8 +1843,8 @@ pub const EngineHost = struct {
             .EngineInfo => {
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
-                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\",\"harness-updates-v1\"]}}",
-                    .{ json.fmt(build_info.version, .{}), json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(self.workspace_scope, .{}) },
+                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"loroSync\":{},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\",\"harness-updates-v1\"]}}",
+                    .{ json.fmt(build_info.version, .{}), json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(self.workspace_scope, .{}), @import("loro.zig").enabled },
                 ) };
             },
             .LocalDevice => {
@@ -2369,7 +2370,7 @@ pub const EngineHost = struct {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 if (call_id != 0) try self.registerWatch(call_id, .doc_messages, chat_id);
                 const doc = try self.getOrCreateDoc(chat_id);
-                if (doc.messages.items.len == 0 and self.store.loadSnapshot(chat_id) == null) {
+                if (!@import("loro.zig").enabled and doc.messages.items.len == 0 and self.store.loadSnapshot(chat_id) == null) {
                     if (self.lookupCachedTailJson(chat_id)) |tail_msgs_json| {
                         return self.oneStreamItem(
                             false,
@@ -2619,7 +2620,7 @@ pub const EngineHost = struct {
                     const cmd_name = if (rpc_method == .SteerQueuedMessageNow) "steer" else "run";
                     try doc.enqueueCommand(id, cmd_name, owned_text, "completed", now);
                     try doc.appendUserMessage(id, "part-queued", owned_text, now);
-                    const snap = try doc.exportSnapshot(self.gpa);
+                    const snap = try doc.exportPersisted(self.gpa);
                     defer self.gpa.free(snap);
                     try self.store.saveSnapshot(chat_id, snap, now);
                     for (self.chats.items) |*c| {

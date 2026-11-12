@@ -63,12 +63,19 @@ test "retained Loro: unresolved row persists with held cursor across SQLite rest
     // The held cursor causes B to replay after restart. Its prerequisite A
     // can be a LATER transport row; do not park forever at the same B row.
     try t.expectError(error.PendingDependencies, client.handleServerFrame(frame, 1100));
-    var h2 = try std.json.parseFromSlice(std.json.Value, t.allocator, "{\"seq\":2}", .{});
+    // A no-op row must not let an unrelated ACK/cursor certify pending B.
+    var empty_hdr = try std.json.parseFromSlice(std.json.Value, t.allocator, "{\"seq\":2}", .{});
+    defer empty_hdr.deinit();
+    const empty = try wire.encodeValue(t.allocator, wire.FrameType.row, empty_hdr.value, "");
+    defer t.allocator.free(empty);
+    try t.expectError(error.PendingDependencies, client.handleServerFrame(empty, 1150));
+    try t.expectEqual(@as(?u64, 0), store.snapshotCursor(doc.chat_id));
+    var h2 = try std.json.parseFromSlice(std.json.Value, t.allocator, "{\"seq\":3}", .{});
     defer h2.deinit();
     const prerequisite = try wire.encodeValue(t.allocator, wire.FrameType.row, h2.value, baseline);
     defer t.allocator.free(prerequisite);
     _ = try client.handleServerFrame(prerequisite, 1200);
     try t.expect(!(try doc.hasPendingLoro()));
-    try t.expectEqual(@as(?u64, 2), store.snapshotCursor(doc.chat_id));
+    try t.expectEqual(@as(?u64, 3), store.snapshotCursor(doc.chat_id));
     try t.expectEqualStrings("answer grows 🚀", doc.messages.items[130].parts.items[2].text.items);
 }

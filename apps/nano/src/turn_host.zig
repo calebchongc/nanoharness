@@ -380,13 +380,15 @@ pub fn finishTurn(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, j
     try host.journal.recordFinish(chat_id, asst_id, journal_status);
 
     const finish_now = host.nowMs();
-    const snap = try doc.exportSnapshot(host.gpa);
+    const snap = try doc.exportPersisted(host.gpa);
     defer host.gpa.free(snap);
     try host.store.saveSnapshot(chat_id, snap, finish_now);
 
     const batch_id = try std.fmt.allocPrint(host.gpa, "{s}-b-{d}", .{ host.device_id, doc.local_seq });
     defer host.gpa.free(batch_id);
-    try host.store.enqueueChatUpdate(chat_id, batch_id, snap);
+    // Full-sync mode queues only genuine incremental Loro bytes in the sync
+    // worker. The private persistence envelope must never reach chat2.
+    if (!@import("loro.zig").enabled) try host.store.enqueueChatUpdate(chat_id, batch_id, snap);
 
     if (doc.toTailMessagesArrayJson(host.gpa, session_doc.tail_message_count)) |tail_arr| {
         _ = host.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
