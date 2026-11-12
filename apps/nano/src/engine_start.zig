@@ -92,7 +92,7 @@ pub fn candidatesFor(gpa: Allocator, env: *const Map, self_dir: ?[]const u8, os:
         for (out.items) |p| gpa.free(p);
         out.deinit(gpa);
     }
-    if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0) try out.append(gpa, try gpa.dupe(u8, p));
+    if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0 and !isRustHarness(p)) try out.append(gpa, try gpa.dupe(u8, p));
     const exe = if (os == .windows) "harness-engine.exe" else "harness-engine";
     if (self_dir) |dir| if (dir.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, exe }));
     if (os == .macos) {
@@ -105,6 +105,15 @@ pub fn candidatesFor(gpa: Allocator, env: *const Map, self_dir: ?[]const u8, os:
         while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, exe }));
     }
     return out.toOwnedSlice(gpa);
+}
+
+/// The Rust CLI's executable name. The Rust launcher exported
+/// `HARNESS_NANO_ENGINE_BIN` pointing at itself to every process it started,
+/// so the override can still name it from an older install's environment:
+/// it is skipped rather than launched.
+pub fn isRustHarness(path: []const u8) bool {
+    const base = std.fs.path.basename(path);
+    return std.mem.eql(u8, base, "harness") or std.ascii.eqlIgnoreCase(base, "harness.exe");
 }
 
 /// `candidatesFor` this app, on this OS.
@@ -439,6 +448,20 @@ test "the Zig engine is looked for in the override, beside the app, the app bund
         const base = std.fs.path.basename(p);
         try testing.expect(!std.mem.eql(u8, base, "harness") and !std.mem.eql(u8, base, "harness.exe"));
     };
+
+    // Not even when an older Rust launcher's environment names it.
+    var rust_env = Map.init(testing.allocator);
+    defer rust_env.deinit();
+    try rust_env.put("HARNESS_NANO_ENGINE_BIN", "/Applications/Harness.app/Contents/MacOS/harness");
+    const from_rust = try candidatesFor(testing.allocator, &rust_env, "/opt/harness", .macos);
+    defer {
+        for (from_rust) |p| testing.allocator.free(p);
+        testing.allocator.free(from_rust);
+    }
+    try testing.expectEqualStrings("/opt/harness" ++ sep ++ "harness-engine", from_rust[0]);
+    for (from_rust) |p| try testing.expect(!isRustHarness(p));
+    try testing.expect(isRustHarness("/opt/Harness/HARNESS.EXE"));
+    try testing.expect(!isRustHarness("/opt/harness/harness-engine"));
 }
 
 test "parseLockPid extracts valid engine lock pid and rejects invalid or self pids" {
