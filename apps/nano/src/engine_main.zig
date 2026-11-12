@@ -403,38 +403,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const ClientWorker = struct {
-        gpa: Allocator,
-        io: Io,
-        host: *engine_host.EngineHost,
-        stream: net.Stream,
-
-        fn run(ctx: *@This()) void {
-            var stream = ctx.stream;
-            const gpa_c = ctx.gpa;
-            const io_c = ctx.io;
-            const host_c = ctx.host;
-            gpa_c.destroy(ctx);
-            defer stream.close(io_c);
-            serveSocket(gpa_c, io_c, host_c, &stream) catch |err| {
-                std.log.debug("harness-engine: client ended: {t}", .{err});
-            };
-        }
-    };
-
-    while (!host.stop_requested) {
-        var stream = server.accept(io) catch continue;
-        const ctx = gpa.create(ClientWorker) catch {
-            stream.close(io);
-            continue;
-        };
-        ctx.* = .{ .gpa = gpa, .io = io, .host = &host, .stream = stream };
-        if (std.Thread.spawn(.{}, ClientWorker.run, .{ctx})) |th| {
-            th.detach();
-        } else |_| {
-            ClientWorker.run(ctx);
-        }
-    }
+    @import("engine_accept.zig").serve(gpa, io, &server, &host, serveSocket);
 }
 
 const PongWriter = struct {
