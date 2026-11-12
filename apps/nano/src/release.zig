@@ -13,6 +13,22 @@ const Allocator = std.mem.Allocator;
 
 pub const manifest_url = "https://github.com/justrach/harness/releases/latest/download/manifest.json";
 
+/// Whether to fetch the manifest at launch: not with
+/// `HARNESS_NANO_NO_RELEASE_CHECK` set (an isolated run that must stay on
+/// this machine, such as `scripts/local-edge.sh up`).
+pub fn wanted(env: *const std.process.Environ.Map) bool {
+    const v = env.get("HARNESS_NANO_NO_RELEASE_CHECK") orelse return true;
+    return v.len == 0;
+}
+
+test "release check: off with HARNESS_NANO_NO_RELEASE_CHECK" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expect(wanted(&env));
+    try env.put("HARNESS_NANO_NO_RELEASE_CHECK", "1");
+    try std.testing.expect(!wanted(&env));
+}
+
 pub const Check = struct {
     gpa: Allocator,
     io: std.Io,
