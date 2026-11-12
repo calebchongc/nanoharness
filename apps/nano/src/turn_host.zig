@@ -30,6 +30,7 @@ pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
         .{ "grok", &@import("agent_acp.zig").grok },
         .{ "hermes", &@import("agent_acp.zig").hermes },
         .{ "cursor", &@import("agent_cursor.zig").adapter },
+        .{ "pi", &@import("agent_pi.zig").adapter },
     };
     inline for (map) |e| if (std.mem.eql(u8, harness, e[0])) return e[1];
     return null;
