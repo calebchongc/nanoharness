@@ -893,6 +893,86 @@ test "mcp respond_to_input: the current pending question is found in the transcr
     try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q\",\"labels\":[\"a\"]}]}"), "chat chat-alp has no pending question");
 }
 
+// ---- rooms -------------------------------------------------------------------------------
+
+test "mcp post_room: queues framed peer mail for mentioned chats and reports redactions" {
+    const w = try WorldFixture.create(.{ .chat_id = "chat-beta-2", .device_id = "dev-local" });
+    defer w.destroy();
+    const v = try ok(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha the build is green\",\"kind\":\"message\"}"));
+    try testing.expectEqual(@as(i64, 3), u.int(v, "seq").?);
+    const woken = u.array(v, "woken").?;
+    try testing.expectEqual(@as(usize, 1), woken.len);
+    try testing.expectEqualStrings("alpha", u.str(woken[0], "member").?);
+    try testing.expect(u.boolean(woken[0], "queued").?);
+    try testing.expectEqual(@as(i64, 1), u.int(u.get(v, "redacted").?, "email").?);
+    try testing.expectEqual(@as(i64, 0), u.int(v, "stripped").?);
+    const post = w.lastWrite("RoomRequest").?;
+    try testing.expectEqualStrings("room/room_0123456789abcdef01234567/post", u.str(post, "path").?);
+    try testing.expectEqualStrings("beta", sval(post, &.{ "body", "member" }).?);
+    try testing.expect(!u.boolean(u.get(post, "body").?, "fromUser").?);
+    try testing.expectEqual(@as(usize, 32), sval(post, &.{ "body", "clientId" }).?.len);
+    const queued = w.lastWrite("QueueMessage").?;
+    try testing.expectEqualStrings("chat-alpha-1", u.str(queued, "chatId").?);
+    const text = u.str(queued, "text").?;
+    try testing.expect(peer.isRoomDelivery(text));
+    try testing.expect(std.mem.indexOf(u8, text, "[room message from beta · room build #3 · agent, advisory]: @alpha the build is green") != null);
+
+    // The room's refusals come back readable, and are not retried.
+    w.world.room_post_status = 422;
+    w.world.room_post_body = "{\"error\":\"secret_detected\",\"message\":\"the post contains a credential\"}";
+    const before = w.world.writes.items.len;
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"token=abc\"}"), "room request failed (422): secret_detected: the post contains a credential");
+    try testing.expectEqual(before + 1, w.world.writes.items.len);
+    w.world.room_post_body = "{\"error\":\"not_a_member\"}";
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"hi\"}"), "room request failed (422): not_a_member");
+    try expectErr(try w.call("post_room", "{\"room\":\"Build\",\"text\":\"hi\"}"), "no room named \"Build\" that you can see (names are exact and case-sensitive; the room may have been destroyed, or you aren't in it — see list_rooms)");
+    try expectErr(try w.call("post_room", "{\"room\":\"build\"}"), "invalid arguments: missing field `text`");
+}
+
+test "mcp rooms: list, create, join, read, inbox, release, archive, destroy and leave" {
+    const w = try WorldFixture.create(.{ .chat_id = "chat-beta-2", .device_id = "dev-local" });
+    defer w.destroy();
+    const listed = try ok(try w.call("list_rooms", "{}"));
+    try testing.expectEqualStrings("beta", u.str(listed, "you").?);
+    try testing.expectEqual(@as(usize, 1), u.array(listed, "rooms").?.len);
+
+    const created = try ok(try w.call("create_room", "{\"name\":\"plan\",\"members\":[\"Alpha\"]}"));
+    try testing.expectEqualStrings("room_new", sval(created, &.{ "room", "id" }).?);
+    try testing.expectEqualStrings("gamma", u.array(created, "added").?[0].string);
+    try expectErr(try w.call("create_room", "{\"name\":\"plan\",\"project\":true}"), "this chat's checkout has no origin remote to bind the room to");
+
+    const read = try ok(try w.call("read_room", "{\"room\":\"room_0123456789abcdef01234567\"}"));
+    try testing.expectEqualStrings("build", u.str(read, "room").?);
+    try testing.expectEqual(@as(i64, 5), u.int(read, "lastSeq").?);
+
+    const inbox = try ok(try w.call("room_inbox", "{}"));
+    try testing.expectEqual(@as(usize, 1), u.array(inbox, "items").?.len);
+
+    _ = try ok(try w.call("release_claim", "{\"room\":\"build\",\"claim_key\":\"task-1\"}"));
+    try testing.expectEqualStrings("task-1", sval(w.lastWrite("RoomRequest").?, &.{ "body", "claimKey" }).?);
+    try expectErr(try w.call("release_claim", "{\"room\":\"build\"}"), "invalid arguments: missing field `claim_key`");
+    _ = try ok(try w.call("archive_room", "{\"room\":\"build\"}"));
+    try testing.expect(u.boolean(u.get(w.lastWrite("RoomRequest").?, "body").?, "archived").?);
+    _ = try ok(try w.call("destroy_room", "{\"room\":\"build\"}"));
+    try testing.expectEqualStrings("room/room_0123456789abcdef01234567/destroy", u.str(w.lastWrite("RoomRequest").?, "path").?);
+    _ = try ok(try w.call("join_room", "{\"room\":\"build\"}"));
+    _ = try ok(try w.call("leave_room", "{\"room\":\"room_unknown\"}"));
+    try testing.expectEqualStrings("room/room_unknown/leave", u.str(w.lastWrite("RoomRequest").?, "path").?);
+
+    w.t.origin = .{};
+    try expectErr(try w.call("list_rooms", "{}"), "room tools speak for a Harness chat; this server has no HARNESS_CHAT_ID");
+    try expectErr(try w.call("room_inbox", "{}"), "room tools speak for a Harness chat; this server has no HARNESS_CHAT_ID");
+}
+
+test "mcp rooms: the Zig engine's RoomRequest reply is passed through as it is" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-beta-2" });
+    defer f.destroy();
+    // The engine answers status 200 with a string body; nothing is invented.
+    const listed = try ok(try f.call("list_rooms", "{}"));
+    try testing.expect(u.get(listed, "rooms").? == .null);
+    try expectErrStarts(try f.call("read_room", "{\"room\":\"build\"}"), "no room named \"build\" that you can see");
+}
+
 fn repeat(a: Allocator, unit: []const u8, n: usize) ![]const u8 {
     const out = try a.alloc(u8, unit.len * n);
     for (0..n) |k| @memcpy(out[k * unit.len ..][0..unit.len], unit);

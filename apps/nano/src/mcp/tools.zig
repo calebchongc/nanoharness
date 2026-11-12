@@ -14,6 +14,7 @@ const link = @import("engine_link.zig");
 const transcript = @import("transcript.zig");
 const peer = @import("peer.zig");
 const ids = @import("../ids.zig");
+pub const rooms = @import("rooms.zig");
 const Value = json.Value;
 
 /// The checked-in catalog: the Rust server's tools, names, descriptions and
@@ -128,6 +129,7 @@ fn dispatch(c: *Ctx, name: []const u8, args: Value) !Value {
     if (eq(u8, name, "dismiss_input")) return dismissInput(c, args);
     if (eq(u8, name, "rename_chat")) return renameChat(c, args);
     if (eq(u8, name, "archive_chat")) return archiveChat(c, args);
+    if (rooms.handles(name)) return rooms.call(c, name, args);
     if (Tools.has(name)) return c.fail("{s} is not available in this build", .{name});
     return c.fail("unknown tool: {s}", .{name});
 }

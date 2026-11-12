@@ -353,6 +353,7 @@ test {
     _ = @import("mcp/engine_link.zig");
     _ = @import("mcp/transcript.zig");
     _ = @import("mcp/peer.zig");
+    _ = @import("mcp/rooms.zig");
     _ = @import("mcp/tools.zig");
     _ = @import("mcp/tests.zig");
 }
