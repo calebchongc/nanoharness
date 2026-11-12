@@ -106,15 +106,17 @@ const json = std.json;
 /// prompt with "mock agent heard: <prompt>" and ends the turn.
 const mock_agent_script =
     \\#!/bin/sh
+    \\idof() { printf '%s' "$1" | /usr/bin/sed 's/.*"id":\([0-9]*\).*/\1/'; }
     \\while IFS= read -r line; do
     \\  case "$line" in
-    \\    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}' ;;
-    \\    *'"method":"session/new"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"mock-session"}}' ;;
+    \\    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":'$(idof "$line")',"result":{"protocolVersion":1}}' ;;
+    \\    *'"method":"session/new"'*) printf '%s\n' '{"jsonrpc":"2.0","id":'$(idof "$line")',"result":{"sessionId":"mock-session"}}' ;;
     \\    *'"method":"session/prompt"'*)
-    \\      text=$(printf '%s' "$line" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
+    \\      text=$(printf '%s' "$line" | /usr/bin/sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
     \\      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"mock-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"mock agent heard: $text\"}}}}"
-    \\      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+    \\      printf '%s\n' '{"jsonrpc":"2.0","id":'$(idof "$line")',"result":{"stopReason":"end_turn"}}'
     \\      exit 0 ;;
+    \\    *'"method":'*'"id":'*) printf '%s\n' '{"jsonrpc":"2.0","id":'$(idof "$line")',"result":{}}' ;;
     \\  esac
     \\done
     \\
@@ -194,6 +196,13 @@ test "relay two engines: a prompt from another device runs on the host and the r
     host.graff_exe = agent_path;
     try host.auth.configureCodegraff(edge, null, null, null);
     try host.auth.signInWithKey("user-1");
+    {
+        // The chat must exist: a turn for a chat with no row writes nothing.
+        var create = try json.parseFromSlice(json.Value, gpa, "{\"op\":\"createChat\",\"chatId\":\"chat-e2e\",\"config\":{\"harness\":\"graff\"}}", .{});
+        defer create.deinit();
+        const made = try host.handle("Mutate", create.value);
+        gpa.free(made.unary_json);
+    }
     const relay = (try startWith(gpa, io, &host, .{ .jitter_max_ms = 0 })).?;
     defer relay.stop();
     try room.waitForHost("dev-host", 10_000);
@@ -212,13 +221,25 @@ test "relay two engines: a prompt from another device runs on the host and the r
     defer gpa.free(run);
     try phone.call(run);
 
+    // The command is acknowledged at once; the turn runs on its own thread.
+    const ack = try phone.waitFor("\"id\":2,");
+    defer gpa.free(ack);
+    // `{commandId}`, the Rust engine's QueueCommand reply.
+    try testing.expectEqualStrings("{\"id\":2,\"ok\":{\"commandId\":\"m-phone-1\"}}", ack);
+
     // The agent's reply streams back to the watcher over the relay.
     const reply = try phone.waitFor("mock agent heard: hello from the phone");
     defer gpa.free(reply);
     try testing.expect(std.mem.startsWith(u8, reply, "{\"id\":1,\"item\":"));
-    const ack = try phone.waitFor("\"id\":2,");
-    defer gpa.free(ack);
-    try testing.expectEqualStrings("{\"id\":2,\"ok\":{\"queued\":true}}", ack);
+    // Let that turn finish (5 s at most) before steering: a steer into a
+    // live turn is delivered to it, not run as the next one.
+    {
+        var waited: u32 = 0;
+        while (@import("turn_host.zig").liveCount(io, &host) != 0) : (waited += 10) {
+            if (waited >= 5_000) return error.TurnDidNotFinish;
+            try Io.sleep(io, .fromMilliseconds(10), .awake);
+        }
+    }
 
     // Another engine's durable delivery: RelayCommand, exactly once.
     const now = host.nowMs();

@@ -273,8 +273,8 @@ fn outcome(gpa: Allocator, name: []const u8) !engine_host.RpcOutcome {
     return .{ .unary_json = try std.fmt.allocPrint(gpa, "{{\"outcome\":\"{s}\"}}", .{name}) };
 }
 
-/// Runs the command through the engine's turn entry point. This is the one
-/// call to repoint when turn dispatch moves (`turn_host.zig`).
+/// Runs the command through the engine's turn entry point: `QueueCommand`,
+/// whose run, steer, interrupt and answer kinds go to `turn_host.zig`.
 fn executeCommand(host: *engine_host.EngineHost, chat_id: []const u8, entry: Entry) !engine_host.RpcOutcome {
     const gpa = host.gpa;
     var aw: std.Io.Writer.Allocating = .init(gpa);
