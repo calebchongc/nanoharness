@@ -4,4 +4,5 @@ test {
     _ = @import("wss.zig");
     _ = @import("device_relay.zig");
     _ = @import("relay_command.zig");
+    _ = @import("relay_engine.zig");
 }

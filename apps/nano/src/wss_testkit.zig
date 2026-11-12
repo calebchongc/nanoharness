@@ -75,15 +75,19 @@ pub const Peer = struct {
         if (p.authorization) |a| p.gpa.free(a);
     }
 
-    /// Reads the upgrade request and answers `status` (101 upgrades).
-    fn handshake(p: *Peer, status: u16) !void {
+    pub const Request = struct {
+        key: [64]u8 = undefined,
+        key_len: usize = 0,
+    };
+
+    /// Reads the upgrade request: target, Authorization and the key.
+    pub fn readRequest(p: *Peer) !Request {
         const r = &p.rd.interface;
         const line = try r.takeDelimiterInclusive('\n');
         var parts = std.mem.tokenizeScalar(u8, std.mem.trimEnd(u8, line, "\r\n"), ' ');
         if (!std.mem.eql(u8, parts.next() orelse "", "GET")) return error.BadRequest;
         p.request_target = try p.gpa.dupe(u8, parts.next() orelse return error.BadRequest);
-        var key: [64]u8 = undefined;
-        var key_len: usize = 0;
+        var req: Request = .{};
         while (true) {
             const raw = try r.takeDelimiterInclusive('\n');
             const h = std.mem.trimEnd(u8, raw, "\r\n");
@@ -92,22 +96,32 @@ pub const Peer = struct {
             const name = std.mem.trim(u8, h[0..colon], " \t");
             const value = std.mem.trim(u8, h[colon + 1 ..], " \t");
             if (std.ascii.eqlIgnoreCase(name, "authorization")) {
+                if (p.authorization) |old| p.gpa.free(old);
                 p.authorization = try p.gpa.dupe(u8, value);
-            } else if (std.ascii.eqlIgnoreCase(name, "sec-websocket-key") and value.len <= key.len) {
-                @memcpy(key[0..value.len], value);
-                key_len = value.len;
+            } else if (std.ascii.eqlIgnoreCase(name, "sec-websocket-key") and value.len <= req.key.len) {
+                @memcpy(req.key[0..value.len], value);
+                req.key_len = value.len;
             }
         }
+        if (req.key_len == 0) return error.MissingWebSocketKey;
+        return req;
+    }
+
+    /// Answers the upgrade: 101 switches protocols, anything else refuses.
+    pub fn answer(p: *Peer, req: Request, status: u16) !void {
         const w = &p.wr.interface;
         if (status != 101) {
             try w.print("HTTP/1.1 {d} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{status});
             return w.flush();
         }
-        if (key_len == 0) return error.MissingWebSocketKey;
         var accept: [28]u8 = undefined;
-        ws_server.computeAcceptKey(key[0..key_len], &accept);
+        ws_server.computeAcceptKey(req.key[0..req.key_len], &accept);
         try w.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{&accept});
         try w.flush();
+    }
+
+    fn handshake(p: *Peer, status: u16) !void {
+        try p.answer(try p.readRequest(), status);
     }
 
     /// One frame from the client (which must mask), unmasked.
