@@ -16,4 +16,5 @@ test {
     _ = @import("mobile_settings.zig");
     _ = @import("view_mobile_settings.zig");
     _ = @import("view_mobile_onboarding.zig");
+    _ = @import("mobile_ux_contract_tests.zig");
 }
