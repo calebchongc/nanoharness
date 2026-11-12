@@ -1430,6 +1430,25 @@ test "mcp rooms: the edge's refusals read as errors, and a reply that is not an 
     try testing.expectEqual(@as(i64, 3), u.int(try ok(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha done\"}")), "seq").?);
 }
 
+test "mcp rooms: the Zig engine's RoomRequest reply is passed through as it is" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-beta-2" });
+    defer f.destroy();
+    // The engine forwards to a made-up loopback edge and hands its reply back.
+    var edge: @import("../rpcw_rooms.zig").FakeEdge = .{};
+    try edge.start();
+    defer edge.shutdown();
+    f.host.auth.edge_url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}", .{edge.port});
+    f.host.auth.access_token = try testing.allocator.dupe(u8, "synthetic-access-token");
+    f.host.auth.signed_in = true;
+    edge.body = "{\"rooms\":[]}";
+    const listed = try ok(try f.call("list_rooms", "{}"));
+    try testing.expectEqual(@as(usize, 0), u.get(listed, "rooms").?.array.items.len);
+    try expectErrStarts(try f.call("read_room", "{\"room\":\"build\"}"), "no room named \"build\" that you can see");
+    edge.status = 403;
+    edge.body = "{\"error\":\"not_a_member\"}";
+    try expectErrStarts(try f.call("list_rooms", "{}"), "room request failed (403): not_a_member");
+}
+
 // ---- bots --------------------------------------------------------------------------------------
 
 const bots_list =

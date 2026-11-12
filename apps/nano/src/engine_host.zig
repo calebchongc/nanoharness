@@ -599,6 +599,8 @@ pub const ChatRecord = struct {
     last_completed_peer_only: bool = false,
     /// The running turn's origin is not a person (set when it starts).
     running_turn_peer_only: bool = false,
+    /// `config.sandbox`, when the chat's config named one.
+    sandbox: ?@import("chat_sandbox.zig").Sandbox = null,
     activity_started_at_ms: i64 = 0,
     activity_updated_at_ms: i64 = 0,
     created_at_ms: i64 = 0,
@@ -1283,16 +1285,16 @@ pub const EngineHost = struct {
         }
         if (c.chat_mode) {
             w.print(
-                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}}}",
-                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":true}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
             ) catch {
                 aw.deinit();
                 return;
             };
         } else {
             w.print(
-                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}}}",
-                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
             ) catch {
                 aw.deinit();
                 return;
@@ -2103,7 +2105,7 @@ pub const EngineHost = struct {
                 ) };
             },
             .FetchToolBlob => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"content\":\"\",\"found\":false}") };
+                return @import("rpcw_tool_blob.zig").fetchToolBlob(self, params);
             },
             .ListHarnesses => return @import("rpcw_harnesses.zig").listHarnesses(self),
             .ListModels => {
@@ -2128,9 +2130,7 @@ pub const EngineHost = struct {
                     "[{\"name\":\"compact\",\"description\":\"Compact conversation history\"},{\"name\":\"clear\",\"description\":\"Start a fresh chat\"}]",
                 ) };
             },
-            .TakeProjectActionSetup => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"command\":null}") };
-            },
+            .TakeProjectActionSetup => return @import("rpcw_project_action_setup.zig").takeProjectActionSetup(self, params),
             .ListAgentAccounts => {
                 if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     const force_usage: bool = if (requireObj(params)) |obj|
@@ -2294,30 +2294,14 @@ pub const EngineHost = struct {
                 const sb = @import("sandboxes_host.zig");
                 return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .action, params));
             },
-            .CodegraffGithubRunners => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"available\":true,\"enabled\":true,\"installations\":[],\"recentJobs\":[],\"sizes\":[{\"key\":\"standard-4vcpu\",\"cpu\":4,\"memoryGiB\":8,\"diskGiB\":20,\"pricePerHourMicroUsd\":120000}]}",
-                ) };
-            },
+            .CodegraffGithubRunners => return @import("rpcw_github_runners.zig").githubRunners(self),
             .ListMcpServers => return @import("rpcw_mcp.zig").listMcpServers(self, params),
             .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
-            .ExternalHistoryImport => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"imported\":[]}") };
-            },
-            .CodexConversationPreview => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"title\":\"Codex Session\",\"messages\":[]}") };
-            },
-            .CodexConversationImport => {
-                const ref = if (requireObj(params)) |obj| (requireStr(obj, "reference") orelse "codex-imported") else "codex-imported";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"chatId\":{f},\"alreadyImported\":false}}",
-                    .{json.fmt(ref, .{})},
-                ) };
-            },
+            .ExternalHistoryImport => return @import("rpcw_history_import.zig").externalHistoryImport(self, params),
+            .CodexConversationPreview => return @import("rpcw_codex_conversation.zig").preview(self, params),
+            .CodexConversationImport => return @import("rpcw_codex_conversation.zig").import(self, params),
             .RoomRequest => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
+                return @import("rpcw_rooms.zig").roomRequest(self, params);
             },
             .ListOrgs => {
                 return .{ .unary_json = self.auth.listOrgsJson(self.io) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } } };
@@ -2353,12 +2337,8 @@ pub const EngineHost = struct {
                     .{ json.fmt(org_id, .{}), json.fmt(org_id, .{}) },
                 ) };
             },
-            .LocalImportStatus => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"importableChats\":0,\"importableSpaces\":0}") };
-            },
-            .ImportLocalWorkspace => {
-                return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"importedChats\":0,\"done\":true}"));
-            },
+            .LocalImportStatus => return @import("rpcw_local_import.zig").localImportStatus(self),
+            .ImportLocalWorkspace => return @import("rpcw_local_import.zig").importLocalWorkspace(self),
             .ListRepos => {
                 return .{ .unary_json = try self.spacesJson() };
             },
@@ -3365,6 +3345,11 @@ pub const EngineHost = struct {
                 const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
                 if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
                 const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const sandbox = switch (@import("chat_sandbox.zig").fromConfig(cfg_val.object)) {
+                    .bad => |m| return .{ .err = .{ .bad_params = m } },
+                    .absent => null,
+                    .ok => |sb| sb,
+                };
                 const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
                 const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
                 const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
@@ -3415,6 +3400,7 @@ pub const EngineHost = struct {
                         .cwd = cw_c,
                         .branch = br_c,
                         .parent_chat_id = pa_c,
+                        .sandbox = sandbox,
                         .created_at_ms = self.nowMs(),
                     });
                 }
@@ -3443,6 +3429,11 @@ pub const EngineHost = struct {
                 const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
                 if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
                 const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const sandbox = switch (@import("chat_sandbox.zig").fromConfig(cfg_val.object)) {
+                    .bad => |m| return .{ .err = .{ .bad_params = m } },
+                    .absent => null,
+                    .ok => |sb| sb,
+                };
                 const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
                 const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
                 for (self.chats.items) |*c| {
@@ -3460,12 +3451,13 @@ pub const EngineHost = struct {
                             if (c.reasoning) |old| self.gpa.free(old);
                             c.reasoning = r_copy;
                         }
+                        if (sandbox) |sb| c.sandbox = sb;
                         const eff_model = c.model orelse defaultModelForHarness(c.harness);
                         const eff_reas = c.reasoning orelse "high";
                         if (std.fmt.allocPrint(
                             self.gpa,
-                            "\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}",
-                            .{ json.fmt(c.harness, .{}), json.fmt(eff_model, .{}), json.fmt(eff_reas, .{}) },
+                            "\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}",
+                            .{ json.fmt(c.harness, .{}), json.fmt(eff_model, .{}), json.fmt(eff_reas, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                         )) |inner| {
                             defer self.gpa.free(inner);
                             self.enqueueFieldUpdateOp("chats", chat_id, inner);
@@ -3965,13 +3957,13 @@ pub const EngineHost = struct {
             }
             if (c.chat_mode) {
                 try w.print(
-                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}",
-                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":true}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                 );
             } else {
                 try w.print(
-                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                 );
             }
         }
@@ -4244,7 +4236,7 @@ pub const EngineHost = struct {
             row_cnt += 1;
             const sc = c.source_context_json orelse "null";
             w.print(
-                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":{}}}}}}}",
+                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":{}}}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(c.id, .{}),
@@ -4265,6 +4257,7 @@ pub const EngineHost = struct {
                     json.fmt(c.harness, .{}),
                     json.fmt(c.model, .{}),
                     json.fmt(c.reasoning, .{}),
+                    @import("chat_sandbox.zig").member(c.sandbox),
                     c.chat_mode,
                 },
             ) catch return;
@@ -5187,6 +5180,7 @@ pub const EngineHost = struct {
         sc_json = null;
         rec.archived = archived;
         rec.chat_mode = chat_mode;
+        rec.sandbox = @import("chat_sandbox.zig").fromRow(cfg_obj);
         rec.created_at_ms = created_ms;
         rec.last_message_at_ms = last_msg_ms;
         rec.last_prompt_at_ms = last_prompt_ms;
