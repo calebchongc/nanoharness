@@ -217,6 +217,53 @@ pub fn lockHolder(gpa: Allocator, io: Io, data_dir: []const u8) Holder {
     return .none;
 }
 
+/// The holder's pid as the Rust engine prints it: `unknown` when the lock
+/// file doesn't name one.
+pub fn holderPid(buf: *[24]u8, h: Holder) []const u8 {
+    return switch (h) {
+        .pid => |p| if (p > 0) (std.fmt.bufPrint(buf, "{d}", .{p}) catch "unknown") else "unknown",
+        .none => "unknown",
+    };
+}
+
+/// `InstanceLock::acquire`'s contention error, in the Rust engine's words.
+pub fn alreadyRunningText(buf: []u8, data_dir: []const u8, h: Holder) []const u8 {
+    var pid_buf: [24]u8 = undefined;
+    return std.fmt.bufPrint(buf, "another Harness engine is already running on {s} (pid {s}); stop it or use a different data dir (HARNESS_DATA_DIR)", .{ data_dir, holderPid(&pid_buf, h) }) catch
+        "another Harness engine is already running; stop it or use a different data dir (HARNESS_DATA_DIR)";
+}
+
+/// The engine's start-up lock: the data folder is created, then locked.
+/// Either failing stops the engine (`create_dir_all(data_dir)?` and
+/// `InstanceLock::acquire(data_dir)?`): it never runs without the lock.
+pub fn lockEngineDataDir(gpa: Allocator, io: Io, data_dir: []const u8, msg_buf: []u8) union(enum) { ok: InstanceLock, err: []const u8 } {
+    Io.Dir.cwd().createDirPath(io, data_dir) catch |e|
+        return .{ .err = std.fmt.bufPrint(msg_buf, "cannot create the data directory {s}: {t}", .{ data_dir, e }) catch "cannot create the data directory" };
+    const lock = InstanceLock.acquire(gpa, io, data_dir) catch |e| switch (e) {
+        error.AlreadyRunning => return .{ .err = alreadyRunningText(msg_buf, data_dir, lockHolder(gpa, io, data_dir)) },
+        else => return .{ .err = std.fmt.bufPrint(msg_buf, "cannot lock the data directory {s}: {t}", .{ data_dir, e }) catch "cannot lock the data directory" },
+    };
+    return .{ .ok = lock };
+}
+
+/// The engine's start-up lock, or the engine stops with the reason.
+pub fn lockEngineOrExit(gpa: Allocator, io: Io, data_dir: []const u8) InstanceLock {
+    var buf: [1024]u8 = undefined;
+    return switch (lockEngineDataDir(gpa, io, data_dir, &buf)) {
+        .ok => |l| l,
+        .err => |m| fatalStart(io, "{s}", .{m}),
+    };
+}
+
+/// The engine can't start: the reason on stderr, exit 1.
+pub fn fatalStart(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    var buf: [1024]u8 = undefined;
+    var ew = Io.File.stderr().writerStreaming(io, &buf);
+    ew.interface.print("harness-engine: " ++ fmt ++ "\n", args) catch {};
+    ew.interface.flush() catch {};
+    std.process.exit(1);
+}
+
 fn currentPid() i64 {
     if (comptime builtin.os.tag == .windows) {
         const w = struct {
@@ -586,14 +633,11 @@ pub fn formatSyncStatus(w: *Io.Writer, status_val: json.Value) !void {
 fn lockForChange(c: Context, data_dir: []const u8, verb: []const u8) !?InstanceLock {
     return InstanceLock.acquire(c.gpa, c.io, data_dir) catch |err| switch (err) {
         error.AlreadyRunning => {
-            const pid: i64 = switch (lockHolder(c.gpa, c.io, data_dir)) {
-                .none => 0,
-                .pid => |p| p,
-            };
+            var buf: [1024]u8 = undefined;
             try c.out.print(
-                "harness-engine: another Harness engine is already running on {s} (pid {d})\n" ++
+                "harness-engine: {s}\n" ++
                     "Cannot {s} while an engine is running — stop it first (`harness-engine daemon stop`, or quit the Harness app), or use the running app instead.\n",
-                .{ data_dir, pid, verb },
+                .{ alreadyRunningText(&buf, data_dir, lockHolder(c.gpa, c.io, data_dir)), verb },
             );
             try c.out.flush();
             return null;
@@ -1263,4 +1307,38 @@ test "fix-sec 5: login with no workspaces asks for a name and creates one" {
     try testing.expect(std.mem.indexOf(u8, cap.text(), "No workspaces yet \u{2014} name your new workspace and press enter:") != null);
     try testing.expectEqualStrings("org_1", auth.org_id.?);
     try testing.expectEqual(auth_host.AuthPhase.signed_in, auth.phase);
+}
+
+test "fix-sec 15: the engine never runs unlocked, and an unnamed holder is `unknown`" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec15");
+    defer tmp.remove();
+    // A data folder that can't be created (its parent is a file) stops the engine.
+    const file_path = try std.fs.path.join(testing.allocator, &.{ dir, "a-file" });
+    defer testing.allocator.free(file_path);
+    try Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = file_path, .data = "x" });
+    const under_file = try std.fs.path.join(testing.allocator, &.{ file_path, "data" });
+    defer testing.allocator.free(under_file);
+    var buf: [1024]u8 = undefined;
+    const blocked = lockEngineDataDir(testing.allocator, testing.io, under_file, &buf);
+    try testing.expect(std.mem.startsWith(u8, blocked.err, "cannot create the data directory "));
+
+    // A held lock whose file names no pid reads `pid unknown`, never `pid 0`.
+    const data = try std.fs.path.join(testing.allocator, &.{ dir, "data" });
+    defer testing.allocator.free(data);
+    var first = switch (lockEngineDataDir(testing.allocator, testing.io, data, &buf)) {
+        .ok => |l| l,
+        .err => |m| {
+            std.debug.print("{s}\n", .{m});
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer first.release(testing.io);
+    try first.file.setLength(testing.io, 0);
+    const second = lockEngineDataDir(testing.allocator, testing.io, data, &buf);
+    try testing.expect(std.mem.indexOf(u8, second.err, "(pid unknown)") != null);
+    var pid_buf: [24]u8 = undefined;
+    try testing.expectEqualStrings("unknown", holderPid(&pid_buf, .{ .pid = 0 }));
+    try testing.expectEqualStrings("4242", holderPid(&pid_buf, .{ .pid = 4242 }));
 }
