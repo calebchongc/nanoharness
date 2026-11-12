@@ -6816,96 +6816,30 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
     }
 }
 
-test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs, crates/engine/src/rpc.rs, and crates/doc/src/commands.rs" {
+test "Mechanical 1:1 source-of-truth verification against the engine contract vector (engine_contract.json)" {
     const gpa = testing.allocator;
-    const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    const engine_contract = @import("engine_contract.zig");
+    const contract = try engine_contract.load(a);
 
-    // 1. Parse `crates/rpc/src/lib.rs` `pub mod methods` directly from disk and verify all 154 RPC methods exist in `rpc_method_map`.
-    const rpc_lib_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/rpc/src/lib.rs", a, .limited(256 * 1024));
-    const mod_start = std.mem.indexOf(u8, rpc_lib_rs, "pub mod methods {") orelse return error.MissingMethodsMod;
-    const mod_end_rel = std.mem.indexOfPos(u8, rpc_lib_rs, mod_start, "\n}") orelse return error.MissingMethodsEnd;
-    const methods_block = rpc_lib_rs[mod_start..mod_end_rel];
-
-    var rust_method_count: usize = 0;
-    var line_it = std.mem.splitScalar(u8, methods_block, '\n');
-    while (line_it.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "pub const ")) continue;
-        const first_q = std.mem.indexOfScalar(u8, trimmed, '"') orelse continue;
-        const second_q = std.mem.indexOfScalarPos(u8, trimmed, first_q + 1, '"') orelse continue;
-        const method_name = trimmed[first_q + 1 .. second_q];
+    // 1. Every RPC method the reference engine serves exists in `rpc_method_map`.
+    for (contract.rpcMethods) |method_name| {
+        if (rpc_method_map.get(method_name) == null) std.debug.print("missing RPC method: {s}\n", .{method_name});
         try testing.expect(rpc_method_map.get(method_name) != null);
-        rust_method_count += 1;
     }
-    try testing.expectEqual(@as(usize, 158), rust_method_count);
+    try testing.expectEqual(@as(usize, 158), contract.rpcMethods.len);
 
-    // 2. Parse `crates/engine/src/rpc.rs` `enum MutateParams` and `enum FinishQueuedMessageEditAction` directly from disk.
-    const engine_rpc_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/rpc.rs", a, .limited(512 * 1024));
+    // 2. Every `MutateParams` op and `FinishQueuedMessageEditAction`.
+    for (contract.mutateOps) |op| try testing.expect(mutate_op_map.get(op) != null);
+    try testing.expectEqual(@as(usize, 17), contract.mutateOps.len);
+    for (contract.finishQueuedMessageEditActions) |act| try testing.expect(edit_action_map.get(act) != null);
+    try testing.expectEqual(@as(usize, 4), contract.finishQueuedMessageEditActions.len);
 
-    const mutate_start = std.mem.indexOf(u8, engine_rpc_rs, "enum MutateParams {") orelse return error.MissingMutateParams;
-    const mutate_end = std.mem.indexOfPos(u8, engine_rpc_rs, mutate_start, "\n}") orelse return error.MissingMutateEnd;
-    const mutate_block = engine_rpc_rs[mutate_start + "enum MutateParams {".len .. mutate_end];
-
-    var mutate_op_count: usize = 0;
-    var depth: usize = 0;
-    var m_lines = std.mem.splitScalar(u8, mutate_block, '\n');
-    while (m_lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "//") or std.mem.startsWith(u8, trimmed, "#[")) {
-            continue;
-        }
-        if (depth == 0 and std.ascii.isUpper(trimmed[0])) {
-            var end_ident: usize = 0;
-            while (end_ident < trimmed.len and std.ascii.isAlphanumeric(trimmed[end_ident])) : (end_ident += 1) {}
-            const pascal = trimmed[0..end_ident];
-            const camel = try a.dupe(u8, pascal);
-            camel[0] = std.ascii.toLower(camel[0]);
-            try testing.expect(mutate_op_map.get(camel) != null);
-            mutate_op_count += 1;
-        }
-        for (trimmed) |ch| {
-            if (ch == '{') depth += 1;
-            if (ch == '}') depth -= 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 17), mutate_op_count);
-
-    const edit_start = std.mem.indexOf(u8, engine_rpc_rs, "enum FinishQueuedMessageEditAction {") orelse return error.MissingEditAction;
-    const edit_end = std.mem.indexOfPos(u8, engine_rpc_rs, edit_start, "\n}") orelse return error.MissingEditActionEnd;
-    const edit_block = engine_rpc_rs[edit_start + "enum FinishQueuedMessageEditAction {".len .. edit_end];
-
-    var edit_action_count: usize = 0;
-    var e_lines = std.mem.splitScalar(u8, edit_block, '\n');
-    while (e_lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r,");
-        if (trimmed.len == 0 or !std.ascii.isUpper(trimmed[0])) continue;
-        const camel = try a.dupe(u8, trimmed);
-        camel[0] = std.ascii.toLower(camel[0]);
-        try testing.expect(edit_action_map.get(camel) != null);
-        edit_action_count += 1;
-    }
-    try testing.expectEqual(@as(usize, 4), edit_action_count);
-
-    // 3. Parse `crates/doc/src/commands.rs` `pub enum SessionCommandKind` directly from disk.
-    const commands_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/commands.rs", a, .limited(128 * 1024));
-    const cmd_start = std.mem.indexOf(u8, commands_rs, "pub enum SessionCommandKind {") orelse return error.MissingSessionCommandKind;
-    const cmd_end = std.mem.indexOfPos(u8, commands_rs, cmd_start, "\n}") orelse return error.MissingSessionCommandKindEnd;
-    const cmd_block = commands_rs[cmd_start + "pub enum SessionCommandKind {".len .. cmd_end];
-
-    var cmd_kind_count: usize = 0;
-    var c_lines = std.mem.splitScalar(u8, cmd_block, '\n');
-    while (c_lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r,");
-        if (trimmed.len == 0 or !std.ascii.isUpper(trimmed[0])) continue;
-        const camel = try a.dupe(u8, trimmed);
-        camel[0] = std.ascii.toLower(camel[0]);
-        try testing.expect(command_kind_map.get(camel) != null);
-        cmd_kind_count += 1;
-    }
-    try testing.expectEqual(@as(usize, 5), cmd_kind_count);
+    // 3. Every `SessionCommandKind`.
+    for (contract.sessionCommandKinds) |kind| try testing.expect(command_kind_map.get(kind) != null);
+    try testing.expectEqual(@as(usize, 5), contract.sessionCommandKinds.len);
 
     // 4. Execute all 17 Mutate ops, all 5 QueueCommand kinds, and all 4 FinishQueuedMessageEdit actions through EngineHost with testing.allocator (zero memory leaks).
     var host = try EngineHost.init(gpa, "dev-src-parity", "SourceParityHost");
@@ -6975,21 +6909,19 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
     }
 }
 
-test "Warm-Doc LRU eviction and memory bound 1:1 parity with crates/engine/src/doc_host.rs" {
+test "Warm-Doc LRU eviction and memory bound 1:1 parity with the engine contract vector" {
     const gpa = testing.allocator;
-    const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Verify constants against `crates/engine/src/doc_host.rs` and `crates/doc/src/constants.rs` directly from disk.
-    const doc_host_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/doc_host.rs", a, .limited(512 * 1024));
-    const doc_consts_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/constants.rs", a, .limited(64 * 1024));
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const WARM_DOC_CAP: usize = 12;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const DOC_LRU_BYTE_BUDGET: usize = 80 * 1024 * 1024;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const RESIDENT_BYTES_PER_SNAPSHOT_BYTE: usize = 6;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const ACTIVE_SYNC_CAP: usize = 28;") != null);
+    // 1. Verify the doc-host constants against the engine contract vector.
+    const contract = try @import("engine_contract.zig").load(a);
+    try testing.expectEqual(contract.docHost.warmDocCap, EngineHost.warm_doc_cap);
+    try testing.expectEqual(contract.docConstants.docLruByteBudget, EngineHost.doc_lru_byte_budget);
+    try testing.expectEqual(contract.docHost.docResidentFloorBytes, EngineHost.doc_resident_floor_bytes);
+    try testing.expectEqual(contract.docHost.residentBytesPerSnapshotByte, EngineHost.resident_bytes_per_snapshot_byte);
+    try testing.expectEqual(contract.docHost.activeSyncCap, EngineHost.active_sync_cap);
     try testing.expectEqual(@as(usize, 12), EngineHost.warm_doc_cap);
     try testing.expectEqual(@as(usize, 80 * 1024 * 1024), EngineHost.doc_lru_byte_budget);
     try testing.expectEqual(@as(usize, 512 * 1024), EngineHost.doc_resident_floor_bytes);
@@ -7041,35 +6973,37 @@ test "Warm-Doc LRU eviction and memory bound 1:1 parity with crates/engine/src/d
     try testing.expect(!host.docs.contains("chat-1"));
 }
 
-test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity with crates/doc and crates/sync" {
+test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity with the engine contract vector" {
     const gpa = testing.allocator;
-    const io = testing.io;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Verify Rust source-of-truth constants directly from disk.
-    const doc_consts_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/constants.rs", a, .limited(64 * 1024));
-    const doc_queue_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/queue.rs", a, .limited(128 * 1024));
-    const doc_host_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/doc_host.rs", a, .limited(512 * 1024));
-    const sync_budget_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/sync/src/budget.rs", a, .limited(64 * 1024));
-
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const SESSION_SCHEMA_VERSION: u32 = 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const MSG_INLINE_MAX: usize = 256 * 1024;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const RETAIN_DAYS: u32 = 3;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const COMPACT_LOG_BYTES: usize = 8 * 1024 * 1024;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const SOFT_CEILING_BYTES: usize = 25 * 1024 * 1024;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const STREAM_COMMIT_MS: u64 = 120;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const DO_FLUSH_MS: u64 = 5_000;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const TAIL_MESSAGE_COUNT: usize = 64;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 12;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const SYNC_ADMISSION_BATCH: usize = 4;") != null);
-    try testing.expect(std.mem.indexOf(u8, doc_queue_rs, "ReviewRequired {") != null);
-    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Semaphore::new(128)") != null);
-    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Duration::from_millis(50)") != null);
-    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Duration::from_secs(2)") != null);
+    // 1. Verify the doc, doc-host and sync-budget constants and the queue
+    // delivery gates against the engine contract vector.
+    const engine_contract = @import("engine_contract.zig");
+    const contract = try engine_contract.load(a);
+    const dc = contract.docConstants;
+    try testing.expectEqual(dc.sessionSchemaVersion, session_doc.schema_version);
+    try testing.expectEqual(dc.msgInlineMax, session_doc.msg_inline_max);
+    try testing.expectEqual(dc.retainDays, session_doc.retain_days);
+    try testing.expectEqual(dc.compactLogBytes, session_doc.compact_log_bytes);
+    try testing.expectEqual(dc.softCeilingBytes, session_doc.soft_ceiling_bytes);
+    try testing.expectEqual(dc.streamCommitMs, session_doc.stream_commit_ms);
+    try testing.expectEqual(dc.doFlushMs, session_doc.do_flush_ms);
+    try testing.expectEqual(dc.tailMessageCount, session_doc.tail_message_count);
+    try testing.expectEqual(dc.terminalOutputBatchMs, session_doc.terminal_output_batch_ms);
+    try testing.expectEqual(dc.commandDefaultTtlMs, session_doc.command_default_ttl_ms);
+    try testing.expectEqual(contract.docHost.queueEditLeaseMs, session_doc.queue_edit_lease_ms);
+    try testing.expectEqual(contract.docHost.syncAdmissionBatch, SyncBudget.sync_admission_batch);
+    try testing.expectEqual(contract.syncBudget.maxWaiters, SyncBudget.max_waiters);
+    try testing.expectEqual(contract.syncBudget.dialPacingMs, SyncBudget.dial_pacing_ms);
+    try testing.expectEqual(contract.syncBudget.fdExhaustedPauseMs, SyncBudget.fd_exhausted_pause_ms);
+    var gate_buf: [64]u8 = undefined;
+    for (contract.queueDeliveryGates) |gate| {
+        const tag = engine_contract.camelToSnake(&gate_buf, gate) orelse return error.GateNameTooLong;
+        try testing.expect(std.meta.stringToEnum(session_doc.QueueGateKind, tag) != null);
+    }
 
     try testing.expectEqual(@as(u32, 1), session_doc.schema_version);
     try testing.expectEqual(@as(usize, 256 * 1024), session_doc.msg_inline_max);
