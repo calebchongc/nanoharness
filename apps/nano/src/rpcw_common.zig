@@ -41,6 +41,12 @@ pub fn homeDir() ?[]const u8 {
     return getenvNonEmpty("HOME") orelse getenvNonEmpty("USERPROFILE");
 }
 
+/// The home graff runs with on this device (`AgentAccountsConfig::graff_home`):
+/// its sign-ins, MCP config and caches. The engine's configured home, else HOME.
+pub fn graffHome(host: anytype) []const u8 {
+    return host.agent_accounts.home_dir orelse homeDir() orelse "/";
+}
+
 threadlocal var err_buf: [4096]u8 = undefined;
 
 /// `RpcError::Failed(format!(..))`.

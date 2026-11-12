@@ -146,7 +146,7 @@ pub fn signOutGraffLogin(host: *engine_host.EngineHost, params: json.Value) !Rpc
     const provider = pv.string;
     const io = host.io orelse return common.failed("Could not sign out of {s}: no I/O", .{provider});
     // graff's home is this device's home (`AgentAccountsConfig::graff_home`).
-    const home = host.agent_accounts.home_dir orelse common.homeDir() orelse "/";
+    const home = common.graffHome(host);
 
     if (std.mem.eql(u8, provider, "chatgpt-new")) {
         if (try graffLogout(gpa, io, home, provider)) |m| return common.failedMsg(m);
