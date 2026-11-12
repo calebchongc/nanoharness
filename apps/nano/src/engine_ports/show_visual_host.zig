@@ -52,6 +52,9 @@ pub fn showVisual(host: *EngineHost, params: json.Value) !RpcOutcome {
     }
 
     const io = host.io orelse return failed("visual validation worker failed");
+    // Luau (C++) does not build for iOS with Zig's libc++: the phone's
+    // in-process engine has no visual sandbox (build.zig leaves Luau out).
+    if (comptime @import("builtin").os.tag == .ios) return failed("Visual scripts are not supported on this device");
     var err_buf: [256]u8 = undefined;
     if (sandbox.check(host.gpa, io, script, &err_buf) != null) return failed(check_failed);
 

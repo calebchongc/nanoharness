@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     const info_opts = b.addOptions();
     info_opts.addOption([]const u8, "version", manifest.version);
     const info_mod = info_opts.createModule();
-    const imports: []const std.Build.Module.Import = &.{
+    const base_imports = [_]std.Build.Module.Import{
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
@@ -82,10 +82,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "themes_json", .module = themes_json },
         .{ .name = "ios_themes_json", .module = ios_themes_json },
         .{ .name = "mcp_tools_json", .module = @import("mcp_tools_build.zig").module(b) },
-        // ShowVisual's sandbox (src/engine_ports/visual_sandbox.zig): the app
-        // links it too, as iOS runs the engine in-process (ios_host.zig).
-        .{ .name = "luau", .module = luau },
     };
+    // ShowVisual's sandbox (src/engine_ports/visual_sandbox.zig) needs Luau,
+    // which is C++: Zig's libc++ does not build for iOS, so the phone's
+    // in-process engine goes without it (ShowVisual says so there).
+    const with_luau = base_imports ++ [_]std.Build.Module.Import{.{ .name = "luau", .module = luau }};
+    const imports: []const std.Build.Module.Import = if (target.result.os.tag == .ios) &base_imports else &with_luau;
 
     // `zig build no-rust`: fails when the build graph, scripts/ or a test
     // reaches for Rust (its toolchain or its sources); src/no_rust_gate.zig.
