@@ -216,3 +216,44 @@ test "fix-sec 2: a switch whose token names another workspace fails" {
     // The state follows the token's claim, as the Rust engine.
     try testing.expectEqualStrings("org_1", host.auth.org_id.?);
 }
+
+test "fix-sec 3: credential files are written 0600 through a temporary file and a rename" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    const path = try std.fs.path.join(testing.allocator, &.{ dir, "session.json" });
+    defer testing.allocator.free(path);
+
+    // An old world-readable file and a link beside it to something else.
+    try tmp.dir.writeFile(io, .{ .sub_path = "session.json", .data = "{\"refreshToken\":\"harness_rt_old_and_long\"}" });
+    const old = try tmp.dir.openFile(io, "session.json", .{});
+    try old.setPermissions(io, .fromMode(0o644));
+    old.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim.txt", .data = "untouched" });
+    try tmp.dir.symLink(io, "victim.txt", "key.json", .{});
+    const key_path = try std.fs.path.join(testing.allocator, &.{ dir, "key.json" });
+    defer testing.allocator.free(key_path);
+
+    try auth_host.writePrivate(io, path, "{\"refreshToken\":\"new\"}");
+    try auth_host.writePrivate(io, key_path, "{\"api_key\":\"cg_sk_synthetic\"}");
+
+    const st = try tmp.dir.statFile(io, "session.json", .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("{\"refreshToken\":\"new\"}", try tmp.dir.readFile(io, "session.json", &buf));
+    // The link was replaced, its target left alone.
+    try testing.expectEqualStrings("untouched", try tmp.dir.readFile(io, "victim.txt", &buf));
+    const kst = try tmp.dir.statFile(io, "key.json", .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.file, kst.kind);
+    // No temporary file is left behind.
+    var it = tmp.dir.iterate();
+    var count: usize = 0;
+    while (try it.next(io)) |e| {
+        try testing.expect(!std.mem.startsWith(u8, e.name, ".session-"));
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), count);
+}

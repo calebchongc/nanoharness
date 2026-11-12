@@ -264,6 +264,29 @@ pub fn pkceChallengeS256(verifier: []const u8, out_buf: *[43]u8) []const u8 {
     return std.base64.url_safe_no_pad.Encoder.encode(out_buf, &digest);
 }
 
+/// `write_private`: atomically replace a credential file, readable only by its
+/// owner. The bytes go to a new `0600` file beside `path` (created exclusively,
+/// synced), which is then renamed over it, so a reader never sees a half-written
+/// file and a symlink at `path` is replaced rather than followed. On error the
+/// old file is untouched and the temporary file is removed.
+pub fn writePrivate(io: std.Io, path: []const u8, body: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    const dir_name = std.fs.path.dirname(path) orelse ".";
+    var rnd: [16]u8 = undefined;
+    io.random(&rnd);
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp = try std.fmt.bufPrint(&tmp_buf, "{s}/.session-{s}.tmp", .{ dir_name, &std.fmt.bytesToHex(rnd, .lower) });
+    const perms: std.Io.File.Permissions = if (comptime builtin.os.tag == .windows) .default_file else .fromMode(0o600);
+    const file = try cwd.createFile(io, tmp, .{ .exclusive = true, .permissions = perms });
+    errdefer cwd.deleteFile(io, tmp) catch {};
+    {
+        defer file.close(io);
+        try file.writeStreamingAll(io, body);
+        try file.sync(io);
+    }
+    try std.Io.Dir.rename(cwd, tmp, cwd, path, io);
+}
+
 pub const CivilDate = struct {
     year: i32,
     month: u8,
@@ -731,17 +754,8 @@ pub const AuthManager = struct {
     }
 
     fn writePrivateFile(io: std.Io, path: []const u8, body: []const u8) void {
-        if (std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true })) |f| {
-            defer f.close(io);
-            f.writeStreamingAll(io, body) catch {};
-        } else |_| {}
-
-        var path_z: [1024]u8 = undefined;
-        if (path.len + 1 <= path_z.len) {
-            @memcpy(path_z[0..path.len], path);
-            path_z[path.len] = 0;
-            _ = std.c.chmod(@ptrCast(&path_z), 0o600);
-        }
+        writePrivate(io, path, body) catch |err|
+            std.log.warn("auth: failed to save {s}: {t}", .{ std.fs.path.basename(path), err });
     }
 
     fn removeSessionFile(self: *const AuthManager, io: ?std.Io) void {
