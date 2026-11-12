@@ -191,6 +191,7 @@ test {
     _ = @import("sandboxes_host.zig");
     _ = @import("updates_host.zig");
     _ = @import("relay_tests.zig");
+    _ = @import("fake_arm_gate.zig");
 }
 
 test "auth_host.formatRfc3339Ms round-trips 1:1 with rules.parseTime" {
