@@ -7,6 +7,7 @@
 //! managed adapters directory on first use, with the shim written beside it
 //! under a content-addressed name.
 const std = @import("std");
+const builtin = @import("builtin");
 const json = std.json;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -18,6 +19,12 @@ const Event = agent_turn.Event;
 const Call = agent_turn.Call;
 const get = agent_turn.get;
 const getStr = agent_turn.getStr;
+
+/// This process's id, for a temp folder name unique to it.
+fn currentPid() u64 {
+    if (comptime builtin.os.tag == .windows) return std.os.windows.GetCurrentProcessId();
+    return @intCast(std.c.getpid());
+}
 
 pub const adapter: agent_turn.Adapter = .{
     .name = "cursor shim",
@@ -110,7 +117,7 @@ fn ensureShim(t: *Turn) ![]const u8 {
     } else |_| {}
 
     const npm = (try findTool(t, "npm")) orelse return t.fail("harness binary not found: {s}", .{npm_hint});
-    const tmp = try std.fmt.allocPrint(a, "{s}/.tmp-cursor__sdk-{s}-{d}", .{ root, sdk_version, std.c.getpid() });
+    const tmp = try std.fmt.allocPrint(a, "{s}/.tmp-cursor__sdk-{s}-{d}", .{ root, sdk_version, currentPid() });
     const cache = try std.fs.path.join(a, &.{ root, ".npm-cache" });
     Io.Dir.cwd().deleteTree(io, tmp) catch {};
     try Io.Dir.cwd().createDirPath(io, tmp);
@@ -196,7 +203,7 @@ fn acquireLease(t: *Turn, root: []const u8) !Lease {
         std.crypto.hash.sha2.Sha256.hash(t.req.resume_id orelse "", &digest, .{});
         break :blk try std.fmt.allocPrint(a, "{x}.lock", .{digest});
     };
-    const file = try Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ lock_dir, name }), .{ .truncate = false, .read = true, .permissions = .fromMode(0o600) });
+    const file = try Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ lock_dir, name }), .{ .truncate = false, .read = true, .permissions = if (builtin.os.tag == .windows) .default_file else .fromMode(0o600) });
     errdefer file.close(io);
     var waited: u32 = 0;
     while (!(try file.tryLock(io, .exclusive))) : (waited += 25) {

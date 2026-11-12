@@ -13,6 +13,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
+const is_windows = builtin.os.tag == .windows;
 const Environ = std.process.Environ;
 
 pub const SpawnError = error{
@@ -404,7 +405,9 @@ pub const AgentProc = struct {
             .stdin = if (opts.stdin) .pipe else .ignore,
             .stdout = if (opts.stdout) .pipe else .ignore,
             .stderr = .pipe,
-            .pgid = 0,
+            // Its own process group, so a stop reaches the agent's children
+            // too. Windows has no process groups: the child alone is stopped.
+            .pgid = if (is_windows) null else 0,
         }) catch |err| switch (err) {
             error.FileNotFound => return error.NotInstalled,
             else => return err,
@@ -508,11 +511,23 @@ pub const AgentProc = struct {
         }
     }
 
-    /// Signal the whole process group (no-op once reaped).
-    pub fn signal(self: *AgentProc, sig: posix.SIG) void {
+    pub const Sig = enum { TERM, KILL };
+
+    /// Signal the whole process group (no-op once reaped). Windows has
+    /// neither groups nor SIGTERM: both terminate the child process.
+    pub fn signal(self: *AgentProc, sig: Sig) void {
         if (self.reaped.load(.acquire)) return;
-        posix.kill(-self.pid, sig) catch {
-            posix.kill(self.pid, sig) catch {};
+        if (comptime is_windows) {
+            const code: u32 = 1;
+            _ = std.os.windows.ntdll.NtTerminateProcess(self.pid, @fromBackingInt(@intCast(code)));
+            return;
+        }
+        const s: posix.SIG = switch (sig) {
+            .TERM => .TERM,
+            .KILL => .KILL,
+        };
+        posix.kill(-self.pid, s) catch {
+            posix.kill(self.pid, s) catch {};
         };
     }
 
