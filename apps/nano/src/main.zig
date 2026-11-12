@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     // window is up.
     if (init.environ_map.get("HARNESS_NANO_CRASH_TEST")) |what| crash_log.selfTest(what);
     a.release.done = .{ .ctx = &a, .func = App.releaseCame };
-    a.release.start();
+    if (@import("release.zig").wanted(init.environ_map)) a.release.start();
     @import("graff_update.zig").start(&a);
     if (comptime builtin.os.tag == .ios) @import("ios_ship.zig").start(init.gpa, init.io, &a, embedded_host.?, demo_flag);
     try app.run();

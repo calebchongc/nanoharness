@@ -15,6 +15,9 @@ test {
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
     _ = @import("engine_cli.zig");
+    _ = @import("dev_edge_auth.zig");
+    _ = @import("relay_dial.zig");
+    _ = @import("remote_tail.zig");
     _ = @import("engine_daemon.zig");
     _ = @import("engine_main.zig");
     _ = @import("diff.zig");

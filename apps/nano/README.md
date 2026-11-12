@@ -151,6 +151,41 @@ HARNESS_IPC_PORT=27990 zig-out/bin/harness-nano --nanoui-snapshot=/tmp/nano.png 
 To open a chat at launch (for those checks), set `HARNESS_NANO_OPEN_CHAT` to
 its id.
 
+## Against the edge Worker, run locally
+
+`scripts/local-edge.sh` (at the repository root) runs the real edge Worker
+from `edge/` with `wrangler dev --local` and this engine against it:
+
+```sh
+scripts/local-edge.sh check            # end-to-end proof, one line per step
+scripts/local-edge.sh check --repeat 3 --proof   # and rewrite docs/proof/LOCAL-EDGE.md
+scripts/local-edge.sh up --phone       # leave it running, with the app open
+scripts/local-edge.sh status
+scripts/local-edge.sh down
+```
+
+`check` signs a made-up user in on two engines (two devices), runs a mock
+turn, asks the Worker itself for the chat's row and history, relays a
+prompt and an attachment from the second device to the host, uses a room
+and a tool blob, restarts the edge and the host, and stops everything,
+exiting 1 if a step fails. `up` leaves the edge, a signed-in engine with a
+seeded chat and the `harness-nano` window running on that throwaway profile
+(`--phone` adds a second device in the phone layout), and prints the ports,
+the state folder and how to stop it. A watchdog stops it after two hours
+(`--ttl-minutes`).
+
+It needs Node 20 or newer and `edge/node_modules` (the script runs
+`npm ci` in `edge/` once if it is missing, so wrangler is the lockfile's),
+and builds with `zig build` through `scripts/heavy-build.sh` unless
+`LOCAL_EDGE_NO_BUILD=1`. Nothing leaves the machine: the Worker runs in
+Miniflare with `edge/wrangler.local.jsonc` (no account, no routes, made-up
+values, dev auth), its state lives in a temporary folder, and every user,
+repo and device is made up. Wrangler's telemetry, update check and
+`request.cf` download are off, the app skips its release check, and `check`
+reports any non-loopback connection it sees from the processes it started.
+See `docs/proof/LOCAL-EDGE.md` for how sign-in works there and what the run
+found.
+
 ## Tests that it keeps the desktop's rules
 
 `protocol/desktop/` holds the desktop's rules as data: the sidebar's rules (times, status marks, order), tool chips

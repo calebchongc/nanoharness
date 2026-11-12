@@ -221,7 +221,6 @@ pub fn main(init: std.process.Init) !void {
     try host.setBotsEnvOverride(init.environ_map.get("GRAFF_BOTS"));
     const auth_env = engine_cli.AuthEnv.from(init.environ_map);
     const auth_disabled = auth_env.disabled;
-    const edge_token = auth_env.edge_token;
     if (auth_env.codegraffEnabled()) {
         try host.auth.configureCodegraff(auth_env.edge_url, auth_env.client_id, auth_env.api_base, resolved_data_dir);
         try host.auth.setCodegraffGateway(auth_env.gateway);
@@ -248,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         // No CodeGraff (a development bearer, or auth turned off): the
         // development scope, as the Rust engine without a client id.
-        if (edge_token) |tok| host.auth.signInWithKey(tok) catch {};
+        try @import("dev_edge_auth.zig").configure(&host.auth, auth_env, init.environ_map.get("HARNESS_ORG_ID"), resolved_data_dir);
         host.workspace_scope = engine_cli.startScope(auth_env, false).name();
     }
 
