@@ -3087,19 +3087,8 @@ pub const EngineHost = struct {
                 _ = requireStr(obj, "action") orelse return .{ .err = .{ .bad_params = "missing action" } };
                 return .{ .err = .{ .exec_error = "chat has no graff worktree" } };
             },
-            .WatchCheckoutChangeRequest => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "branch") orelse return .{ .err = .{ .bad_params = "missing branch" } };
-                return self.oneStreamItem(true, try self.gpa.dupe(u8, "{\"status\":\"none\"}"));
-            },
-            .MergeChangeRequest => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "branch") orelse return .{ .err = .{ .bad_params = "missing branch" } };
-                if (obj.get("number") == null) return .{ .err = .{ .bad_params = "missing number" } };
-                return .{ .err = .{ .exec_error = "not a github repository" } };
-            },
+            .WatchCheckoutChangeRequest => return @import("rpcg_change_requests.zig").watchCheckoutChangeRequest(self, call_id, params),
+            .MergeChangeRequest => return @import("rpcg_change_requests.zig").mergeChangeRequest(self, params),
         }
     }
 

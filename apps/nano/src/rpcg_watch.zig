@@ -23,6 +23,7 @@ const engine_host = @import("engine_host.zig");
 const auth_host = @import("auth_host.zig");
 const g = @import("rpcg_git.zig");
 const d = @import("rpcg_diff.zig");
+const cr = @import("rpcg_change_requests.zig");
 
 const EngineHost = engine_host.EngineHost;
 
@@ -79,8 +80,16 @@ pub const State = struct {
     turns: std.StringHashMapUnmanaged(Turn) = .empty,
     /// Turns that started since the last tick, snapshotted off the lock.
     pending_turns: std.ArrayList(PendingTurn) = .empty,
+    /// `WatchCheckoutChangeRequest` streams (guarded by `host.mutex`) and
+    /// their worker-only caches (`rpcg_change_requests.zig`).
+    cr_subs: std.ArrayList(cr.Sub) = .empty,
+    cr_cache: std.StringHashMapUnmanaged(cr.Entry) = .empty,
+    cr_inspections: std.StringHashMapUnmanaged(cr.Inspection) = .empty,
+    cr_refresh_all: std.atomic.Value(bool) = .init(false),
+    cr_seq: u64 = 0,
 
     fn deinit(s: *State) void {
+        cr.deinitState(s);
         var tit = s.turns.iterator();
         while (tit.next()) |kv| {
             s.gpa.free(kv.key_ptr.*);
@@ -244,6 +253,7 @@ fn tick(s: *State, io: std.Io) !void {
         s.pending_turns = .empty;
     }
     try recordTurns(s, io, pending.items);
+    try cr.process(s, io, @intCast(std.Io.Clock.real.now(io).toMilliseconds()));
     {
         host.mutex.lockUncancelable(io);
         defer host.mutex.unlock(io);
