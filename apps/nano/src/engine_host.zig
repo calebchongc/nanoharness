@@ -3925,7 +3925,7 @@ pub const EngineHost = struct {
         return std.fmt.allocPrint(gpa, "{s}/tails/{x:0>16}.json", .{ data_dir, h });
     }
 
-    fn invalidateCachedTail(self: *EngineHost, chat_id: []const u8) void {
+    pub fn invalidateCachedTail(self: *EngineHost, chat_id: []const u8) void {
         if (self.remote_tails.fetchRemove(chat_id)) |kv| {
             self.gpa.free(kv.key);
             self.gpa.free(kv.value);
@@ -4423,7 +4423,32 @@ pub const EngineHost = struct {
         const enc_dev = auth_host.urlEncodeAlloc(self.gpa, dev_copy.?) catch return false;
         defer self.gpa.free(enc_dev);
 
-        // 1. Outbound registry push outside lock
+        // 1. Outbound chat tail uploads outside lock, before the rows that
+        //    announce them: a device that sees a chat row change refetches
+        //    its tail, which must already be the new one.
+        for (tail_uploads.items) |tu| {
+            const enc_cid = auth_host.urlEncodeAlloc(self.gpa, tu.cid) catch continue;
+            defer self.gpa.free(enc_cid);
+            const tail_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch continue;
+            defer self.gpa.free(tail_url);
+
+            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "PUT", tail_url, tok_copy.?, &.{}, tu.body)) |tresp_val| {
+                var tresp = tresp_val;
+                const tstatus = tresp.status;
+                tresp.deinit(self.gpa);
+                if (tstatus >= 500 or tstatus == 429 or tstatus == 401) {
+                    self.mutex.lockUncancelable(io);
+                    if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
+                    self.mutex.unlock(io);
+                }
+            } else |_| {
+                self.mutex.lockUncancelable(io);
+                if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
+                self.mutex.unlock(io);
+            }
+        }
+
+        // 2. Outbound registry push outside lock
         if (push_body) |pb| {
             if (std.fmt.allocPrint(self.gpa, "{s}/registry/{s}/push?device={s}", .{ base, enc_org, enc_dev })) |push_url| {
                 defer self.gpa.free(push_url);
@@ -4480,29 +4505,6 @@ pub const EngineHost = struct {
             } else |_| {
                 self.mutex.lockUncancelable(io);
                 if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
-                self.mutex.unlock(io);
-            }
-        }
-
-        // 2. Outbound chat tail uploads outside lock
-        for (tail_uploads.items) |tu| {
-            const enc_cid = auth_host.urlEncodeAlloc(self.gpa, tu.cid) catch continue;
-            defer self.gpa.free(enc_cid);
-            const tail_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch continue;
-            defer self.gpa.free(tail_url);
-
-            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "PUT", tail_url, tok_copy.?, &.{}, tu.body)) |tresp_val| {
-                var tresp = tresp_val;
-                const tstatus = tresp.status;
-                tresp.deinit(self.gpa);
-                if (tstatus >= 500 or tstatus == 429 or tstatus == 401) {
-                    self.mutex.lockUncancelable(io);
-                    if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
-                    self.mutex.unlock(io);
-                }
-            } else |_| {
-                self.mutex.lockUncancelable(io);
-                if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
                 self.mutex.unlock(io);
             }
         }
@@ -4670,6 +4672,7 @@ pub const EngineHost = struct {
             } else if (std.mem.eql(u8, kind, "chats")) {
                 if (self.upsertSyncedChatIndexed(row_id, f, &chat_idx)) |_| {
                     dirty_chats = true;
+                    @import("remote_tail.zig").rowChanged(self, row_id);
                 } else |_| {}
             } else if (std.mem.eql(u8, kind, "sidebarPins")) {
                 if (chat_idx.get(row_id)) |c_i| {
@@ -4696,6 +4699,7 @@ pub const EngineHost = struct {
 
             const cid = regOptStr(f, "chatId") orelse row_id;
             if (chat_idx.get(cid)) |c_i| {
+                @import("remote_tail.zig").rowChanged(self, cid);
                 const c = &self.chats.items[c_i];
                 const status = regOptStr(f, "status") orelse "idle";
                 const started_ms = regOptEpochMs(f, "startedAt");
@@ -5229,7 +5233,7 @@ pub const EngineHost = struct {
 
             for (self.chats.items) |c| {
                 if (c.archived) continue;
-                if (self.docs.contains(c.id) or self.store.loadSnapshot(c.id) != null) continue;
+                if (@import("remote_tail.zig").hasLocalTranscript(self, c.id)) continue;
                 if (self.lookupCachedTailJson(c.id) != null) continue;
                 const ts = @max(c.last_message_at_ms, c.created_at_ms);
                 const id_c = self.gpa.dupe(u8, c.id) catch continue;
