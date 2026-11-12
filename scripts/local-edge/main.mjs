@@ -381,7 +381,7 @@ async function check(opts) {
   console.log(`outbound (non-loopback) connections seen from our processes: ${outbound.length === 0 ? "none" : outbound.map((o) => `${o.comm} ${o.conn}`).join(", ")}`);
   const ok = results.every((r) => r.status !== "fail");
   fs.writeFileSync(run.p("result.json"), JSON.stringify({ ok, results, outbound, notes: ctx.notes }, null, 2));
-  if (opts.proof) writeProof(run, results, outbound, ctx.notes);
+  if (opts.proof) writeProof(run, results, outbound, ctx.notes, opts.streak);
   activeRun = null;
   if (!opts.keep) fs.rmSync(run.dir, { recursive: true, force: true });
   else console.log(`state kept in ${run.dir}`);
@@ -608,6 +608,8 @@ const STEP_FNS = {
   },
 };
 
+const allPassed = (results) => results.every((r) => r.status !== "fail");
+
 function toolVersions() {
   const v = (cmd, args, opts) => (spawnSync(cmd, args, { encoding: "utf8", ...opts }).stdout ?? "").trim().split("\n")[0];
   return {
@@ -619,13 +621,13 @@ function toolVersions() {
   };
 }
 
-function writeProof(run, results, outbound, notes) {
+function writeProof(run, results, outbound, notes, streak = 1) {
   const file = path.join(ROOT, "apps/nano/docs/proof/LOCAL-EDGE.md");
   const tv = toolVersions();
   const begin = "<!-- local-edge:run:begin -->", end = "<!-- local-edge:run:end -->";
   const block = [
     begin,
-    `Last \`scripts/local-edge.sh check\` run: commit \`${tv.commit}\`, ${tv.engine}, Zig ${tv.zig}, Node ${tv.node}, wrangler ${tv.wrangler.replace(/^.*?(\d+\.\d+\.\d+).*$/, "$1")} (the lockfile's).`,
+    `Last \`scripts/local-edge.sh check\` run: commit \`${tv.commit}\`, ${tv.engine}, Zig ${tv.zig}, Node ${tv.node}, wrangler ${tv.wrangler.replace(/^.*?(\d+\.\d+\.\d+).*$/, "$1")} (the lockfile's). ${allPassed(results) ? `Passed; run ${streak} of ${streak} in a row.` : "Failed."}`,
     "",
     "| Step | | Result | Time | Detail |",
     "|---|---|---|---|---|",
@@ -773,7 +775,7 @@ async function main() {
       let passed = 0;
       for (let i = 1; i <= runs; i++) {
         if (runs > 1) console.log(`── run ${i} of ${runs}`);
-        const ok = await check({ proof: flag("--proof") && i === runs, keep: flag("--keep"), maxMinutes: value("--max-minutes", 15) });
+        const ok = await check({ proof: flag("--proof") && i === runs, streak: i, keep: flag("--keep"), maxMinutes: value("--max-minutes", 15) });
         if (!ok) { console.log(`check failed on run ${i} (${passed} passed in a row before it)`); return 1; }
         passed++;
       }
