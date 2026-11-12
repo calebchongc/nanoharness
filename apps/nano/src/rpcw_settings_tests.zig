@@ -6,4 +6,5 @@ test {
     _ = @import("rpcw_keep_awake.zig");
     _ = @import("rpcw_settings.zig");
     _ = @import("rpcw_actions.zig");
+    _ = @import("rpcw_usage.zig");
 }

@@ -2096,24 +2096,9 @@ pub const EngineHost = struct {
                         true;
                     return .{ .unary_json = try self.agent_accounts.listAgentAccountsJson(self.io, self.nowMs(), force_usage) };
                 }
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"accounts\":[" ++
-                        "{\"id\":\"graff-local\",\"harness\":\"graff\",\"email\":\"local@codegraff.com\",\"displayName\":\"CodeGraff\",\"planLabel\":\"Max\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.12}]}," ++
-                        "{\"id\":\"claude-local\",\"harness\":\"claude-code\",\"displayName\":\"Claude Code CLI\",\"planLabel\":\"Max\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.18}]}," ++
-                        "{\"id\":\"codex-local\",\"harness\":\"codex\",\"displayName\":\"Codex CLI\",\"planLabel\":\"Pro\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.05}]}" ++
-                        "],\"warnings\":[]}",
-                ) };
+                return @import("rpcw_usage.zig").noHomeAccounts(self.gpa);
             },
-            .CodegraffUsage => {
-                if (self.auth.codegraff_client_id != null) {
-                    return .{ .unary_json = try self.auth.fetchCodegraffUsageJson(self.io) };
-                }
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"email\":\"local@codegraff.com\",\"tier\":\"Max\",\"credits_micro_usd\":50000000,\"spend_30d_micro_usd\":1250000,\"requests_30d\":48,\"key_spend_monthly_micro_usd\":0,\"key_budget_resets_at\":\"\"}",
-                ) };
-            },
+            .CodegraffUsage => return @import("rpcw_usage.zig").codegraffUsage(self),
             .CodegraffJobs => {
                 if (self.auth.codegraff_client_id != null) {
                     return .{ .unary_json = try self.auth.fetchCodegraffJobsJson(self.io) };
