@@ -16,4 +16,7 @@ test {
     _ = @import("rpc_logins.zig");
     _ = @import("harness_install.zig");
     _ = @import("rpc_install.zig");
+    _ = @import("skills_discovery.zig");
+    _ = @import("skills_commands.zig");
+    _ = @import("rpc_skills.zig");
 }

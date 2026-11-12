@@ -2082,9 +2082,7 @@ pub const EngineHost = struct {
             },
             .ListHarnesses => return @import("rpcw_harnesses.zig").listHarnesses(self),
             .ListModels => return @import("rpc_models.zig").listModels(self, params),
-            .ListSkills => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "[]") };
-            },
+            .ListSkills => return @import("rpc_skills.zig").listSkills(self, params),
             .ListCommands => {
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
