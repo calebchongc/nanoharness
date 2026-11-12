@@ -67,12 +67,18 @@ pub fn installHarness(host: *engine_host.EngineHost, params: json.Value) !RpcOut
         error.OutOfMemory => return error.OutOfMemory,
     };
     defer installing.end();
-    const failure = install.requestInstall(gpa, io, id, .{
-        .beta = p.flag,
-        .cancel = installing.token,
-        .installed = installedProbe,
-        .script = test_script,
-    }) catch |e| return common.failed("installation failed: {s}", .{@errorName(e)});
+    // Up to 15 minutes: not under the engine lock, so other requests (and
+    // CancelInstall) are served meanwhile.
+    const failure = blk: {
+        const released = host.releaseForLongCall();
+        defer host.retakeAfterLongCall(released);
+        break :blk install.requestInstall(gpa, io, id, .{
+            .beta = p.flag,
+            .cancel = installing.token,
+            .installed = installedProbe,
+            .script = test_script,
+        }) catch |e| return common.failed("installation failed: {s}", .{@errorName(e)});
+    };
     if (failure) |msg| {
         defer gpa.free(msg);
         return common.failed("{s}", .{msg});
@@ -246,4 +252,63 @@ test "rpc_install beta is only for graff and a second install of one harness is 
         },
         else => return error.ExpectedError,
     }
+}
+
+const Dispatch = struct {
+    host: *engine_host.EngineHost,
+    line: []const u8,
+    out: std.Io.Writer.Allocating,
+    done: std.Io.Event = .unset,
+
+    fn run(d: *Dispatch) void {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        @import("engine_main.zig").dispatchClientLineWithArena(testing.allocator, arena.allocator(), d.host, &d.out.writer, d.line) catch {};
+        d.done.set(testing.io);
+    }
+
+    fn waitMs(d: *Dispatch, ms: i64) bool {
+        d.done.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromMilliseconds(ms), .clock = .awake } }) catch return false;
+        return true;
+    }
+};
+
+test "rpc_install a running install holds no engine lock: other calls are answered and CancelInstall stops it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var f: Fx = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.tool("sh", "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    try f.tool("bash", "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    try f.tool("curl", "#!/bin/sh\nexit 1\n");
+    test_script = "/bin/sleep 30";
+
+    var install_call: Dispatch = .{ .host = &f.host, .line = "{\"id\":1,\"method\":\"InstallHarness\",\"params\":{\"harness\":\"grok\"}}", .out = .init(testing.allocator) };
+    defer install_call.out.deinit();
+    const th = try std.Thread.spawn(.{}, Dispatch.run, .{&install_call});
+    // Wait until the install is registered (it runs its script after that).
+    var waited: u32 = 0;
+    while (!registry.running(testing.io, .grok)) : (waited += 10) {
+        if (waited >= 5_000) return error.InstallNeverStarted;
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
+
+    var quick: Dispatch = .{ .host = &f.host, .line = "{\"id\":2,\"method\":\"GetAutonomy\",\"params\":{}}", .out = .init(testing.allocator) };
+    defer quick.out.deinit();
+    const qt = try std.Thread.spawn(.{}, Dispatch.run, .{&quick});
+    const quick_ok = quick.waitMs(2_000);
+    var cancel: Dispatch = .{ .host = &f.host, .line = "{\"id\":3,\"method\":\"CancelInstall\",\"params\":{\"harness\":\"grok\"}}", .out = .init(testing.allocator) };
+    defer cancel.out.deinit();
+    const ct = try std.Thread.spawn(.{}, Dispatch.run, .{&cancel});
+    const cancel_ok = cancel.waitMs(2_000);
+    // The cancelled install ends long before its 30 s script would.
+    const install_ended = install_call.waitMs(10_000);
+    if (!install_ended) registry.cancel(testing.io, toInstallId(.grok));
+    qt.join();
+    ct.join();
+    th.join();
+    try testing.expect(quick_ok);
+    try testing.expect(cancel_ok);
+    try testing.expect(install_ended);
+    try testing.expect(std.mem.indexOf(u8, install_call.out.written(), "\"id\":1,\"err\"") != null);
 }

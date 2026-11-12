@@ -38,7 +38,13 @@ pub fn handle(host: *engine_host.EngineHost, method: []const u8, params: json.Va
     const data_dir = host.data_dir orelse return common.failed("agent accounts need a data dir", .{});
     rpc_models.installHooks();
     const reg = try registryFor(io, data_dir);
-    const reply = reg.handle(method, params) orelse return .{ .err = .{ .unknown_method = method } };
+    // Logins wait on their CLI children and HTTP: not under the engine lock
+    // (the registry has its own).
+    const reply = blk: {
+        const released = host.releaseForLongCall();
+        defer host.retakeAfterLongCall(released);
+        break :blk reg.handle(method, params);
+    } orelse return .{ .err = .{ .unknown_method = method } };
     defer reply.deinit(long_gpa);
     return switch (reply) {
         .ok => |body| .{ .unary_json = try gpa.dupe(u8, body) },

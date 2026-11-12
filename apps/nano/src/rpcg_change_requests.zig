@@ -735,13 +735,18 @@ pub fn mergeChangeRequest(host: *EngineHost, params: json.Value) !RpcOutcome {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source = switch (try inspect(arena, io, root)) {
-        .ok => |src| try withBranch(arena, src, rpc.optStr(o, "branch")),
-        .err => |e| return common.failedMsg(e.text()),
-    };
-    const result = switch (try merge(arena, io, source, number)) {
-        .ok => |r| r,
-        .err => |e| return common.failedMsg(e.text()),
+    // git and `gh pr merge` (up to a minute): not under the engine lock.
+    const result = blk: {
+        const released = host.releaseForLongCall();
+        defer host.retakeAfterLongCall(released);
+        const source = switch (try inspect(arena, io, root)) {
+            .ok => |src| try withBranch(arena, src, rpc.optStr(o, "branch")),
+            .err => |e| return common.failedMsg(e.text()),
+        };
+        break :blk switch (try merge(arena, io, source, number)) {
+            .ok => |r| r,
+            .err => |e| return common.failedMsg(e.text()),
+        };
     };
     if (result.merged) {
         if (watch.existing(host)) |s| {

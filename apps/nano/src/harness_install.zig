@@ -848,6 +848,13 @@ pub const Registry = struct {
         return .{ .registry = r, .id = id, .token = token, .gpa = gpa, .io = io };
     }
 
+    /// Whether `id` has an install in flight.
+    pub fn running(r: *Registry, io: Io, id: Id) bool {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        return r.tokens[@backingInt(id)] != null;
+    }
+
     /// `Installations::cancel` (the `CancelInstall` RPC): no-op when idle.
     pub fn cancel(r: *Registry, io: Io, id: Id) void {
         r.mutex.lockUncancelable(io);

@@ -19,10 +19,14 @@ pub const Method = enum { status, pair, disconnect };
 pub fn handle(host: *engine_host.EngineHost, method: Method) !RpcOutcome {
     const gpa = host.gpa;
     const io = host.io orelse return common.failed("browse link needs I/O", .{});
-    const data_dir = host.data_dir orelse return common.failed("browse link needs a data dir", .{});
+    const data_dir = try gpa.dupe(u8, host.data_dir orelse return common.failed("browse link needs a data dir", .{}));
+    defer gpa.free(data_dir);
     core.env_override = common.env_override;
     var env = try core.currentEnv(gpa);
     defer env.deinit();
+    // Status asks browse (3 s); pairing waits on it: not under the engine lock.
+    const released = host.releaseForLongCall();
+    defer host.retakeAfterLongCall(released);
     return switch (method) {
         .status => .{ .unary_json = try browse.status(gpa, io, data_dir, &env) },
         .disconnect => .{ .unary_json = try browse.disconnect(gpa, io, data_dir, &env) },

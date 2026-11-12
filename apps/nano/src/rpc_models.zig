@@ -148,7 +148,14 @@ pub fn listModels(host: *engine_host.EngineHost, params: json.Value) !RpcOutcome
     const io = host.io orelse return common.failed("model discovery needs I/O", .{});
     installHooks();
     applyGraffSettings(host, io);
-    const r = try core.list(gpa, io, host.data_dir, harnessFor(p.id), p.force);
+    // A probe can take its full deadline (35 s): not under the engine lock.
+    const data_dir = if (host.data_dir) |d| try gpa.dupe(u8, d) else null;
+    defer if (data_dir) |d| gpa.free(d);
+    const r = blk: {
+        const released = host.releaseForLongCall();
+        defer host.retakeAfterLongCall(released);
+        break :blk try core.list(gpa, io, data_dir, harnessFor(p.id), p.force);
+    };
     return switch (r) {
         .ok => |m| .{ .unary_json = m },
         .err => |f| blk: {

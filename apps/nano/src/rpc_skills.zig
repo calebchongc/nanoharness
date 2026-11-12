@@ -168,7 +168,13 @@ pub fn listSkills(host: *engine_host.EngineHost, params: json.Value) !RpcOutcome
     skills.graff_draft_subagents = host.graff_draft_subagents;
     skills.graff_compact_pct = @intCast(std.math.clamp(host.graff_compact_at, 0, 255));
     skills.graff_device_name = deviceNameCopy(host.device_name);
-    return switch (try skills.listSkillsJson(gpa, io, id.wire(), root)) {
+    // An agent CLI's command handshake takes seconds: not under the engine lock.
+    const listed = blk: {
+        const released = host.releaseForLongCall();
+        defer host.retakeAfterLongCall(released);
+        break :blk try skills.listSkillsJson(gpa, io, id.wire(), root);
+    };
+    return switch (listed) {
         .ok => |body| .{ .unary_json = body },
         .err => |msg| blk: {
             defer gpa.free(msg);
