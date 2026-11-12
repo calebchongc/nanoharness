@@ -101,22 +101,59 @@ fn botCall(c: *Ctx, folder: []const u8, args: []const []const u8) ![]const u8 {
     };
 }
 
-/// `serde_json::from_str::<Vec<T>>` with the fields `T` requires.
-fn rows(c: *Ctx, command: []const u8, stdout: []const u8, required_strings: []const []const u8) ![]const Value {
+/// One field of a row `graff bot … --json` prints, as its Rust struct
+/// declares it: a required string, a `#[serde(default)]` string or bool, or
+/// a defaulted `u32`. A present field of the wrong type (`null` included)
+/// fails the row, as serde does.
+const RowField = struct {
+    name: []const u8,
+    kind: enum { string, default_string, default_bool, default_u32 },
+};
+
+/// `serde_json::from_str::<Vec<T>>` for a row type `T` with `fields`.
+fn rows(c: *Ctx, command: []const u8, stdout: []const u8, fields: []const RowField) ![]const Value {
     const parsed = json.parseFromSliceLeaky(Value, c.a, stdout, .{ .allocate = .alloc_always }) catch
         return c.fail("graff bot {s} did not print the JSON this Harness reads", .{command});
     if (parsed != .array) return c.fail("graff bot {s} did not print the JSON this Harness reads", .{command});
     for (parsed.array.items) |row| {
-        for (required_strings) |k| {
-            if (u.str(row, k) == null) return c.fail("graff bot {s} did not print the JSON this Harness reads", .{command});
+        if (row != .object) return c.fail("graff bot {s} did not print the JSON this Harness reads", .{command});
+        for (fields) |f| {
+            const v = row.object.get(f.name);
+            const fits = switch (f.kind) {
+                .string => v != null and v.? == .string,
+                .default_string => v == null or v.? == .string,
+                .default_bool => v == null or v.? == .bool,
+                .default_u32 => v == null or (v.? == .integer and v.?.integer >= 0 and v.?.integer <= std.math.maxInt(u32)),
+            };
+            if (!fits) return c.fail("graff bot {s} did not print the JSON this Harness reads", .{command});
         }
     }
     return parsed.array.items;
 }
 
-const bot_fields = [_][]const u8{ "name", "job" };
-const routine_fields = [_][]const u8{ "bot", "id", "instruction", "when", "message" };
-const due_fields = [_][]const u8{ "bot", "id", "instruction", "system", "message" };
+const bot_fields = [_]RowField{
+    .{ .name = "name", .kind = .string },
+    .{ .name = "job", .kind = .string },
+    .{ .name = "model", .kind = .default_string },
+    .{ .name = "yolo", .kind = .default_bool },
+};
+const routine_fields = [_]RowField{
+    .{ .name = "bot", .kind = .string },
+    .{ .name = "id", .kind = .string },
+    .{ .name = "instruction", .kind = .string },
+    .{ .name = "when", .kind = .string },
+    .{ .name = "paused", .kind = .default_bool },
+    .{ .name = "done", .kind = .default_bool },
+    .{ .name = "runs", .kind = .default_u32 },
+    .{ .name = "message", .kind = .string },
+};
+const due_fields = [_]RowField{
+    .{ .name = "bot", .kind = .string },
+    .{ .name = "id", .kind = .string },
+    .{ .name = "instruction", .kind = .string },
+    .{ .name = "system", .kind = .string },
+    .{ .name = "message", .kind = .string },
+};
 
 /// A bot's standing text and the turn, as the one message that starts a chat.
 pub fn firstMessage(a: Allocator, system: []const u8, message: []const u8) ![]const u8 {

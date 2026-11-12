@@ -430,15 +430,19 @@ pub fn sessionFor(all: []const Value, chat: Value) ?Value {
     return best;
 }
 
-/// chrono's `DateTime<Utc>` serialization (`AutoSi`): whole seconds bare,
-/// milliseconds as three digits.
+/// chrono's `DateTime<Utc>` serialization (`SecondsFormat::AutoSi`, `Z`):
+/// whole seconds bare, else the fewest of 3, 6 or 9 fraction digits that
+/// hold the time exactly.
 pub fn timeValue(a: Allocator, v: Value, key: []const u8) !Value {
     const raw = u.str(v, key) orelse return .null;
-    const at = u.parseRfc3339Ms(raw) orelse return u.s(raw);
+    const at = u.parseRfc3339(raw) orelse return u.s(raw);
     var buf: [32]u8 = undefined;
-    const secs = u.isoSecs(&buf, at);
-    if (@mod(at, 1000) == 0) return u.s(try a.dupe(u8, secs));
-    return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>3}Z", .{ secs[0 .. secs.len - 1], @as(u64, @intCast(@mod(at, 1000))) }));
+    const secs = u.isoSecs(&buf, at.secs * 1000);
+    const whole = secs[0 .. secs.len - 1];
+    if (at.nanos == 0) return u.s(try a.dupe(u8, secs));
+    if (at.nanos % 1_000_000 == 0) return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>3}Z", .{ whole, at.nanos / 1_000_000 }));
+    if (at.nanos % 1_000 == 0) return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>6}Z", .{ whole, at.nanos / 1_000 }));
+    return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>9}Z", .{ whole, at.nanos }));
 }
 
 pub const Status = struct { label: []const u8, age_secs: ?i64 };

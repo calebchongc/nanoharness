@@ -1468,6 +1468,62 @@ test "mcp list_bots: each bot's routines and which are due" {
     try expectErr(try f.call("list_bots", "{\"project\":\"space-far\"}"), "bots are files in the project folder, and repo is hosted on another device; ask a chat on that device");
 }
 
+test "mcp list_bots: rows are type-checked as the Rust structs declare them" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer f.destroy();
+    try f.bots.set("due --json", "[]");
+    try f.bots.set("routine list --json", "[]");
+    const refused = "graff bot list did not print the JSON this Harness reads";
+    // `model: String` and `yolo: bool` default when absent, never when null
+    // or another type.
+    for ([_][]const u8{
+        "[{\"name\":\"t\",\"job\":\"j\",\"model\":null}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"model\":7}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"yolo\":\"yes\"}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"yolo\":null}]",
+        "[\"t\"]",
+    }) |out| {
+        try f.bots.set("list --json", out);
+        try expectErr(try f.call("list_bots", "{}"), refused);
+    }
+    try f.bots.set("list --json", "[{\"name\":\"t\",\"job\":\"j\"}]");
+    // `runs: u32`.
+    for ([_][]const u8{ "\"2\"", "-1", "4294967296", "1.5", "null" }) |runs| {
+        try f.bots.set("routine list --json", try std.fmt.allocPrint(f.arena.allocator(), "[{{\"bot\":\"t\",\"id\":\"r\",\"instruction\":\"i\",\"when\":\"daily\",\"message\":\"m\",\"runs\":{s}}}]", .{runs}));
+        try expectErr(try f.call("list_bots", "{}"), "graff bot routine list did not print the JSON this Harness reads");
+    }
+    try f.bots.set("routine list --json", "[{\"bot\":\"t\",\"id\":\"r\",\"instruction\":\"i\",\"when\":\"daily\",\"message\":\"m\",\"runs\":4294967295}]");
+    const v = try ok(try f.call("list_bots", "{}"));
+    const bot = u.array(v, "bots").?[0];
+    try testing.expect(u.get(bot, "model").? == .null);
+    try testing.expect(!u.boolean(bot, "skipsApprovals").?);
+    try testing.expectEqual(@as(i64, 4294967295), u.int(u.array(bot, "routines").?[0], "runs").?);
+}
+
+test "mcp times: chrono's AutoSi form, to the nanosecond" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][2][]const u8{
+        .{ "2026-11-10T00:00:01Z", "2026-11-10T00:00:01Z" },
+        .{ "2026-11-10T00:00:01.000Z", "2026-11-10T00:00:01Z" },
+        .{ "2026-11-10T00:00:01.5Z", "2026-11-10T00:00:01.500Z" },
+        .{ "2026-11-10T00:00:01.120Z", "2026-11-10T00:00:01.120Z" },
+        .{ "2026-11-10T00:00:01.123456Z", "2026-11-10T00:00:01.123456Z" },
+        .{ "2026-11-10T00:00:01.000001Z", "2026-11-10T00:00:01.000001Z" },
+        .{ "2026-11-10T00:00:01.123456789Z", "2026-11-10T00:00:01.123456789Z" },
+        .{ "2026-11-10T00:00:01.1234567891Z", "2026-11-10T00:00:01.123456789Z" },
+        .{ "2026-11-10T08:00:01.25+08:00", "2026-11-10T00:00:01.250Z" },
+        .{ "not a time", "not a time" },
+    };
+    for (cases) |c| {
+        var o = u.obj(a);
+        try o.put("at", u.s(c[0]));
+        try testing.expectEqualStrings(c[1], (try tools.timeValue(a, o.value(), "at")).string);
+    }
+    try testing.expect((try tools.timeValue(a, u.obj(a).value(), "at")) == .null);
+}
+
 test "mcp run_bot and run_due_bots: graff chats that open with the bot's standing text" {
     const f = try HostFixture.create(.{ .chat_id = "chat-alpha-1" });
     defer f.destroy();
