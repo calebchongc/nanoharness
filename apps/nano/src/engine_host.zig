@@ -1811,13 +1811,7 @@ pub const EngineHost = struct {
                             return .{ .err = .{ .exec_error = "sign-in callback port 27643 is already in use by another sign-in" } };
                         }
                     }
-                    const url = try self.auth.startHeadlessSignIn("state-zig-1");
-                    defer self.gpa.free(url);
-                    return .{ .unary_json = try std.fmt.allocPrint(
-                        self.gpa,
-                        "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
-                        .{json.fmt(url, .{})},
-                    ) };
+                    return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } };
                 }
                 self.workspace_scope = "synced";
                 self.auth.phase = .signed_in;
@@ -1828,7 +1822,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"workspaceScope\":\"synced\"}") };
             },
             .SignInHeadless => {
-                const url = try self.auth.startHeadlessSignIn("state-zig-1");
+                const url = try self.auth.startHeadlessSignIn(self.io orelse return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } });
                 defer self.gpa.free(url);
                 self.workspace_scope = "synced";
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -6613,13 +6607,15 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
     }
 
     // 3. SignInHeadless returns PKCE S256 authorize URL
+    var signin_state: []const u8 = "";
     {
         const res = try host.handle("SignInHeadless", empty_params);
         defer gpa.free(res.unary_json);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "https://codegraff.example/oauth/authorize?") != null);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "client_id=cg_client_test") != null);
-        try testing.expect(std.mem.indexOf(u8, res.unary_json, "state=state-zig-1") != null);
         try testing.expect(std.mem.indexOf(u8, res.unary_json, "code_challenge_method=S256") != null);
+        const res_v = try json.parseFromSliceLeaky(json.Value, a, res.unary_json, .{});
+        signin_state = (try auth_host.extractQueryParamAlloc(a, res_v.object.get("url").?.string, "state")).?;
     }
 
     // 4. CompleteSignIn with wrong OAuth state is rejected (CSRF protection)
@@ -6631,7 +6627,8 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
 
     // 5. CompleteSignIn with valid state.code exchanges with mock Edge and lands in NeedsOrganization
     {
-        const ok_p = try json.parseFromSliceLeaky(json.Value, a, "{\"code\":\"state-zig-1.code123\"}", .{});
+        const ok_body = try std.fmt.allocPrint(a, "{{\"code\":\"{s}.code123\"}}", .{signin_state});
+        const ok_p = try json.parseFromSliceLeaky(json.Value, a, ok_body, .{});
         const ok_r = try host.handle("CompleteSignIn", ok_p);
         defer gpa.free(ok_r.unary_json);
         try testing.expectEqual(auth_host.AuthPhase.needs_organization, host.auth.phase);

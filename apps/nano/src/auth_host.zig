@@ -628,25 +628,16 @@ pub const AuthManager = struct {
         };
     }
 
-    /// Start headless PKCE sign-in (`SignInHeadless`), returning the OAuth authorize URL.
-    pub fn startHeadlessSignIn(self: *AuthManager, state_token: []const u8) ![]u8 {
-        const verifier = "zig_pkce_verifier_0123456789abcdef0123456789abcdef";
-        try self.replaceOptStr(&self.pending_state, state_token);
-        try self.replaceOptStr(&self.pending_verifier, verifier);
-        try self.replaceOptStr(&self.pending_nonce, "nonce-zig-1");
-        try self.replaceOptStr(&self.pending_redirect_uri, null);
-        self.pending_generation = self.generation;
-
-        var challenge_buf: [43]u8 = undefined;
-        const challenge = pkceChallengeS256(verifier, &challenge_buf);
-        const cid = self.codegraff_client_id orelse "cg_client_zig";
-        const edge = self.edge_url orelse default_edge_url;
-        const api_base = std.mem.trimEnd(u8, self.codegraff_api_base, "/");
-        return std.fmt.allocPrint(
-            self.gpa,
-            "{s}/oauth/authorize?response_type=code&client_id={s}&redirect_uri={s}%2Fauth%2Fcli%2Fcallback&state={s}&code_challenge={s}&code_challenge_method=S256",
-            .{ api_base, cid, edge, state_token, challenge },
-        );
+    /// Start headless PKCE sign-in (`SignInHeadless`), returning the OAuth authorize URL
+    /// (`start_headless_sign_in`): the same random state, nonce and verifier as the
+    /// headed flow, redirecting to the edge's hosted paste-code page. Empty without
+    /// a CodeGraff client (development mode).
+    pub fn startHeadlessSignIn(self: *AuthManager, io: std.Io) ![]u8 {
+        if (self.codegraff_client_id == null) return self.gpa.dupe(u8, "");
+        const edge = std.mem.trimEnd(u8, self.edge_url orelse default_edge_url, "/");
+        const redirect_uri = try std.fmt.allocPrint(self.gpa, "{s}/auth/cli/callback", .{edge});
+        defer self.gpa.free(redirect_uri);
+        return self.startBrowserSignIn(io, redirect_uri);
     }
 
     /// Start headed browser PKCE sign-in (`SignIn`), binding to `redirect_uri` (e.g.
