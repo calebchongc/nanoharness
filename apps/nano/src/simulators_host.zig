@@ -533,14 +533,31 @@ pub const Simulators = struct {
         if (writeIn(gpa, io, staging, host_script_name, host_script)) |m| return m;
         const sentinel = sentinelText();
         if (writeIn(gpa, io, staging, sentinel_name, &sentinel)) |m| return m;
-        std.Io.Dir.cwd().deleteTree(io, dir) catch |e| switch (e) {
-            else => return try std.fmt.allocPrint(gpa, "replacing the old install: {s}", .{@errorName(e)}),
-        };
-        std.Io.Dir.rename(std.Io.Dir.cwd(), staging, std.Io.Dir.cwd(), dir, io) catch |e|
-            return try std.fmt.allocPrint(gpa, "finishing the install: {s}", .{@errorName(e)});
-        return null;
+        return swapIntoPlace(gpa, io, staging, dir);
     }
 };
+
+/// Put the finished `staging` folder at `dir`. The old helper is moved aside
+/// first and only deleted once the new one is in place; if the rename fails
+/// it is moved back, so a failed install never leaves no helper.
+pub fn swapIntoPlace(gpa: Allocator, io: std.Io, staging: []const u8, dir: []const u8) !?[]u8 {
+    const cwd = std.Io.Dir.cwd();
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const aside = try std.fmt.allocPrint(gpa, "{s}.old-{s}", .{ dir, &std.fmt.bytesToHex(rnd, .lower) });
+    defer gpa.free(aside);
+    var moved = true;
+    std.Io.Dir.rename(cwd, dir, cwd, aside, io) catch |e| switch (e) {
+        error.FileNotFound => moved = false,
+        else => return try std.fmt.allocPrint(gpa, "replacing the old install: {s}", .{@errorName(e)}),
+    };
+    std.Io.Dir.rename(cwd, staging, cwd, dir, io) catch |e| {
+        if (moved) std.Io.Dir.rename(cwd, aside, cwd, dir, io) catch {};
+        return try std.fmt.allocPrint(gpa, "finishing the install: {s}", .{@errorName(e)});
+    };
+    if (moved) cwd.deleteTree(io, aside) catch {};
+    return null;
+}
 
 fn shrink(gpa: Allocator, all: []Device, keep: usize) ![]Device {
     if (keep == all.len) return all;
@@ -968,4 +985,37 @@ test "SetUpSimulators error replies: no node, old node, npm failure, wrong versi
         defer sims.deinit();
         try testing.expectEqualStrings("npm installed expo-device-hub nothing instead of 0.12.0.", (try handle(&sims, testing.allocator, .set_up, .null)).failed);
     }
+}
+
+test "fix-sec 11: a failed helper swap keeps the old helper" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.createDirPath(io, "helper");
+    try tmp.dir.writeFile(io, .{ .sub_path = "helper/sentinel", .data = "old" });
+    const dir = try std.fs.path.join(gpa, &.{ root, "helper" });
+    defer gpa.free(dir);
+    const missing = try std.fs.path.join(gpa, &.{ root, "staging-that-is-gone" });
+    defer gpa.free(missing);
+
+    const failed = (try swapIntoPlace(gpa, io, missing, dir)).?;
+    defer gpa.free(failed);
+    try testing.expect(std.mem.startsWith(u8, failed, "finishing the install: "));
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("old", try tmp.dir.readFile(io, "helper/sentinel", &buf));
+
+    // A good swap replaces it and leaves nothing aside.
+    try tmp.dir.createDirPath(io, "staging");
+    try tmp.dir.writeFile(io, .{ .sub_path = "staging/sentinel", .data = "new" });
+    const staging = try std.fs.path.join(gpa, &.{ root, "staging" });
+    defer gpa.free(staging);
+    try testing.expectEqual(@as(?[]u8, null), try swapIntoPlace(gpa, io, staging, dir));
+    try testing.expectEqualStrings("new", try tmp.dir.readFile(io, "helper/sentinel", &buf));
+    var it = tmp.dir.iterate();
+    var n: usize = 0;
+    while (try it.next(io)) |_| n += 1;
+    try testing.expectEqual(@as(usize, 1), n);
 }
