@@ -604,6 +604,74 @@ test "mcp protocol: stdio serving answers concurrently and finishes in-flight re
     try testing.expect(std.mem.indexOf(u8, written, "-32700") != null);
 }
 
+/// The id-sorted lines `serve` wrote, each parsed.
+fn servedLines(a: Allocator, written: []const u8) ![]const Value {
+    var out: std.ArrayList(Value) = .empty;
+    var it = std.mem.splitScalar(u8, written, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try out.append(a, try json.parseFromSliceLeaky(Value, a, line, .{}));
+    }
+    std.mem.sort(Value, out.items, {}, struct {
+        fn lt(_: void, x: Value, y: Value) bool {
+            return (u.int(x, "id") orelse -1) < (u.int(y, "id") orelse -1);
+        }
+    }.lt);
+    return out.items;
+}
+
+test "mcp protocol: a 1 MiB request line is answered; a line over the cap is refused and serving goes on" {
+    const f = try WorldFixture.create(.{});
+    defer f.destroy();
+    const gpa = testing.allocator;
+    const a = f.arena.allocator();
+    // A 1 MiB argument, then a line one byte over the 16 MiB cap, then a ping.
+    const pad = try a.alloc(u8, 1024 * 1024);
+    @memset(pad, 'p');
+    const over = try a.alloc(u8, mcp.max_line_bytes + 1);
+    @memset(over, 'x');
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(gpa);
+    try input.print(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"list_models\",\"arguments\":{{\"harness\":\"claude-code\",\"pad\":\"{s}\"}}}}}}\n", .{pad});
+    try input.appendSlice(gpa, over);
+    try input.appendSlice(gpa, "\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}");
+    // Through a 64 KiB buffer, as stdin is read.
+    var small: [64 * 1024]u8 = undefined;
+    var stdin_like = std.testing.Reader.init(&small, &.{.{ .buffer = input.items }});
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var server: mcp.Server = .{ .gpa = gpa, .io = testing.io, .tools = f.t, .out = &out.writer };
+    try server.serve(&stdin_like.interface);
+    const lines = try servedLines(a, out.written());
+    try testing.expectEqual(@as(usize, 3), lines.len);
+    // The refusal has no id; it sorts first.
+    try testing.expect(u.get(lines[0], "id").? == .null);
+    try testing.expectEqual(@as(i64, -32600), u.int(u.get(lines[0], "error").?, "code").?);
+    try testing.expectEqualStrings("request line longer than 16777216 bytes", sval(lines[0], &.{ "error", "message" }).?);
+    try testing.expectEqual(@as(i64, 1), u.int(lines[1], "id").?);
+    try testing.expectEqualStrings("claude-code", sval(lines[1], &.{ "result", "structuredContent", "harness" }).?);
+    try testing.expectEqual(@as(i64, 3), u.int(lines[2], "id").?);
+    try testing.expect(u.get(lines[2], "result") != null);
+}
+
+test "mcp protocol: line reading keeps a line of exactly the cap and refuses one byte more" {
+    const gpa = testing.allocator;
+    var buf: std.Io.Writer.Allocating = .init(gpa);
+    defer buf.deinit();
+    var small: [2]u8 = undefined;
+    var r = std.testing.Reader.init(&small, &.{.{ .buffer = "abcd\nabcde\nab\r\n\nlast" }});
+    try testing.expectEqualStrings("abcd", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expect((try mcp.nextLine(&r.interface, &buf, 4)) == .too_long);
+    try testing.expectEqualStrings("ab\r", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expectEqualStrings("", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expectEqualStrings("last", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expect((try mcp.nextLine(&r.interface, &buf, 4)) == .end);
+    // An over-cap line the input ends inside.
+    var tail = std.Io.Reader.fixed("abcdefgh");
+    try testing.expect((try mcp.nextLine(&tail, &buf, 4)) == .too_long);
+    try testing.expect((try mcp.nextLine(&tail, &buf, 4)) == .end);
+}
+
 // ---- chat tools against the in-process engine ---------------------------------------------
 
 test "mcp whoami: speaks for the origin chat, or says it has none" {
