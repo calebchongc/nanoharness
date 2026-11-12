@@ -165,6 +165,7 @@ test {
     _ = @import("chat_sandbox.zig");
     _ = @import("rpcw_tool_blob.zig");
     _ = @import("rpcw_history_import.zig");
+    _ = @import("rpcw_local_import.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");

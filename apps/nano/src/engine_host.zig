@@ -2326,12 +2326,8 @@ pub const EngineHost = struct {
                     .{ json.fmt(org_id, .{}), json.fmt(org_id, .{}) },
                 ) };
             },
-            .LocalImportStatus => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"importableChats\":0,\"importableSpaces\":0}") };
-            },
-            .ImportLocalWorkspace => {
-                return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"importedChats\":0,\"done\":true}"));
-            },
+            .LocalImportStatus => return @import("rpcw_local_import.zig").localImportStatus(self),
+            .ImportLocalWorkspace => return @import("rpcw_local_import.zig").importLocalWorkspace(self),
             .ListRepos => {
                 return .{ .unary_json = try self.spacesJson() };
             },
