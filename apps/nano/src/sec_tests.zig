@@ -257,3 +257,46 @@ test "fix-sec 3: credential files are written 0600 through a temporary file and 
     }
     try testing.expectEqual(@as(usize, 3), count);
 }
+
+test "fix-sec 4: one URL check: HTTPS, or plain HTTP to exactly 127.0.0.1 or [::1]" {
+    const engine_cli = @import("engine_cli.zig");
+    const sandboxes_host = @import("sandboxes_host.zig");
+    const rpcw_codegraff = @import("rpcw_codegraff.zig");
+    const good = [_][]const u8{ "https://edge.example.com", "https://edge.example.com:8443/x", "http://127.0.0.1", "http://127.0.0.1:8787/p", "http://[::1]:8787", "HTTP://127.0.0.1:1" };
+    const bad = [_][]const u8{
+        "http://127.0.0.1:80@evil.example",
+        "http://127.0.0.1@evil.example/",
+        "http://127.0.0.1.evil.example",
+        "http://127.0.0.2:8787",
+        "http://localhost:8787",
+        "http://edge.example.com",
+        "ftp://127.0.0.1",
+        "https://",
+        "127.0.0.1:8787",
+    };
+    for (good) |u| {
+        try testing.expect(engine_cli.isSecureUrl(u));
+        try testing.expect(sandboxes_host.gatewayProblem(u) == null);
+        try testing.expect(rpcw_codegraff.validateSecureUrl("CodeGraff gateway", u) == null);
+    }
+    for (bad) |u| {
+        if (engine_cli.isSecureUrl(u)) std.debug.print("accepted: {s}\n", .{u});
+        try testing.expect(!engine_cli.isSecureUrl(u));
+        try testing.expect(sandboxes_host.gatewayProblem(u) != null);
+        try testing.expect(rpcw_codegraff.validateSecureUrl("CodeGraff gateway", u) != null);
+    }
+    try testing.expectEqualStrings("CodeGraff gateway must use HTTPS (plain HTTP is allowed only on loopback)", sandboxes_host.gatewayProblem("http://127.0.0.1:80@evil.example").?);
+}
+
+test "fix-sec 4: the engine refuses to start a sign-in toward a plain-HTTP edge" {
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var host = try EngineHost.init(gpa, "dev-sec-4", "SecHost");
+    defer host.deinit();
+    host.io = testing.io;
+    try host.auth.configureCodegraff("http://127.0.0.1:80@evil.example", "cg_client_synthetic", "https://codegraff.example", null);
+    const r = try host.handle("SignInHeadless", try json.parseFromSliceLeaky(json.Value, arena.allocator(), "{}", .{}));
+    defer freeOutcome(r);
+    try testing.expectEqualStrings("Harness edge must use HTTPS (plain HTTP is allowed only on loopback)", errText(r) orelse "(ok)");
+}

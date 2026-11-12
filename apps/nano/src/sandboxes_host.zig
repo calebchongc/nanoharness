@@ -370,23 +370,11 @@ pub const Failure = struct {
     }
 };
 
-fn isLoopbackHttp(url: []const u8) bool {
-    if (!std.mem.startsWith(u8, url, "http://")) return false;
-    const rest = url["http://".len..];
-    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
-    const hostport = rest[0..end];
-    const host = if (std.mem.startsWith(u8, hostport, "["))
-        hostport[0 .. (std.mem.indexOfScalar(u8, hostport, ']') orelse return false) + 1]
-    else
-        hostport[0 .. std.mem.indexOfScalar(u8, hostport, ':') orelse hostport.len];
-    return std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "[::1]");
-}
-
 /// `validate_secure_url("CodeGraff gateway", ..)`: null when fine, else the reason.
 pub fn gatewayProblem(url: []const u8) ?[]const u8 {
-    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return "CodeGraff gateway URL is invalid";
-    if (scheme_end == 0 or url.len == scheme_end + 3) return "CodeGraff gateway URL is invalid";
-    if (std.mem.startsWith(u8, url, "https://") or isLoopbackHttp(url)) return null;
+    const auth_host = @import("auth_host.zig");
+    if (auth_host.isSecureUrl(url)) return null;
+    _ = std.Uri.parse(url) catch return "CodeGraff gateway URL is invalid";
     return "CodeGraff gateway must use HTTPS (plain HTTP is allowed only on loopback)";
 }
 
@@ -1194,3 +1182,4 @@ test "sandboxes: the engine makes exactly the calls the shared plans name" {
         for (gw.seen.items) |s| try testing.expect(std.mem.indexOf(u8, s.line, never.string) == null);
     }
 }
+

@@ -35,17 +35,8 @@ pub fn urlencode(gpa: Allocator, segment: []const u8) ![]u8 {
 
 /// `validate_secure_url`: HTTPS, or plain HTTP to 127.0.0.1 / [::1].
 pub fn validateSecureUrl(name: []const u8, raw: []const u8) ?[]const u8 {
-    const uri = std.Uri.parse(raw) catch return common.errText("{s} URL is invalid", .{name});
-    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return null;
-    if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) {
-        if (uri.host) |h| {
-            const host = switch (h) {
-                .raw => |r| r,
-                .percent_encoded => |p| p,
-            };
-            if (std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "[::1]") or std.mem.eql(u8, host, "::1")) return null;
-        }
-    }
+    if (auth_host.isSecureUrl(raw)) return null;
+    _ = std.Uri.parse(raw) catch return common.errText("{s} URL is invalid", .{name});
     return common.errText("{s} must use HTTPS (plain HTTP is allowed only on loopback)", .{name});
 }
 

@@ -1783,6 +1783,7 @@ pub const EngineHost = struct {
             },
             .SignIn => {
                 if (self.auth.codegraff_client_id != null) {
+                    self.auth.ensureSecureTransport() catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                     if (self.oauth_capture) |old_cap| {
                         self.oauth_capture = null;
                         old_cap.cancel();
@@ -1822,7 +1823,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"workspaceScope\":\"synced\"}") };
             },
             .SignInHeadless => {
-                const url = try self.auth.startHeadlessSignIn(self.io orelse return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } });
+                const url = self.auth.startHeadlessSignIn(self.io orelse return .{ .err = .{ .exec_error = "sign-in needs the engine's I/O" } }) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                 defer self.gpa.free(url);
                 self.workspace_scope = "synced";
                 return .{ .unary_json = try std.fmt.allocPrint(

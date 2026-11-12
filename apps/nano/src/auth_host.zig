@@ -264,6 +264,41 @@ pub fn pkceChallengeS256(verifier: []const u8, out_buf: *[43]u8) []const u8 {
     return std.base64.url_safe_no_pad.Encoder.encode(out_buf, &digest);
 }
 
+/// `is_loopback_http_url`: plain HTTP to exactly `127.0.0.1` or `[::1]`. The URL is
+/// parsed (`std.Uri`), so user info (`http://127.0.0.1:80@evil.example`), a
+/// look-alike host (`127.0.0.1.evil.example`) or `localhost` never passes.
+pub fn isLoopbackHttpUrl(raw: []const u8) bool {
+    const uri = std.Uri.parse(raw) catch return false;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
+    const host = uriHost(uri) orelse return false;
+    return std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "[::1]") or std.mem.eql(u8, host, "::1");
+}
+
+fn uriHost(uri: std.Uri) ?[]const u8 {
+    const h = uri.host orelse return null;
+    const host = switch (h) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    };
+    return if (host.len == 0) null else host;
+}
+
+/// HTTPS (with a host), or plain HTTP on loopback (`validate_secure_url`).
+pub fn isSecureUrl(raw: []const u8) bool {
+    const uri = std.Uri.parse(raw) catch return false;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return uriHost(uri) != null;
+    return isLoopbackHttpUrl(raw);
+}
+
+/// `validate_secure_url(name, raw)`: null when fine, else Rust's message in `buf`.
+pub fn secureUrlProblem(buf: []u8, name: []const u8, raw: []const u8) ?[]const u8 {
+    if (isSecureUrl(raw)) return null;
+    _ = std.Uri.parse(raw) catch
+        return std.fmt.bufPrint(buf, "{s} URL is invalid", .{name}) catch "URL is invalid";
+    return std.fmt.bufPrint(buf, "{s} must use HTTPS (plain HTTP is allowed only on loopback)", .{name}) catch
+        "URL must use HTTPS (plain HTTP is allowed only on loopback)";
+}
+
 /// `write_private`: atomically replace a credential file, readable only by its
 /// owner. The bytes go to a new `0600` file beside `path` (created exclusively,
 /// synced), which is then renamed over it, so a reader never sees a half-written
@@ -458,7 +493,6 @@ pub const AuthManager = struct {
     err_buf: [320]u8 = undefined,
     err_len: usize = 0,
 
-
     pub fn init(gpa: Allocator) !AuthManager {
         const uid = try gpa.dupe(u8, "user-local");
         errdefer gpa.free(uid);
@@ -508,6 +542,20 @@ pub const AuthManager = struct {
         for (self.sandboxes.items) |*sb| sb.deinit(self.gpa);
         self.sandboxes.deinit(self.gpa);
         self.h2_pool.deinit();
+    }
+
+    /// `ensure_secure_transport`: OAuth codes and refresh credentials travel only
+    /// over TLS, or plain HTTP to a loopback development edge.
+    pub fn ensureSecureTransport(self: *AuthManager) !void {
+        if (self.codegraff_client_id == null) return;
+        const pairs = [_][2][]const u8{
+            .{ "Harness edge", self.edge_url orelse default_edge_url },
+            .{ "CodeGraff OAuth", self.codegraff_api_base },
+        };
+        for (pairs) |pair| {
+            var buf: [160]u8 = undefined;
+            if (secureUrlProblem(&buf, pair[0], pair[1])) |msg| return self.fail("{s}", .{msg});
+        }
     }
 
     /// The message behind the last `error.AuthFailed`.
@@ -677,6 +725,7 @@ pub const AuthManager = struct {
     /// a CodeGraff client (development mode).
     pub fn startHeadlessSignIn(self: *AuthManager, io: std.Io) ![]u8 {
         if (self.codegraff_client_id == null) return self.gpa.dupe(u8, "");
+        try self.ensureSecureTransport();
         const edge = std.mem.trimEnd(u8, self.edge_url orelse default_edge_url, "/");
         const redirect_uri = try std.fmt.allocPrint(self.gpa, "{s}/auth/cli/callback", .{edge});
         defer self.gpa.free(redirect_uri);
@@ -686,6 +735,7 @@ pub const AuthManager = struct {
     /// Start headed browser PKCE sign-in (`SignIn`), binding to `redirect_uri` (e.g.
     /// `http://127.0.0.1:27643/callback`) and matching `crates/engine/src/auth.rs` `begin_sign_in` 1:1.
     pub fn startBrowserSignIn(self: *AuthManager, io: std.Io, redirect_uri: []const u8) ![]u8 {
+        try self.ensureSecureTransport();
         var state_bytes: [16]u8 = undefined;
         var verifier_bytes: [32]u8 = undefined;
         io.random(&state_bytes);
@@ -1180,6 +1230,7 @@ pub const AuthManager = struct {
         try self.replaceOptStr(&self.pending_redirect_uri, null);
 
         const rio = io orelse return self.fail("the edge is unreachable: the engine has no network I/O", .{});
+        try self.ensureSecureTransport();
         const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/exchange", .{edge});
         defer self.gpa.free(url);
         const want_graff_key = (self.codegraff_api_key == null);
@@ -1554,6 +1605,7 @@ pub const AuthManager = struct {
         if (self.codegraff_client_id == null) return;
         const not_member = "could not switch to that workspace \u{2014} you may no longer be a member";
         const rio = io orelse return self.fail("could not reach the edge during refresh: {s}", .{"the engine has no network I/O"});
+        try self.ensureSecureTransport();
         const rt_now = self.refresh_token orelse return self.fail(not_member, .{});
         const rt = try self.gpa.dupe(u8, rt_now);
         defer self.gpa.free(rt);
@@ -1600,6 +1652,8 @@ pub const AuthManager = struct {
         }
         const rt = self.refresh_token orelse return self.access_token orelse self.api_key;
         const edge = self.edge_url orelse return self.access_token orelse self.api_key;
+        // Never send a refresh credential over plain HTTP off loopback.
+        self.ensureSecureTransport() catch return null;
         const base = std.mem.trimEnd(u8, edge, "/");
         const url = std.fmt.allocPrint(self.gpa, "{s}/auth/refresh", .{base}) catch return self.access_token;
         defer self.gpa.free(url);

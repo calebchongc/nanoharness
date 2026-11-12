@@ -352,11 +352,7 @@ pub fn accountStatus(gpa: Allocator, scope: Scope, phase: auth_host.AuthPhase, e
 
 /// OAuth codes and refresh tokens travel over TLS only; plain HTTP is for a
 /// development edge on a numeric loopback address (`validate_secure_url`).
-pub fn isSecureUrl(url: []const u8) bool {
-    if (std.mem.startsWith(u8, url, "https://")) return true;
-    const rest = if (std.mem.startsWith(u8, url, "http://")) url["http://".len..] else return false;
-    return std.mem.startsWith(u8, rest, "127.") or std.mem.startsWith(u8, rest, "[::1]");
-}
+pub const isSecureUrl = auth_host.isSecureUrl;
 
 // ---------------------------------------------------------------------------
 // One RPC to the running engine
