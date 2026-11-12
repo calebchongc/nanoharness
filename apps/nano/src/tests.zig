@@ -167,6 +167,7 @@ test {
     _ = @import("rpcw_history_import.zig");
     _ = @import("rpcw_local_import.zig");
     _ = @import("rpcw_github_runners.zig");
+    _ = @import("rpcw_project_action_setup.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");

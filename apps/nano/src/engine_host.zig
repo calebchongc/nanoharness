@@ -2109,9 +2109,7 @@ pub const EngineHost = struct {
                     "[{\"name\":\"compact\",\"description\":\"Compact conversation history\"},{\"name\":\"clear\",\"description\":\"Start a fresh chat\"}]",
                 ) };
             },
-            .TakeProjectActionSetup => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"command\":null}") };
-            },
+            .TakeProjectActionSetup => return @import("rpcw_project_action_setup.zig").takeProjectActionSetup(self, params),
             .ListAgentAccounts => {
                 if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     const force_usage: bool = if (requireObj(params)) |obj|
