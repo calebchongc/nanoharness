@@ -92,6 +92,8 @@ pub const State = struct {
     demo: bool = false,
     /// The question panel's height as last laid out (it sits above the safe area).
     question_h: f32 = 0,
+    /// The attach menu and its last error (view_mobile_attach.zig).
+    attach: @import("view_mobile_attach.zig").State = .{},
     /// The error row whose agent sign-in sheet is open (view_mobile_reauth.zig).
     reauth: @import("view_mobile_reauth.zig").Open = .{},
 
@@ -669,6 +671,9 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
     var bot_chrome_h: f32 = 112; // 40pt chip bar + 8pt gap + 56pt composer + margins
     if (queue_count > 0) bot_chrome_h += @min(@as(f32, @floatFromInt(queue_count)) * 34.0 + 8.0, 110.0);
     // The question panel takes the chips' and the composer's place.
+    if (@import("app_attachments.zig").count(a) > 0) bot_chrome_h += 72;
+    if (a.mobile.attach.menu) bot_chrome_h += 150;
+    if (!a.mobile.attach.err.empty()) bot_chrome_h += 22;
     if (asking) bot_chrome_h = vq.height(a) else {
         a.mobile.question_h = 0;
     }
@@ -848,7 +853,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
             }
         }
 
-        // 3. Horizontal `.scrollX()` 40pt Liquid Glass Chip Strip
+        // 3. The attach menu and the staged pictures.
+        @import("view_mobile_attach.zig").above(a, c, k, rt);
+
+        // 4. Horizontal `.scrollX()` 40pt Liquid Glass Chip Strip
         {
             ui.key(c, "ios-composer-chips");
             const chip_st: ui.Style = .{
@@ -915,7 +923,7 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
             );
             defer shell.end();
 
-            _ = mg.circleButton(c, "ios-composer-attach", .composer_attach_circle, .plus, k.text, rt, null);
+            @import("view_mobile_attach.zig").button(a, c, k, rt);
 
             {
                 const input_well = ui.div(c).row().grow().px(4).itemsCenter();
@@ -932,7 +940,9 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
                 a.mobile.composer_focus = tf.focused;
             }
 
-            const has_text = std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0;
+            // Attachments count as content: an image-only send is a send, never a stop.
+            const has_text = std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0 or
+                @import("app_attachments.zig").count(a) > 0;
             if (has_text) {
                 ui.key(c, "ios-composer-send-btn");
                 const send_btn = ui.div(c).row().size(36, 36).center().roundedFull().circular().bg(k.accent).control();
@@ -954,9 +964,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
                     a.interrupt();
                     nanoui.haptics.notify(.warning);
                 }
-            } else {
-                _ = mg.circleButton(c, "ios-composer-mic", .composer_dictate_circle, .microphone, k.muted, rt, null);
             }
+            // No dictation button: nanoui has no speech recognizer on iOS yet.
         }
     }
 }

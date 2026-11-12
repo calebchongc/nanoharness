@@ -118,7 +118,7 @@ pub fn panel(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
         defer opts.end();
         for (q.options, 0..) |opt, i| {
             const picked = mq.showsPicked(wz.picked(i), typed);
-            ui.keyInt(c, 0x7175_0000 + i);
+            ui.keyInt(c, 0x7175_0000 + @as(u64, i));
             const r = ui.div(c).row().wFull().px(14).py(10).gap(10).itemsCenter().rounded(12)
                 .bg(k.text.alpha(if (picked) 0.09 else 0.025)).border(if (picked) k.text.alpha(0.16) else ui.Color.transparent).borderW(1).control();
             defer r.end();

@@ -10,4 +10,7 @@ test {
     _ = @import("mobile_question.zig");
     _ = @import("view_mobile_question.zig");
     _ = @import("view_mobile_reauth.zig");
+    _ = @import("mobile_attach.zig");
+    _ = @import("ios_photos.zig");
+    _ = @import("view_mobile_attach.zig");
 }
