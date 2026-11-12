@@ -15,6 +15,7 @@ const transcript = @import("transcript.zig");
 const peer = @import("peer.zig");
 const ids = @import("../ids.zig");
 pub const rooms = @import("rooms.zig");
+pub const bots = @import("bots.zig");
 const Value = json.Value;
 
 /// The checked-in catalog: the Rust server's tools, names, descriptions and
@@ -61,6 +62,7 @@ pub const Tools = struct {
     origin: Origin,
     peer: peer.PeerSend,
     relay: peer.RelayLedger,
+    bots: bots.BotCli,
     /// Runs `git` for a room's project binding; null skips it (no binding).
     git: ?[]const u8 = "git",
     /// Tests pin the clock to the in-process engine's.
@@ -130,6 +132,7 @@ fn dispatch(c: *Ctx, name: []const u8, args: Value) !Value {
     if (eq(u8, name, "rename_chat")) return renameChat(c, args);
     if (eq(u8, name, "archive_chat")) return archiveChat(c, args);
     if (rooms.handles(name)) return rooms.call(c, name, args);
+    if (bots.handles(name)) return bots.call(c, name, args);
     if (Tools.has(name)) return c.fail("{s} is not available in this build", .{name});
     return c.fail("unknown tool: {s}", .{name});
 }

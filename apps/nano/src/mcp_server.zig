@@ -269,6 +269,7 @@ pub fn serveStdio(gpa: Allocator, io: Io, env: *const std.process.Environ.Map) !
     defer ws_link.deinit();
     const graff = try peer.graffExecutable(arena, io, config.graff_executable, config.home);
     var graff_peer: peer.GraffPeer = .{ .io = io, .graff = graff };
+    var graff_bots: tools.bots.GraffBots = .{ .io = io, .graff = graff };
 
     var in_buf: [65536]u8 = undefined;
     var out_buf: [65536]u8 = undefined;
@@ -285,6 +286,7 @@ pub fn serveStdio(gpa: Allocator, io: Io, env: *const std.process.Environ.Map) !
             .origin = config.origin,
             .peer = graff_peer.peerSend(),
             .relay = .{ .io = io, .dir = if (config.home) |h| try std.fmt.allocPrint(arena, "{s}/.harness/peer-relay", .{h}) else null },
+            .bots = graff_bots.cli(),
         },
     };
     try server.serve(&reader.interface);
@@ -354,6 +356,7 @@ test {
     _ = @import("mcp/transcript.zig");
     _ = @import("mcp/peer.zig");
     _ = @import("mcp/rooms.zig");
+    _ = @import("mcp/bots.zig");
     _ = @import("mcp/tools.zig");
     _ = @import("mcp/tests.zig");
 }

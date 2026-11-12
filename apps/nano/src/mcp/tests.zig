@@ -14,6 +14,7 @@ const mcp = @import("../mcp_server.zig");
 const tools = @import("tools.zig");
 const link = @import("engine_link.zig");
 const peer = @import("peer.zig");
+const bots = @import("bots.zig");
 const u = @import("util.zig");
 const Value = json.Value;
 
@@ -35,6 +36,29 @@ const FakePeer = struct {
         try self.sends.append(self.a, .{ try self.a.dupe(u8, from), try self.a.dupe(u8, to), try self.a.dupe(u8, text) });
         if (self.fail) |f| return .{ .err = f };
         return .{ .ok = "delivered to peer inbox" };
+    }
+};
+
+const FakeBots = struct {
+    a: Allocator,
+    calls: std.ArrayList([]const u8) = .empty,
+    /// `args joined by space` → stdout; missing → `unknown command`.
+    outputs: std.StringHashMapUnmanaged([]const u8) = .empty,
+
+    fn cli(self: *FakeBots) bots.BotCli {
+        return .{ .ptr = self, .bot_fn = run };
+    }
+
+    fn set(self: *FakeBots, args: []const u8, out: []const u8) !void {
+        try self.outputs.put(self.a, args, out);
+    }
+
+    fn run(ptr: *anyopaque, a: Allocator, folder: []const u8, args: []const []const u8) anyerror!bots.BotCli.Result {
+        const self: *FakeBots = @ptrCast(@alignCast(ptr));
+        const joined = try std.mem.join(self.a, " ", args);
+        try self.calls.append(self.a, try std.fmt.allocPrint(self.a, "{s}: {s}", .{ folder, joined }));
+        if (self.outputs.get(joined)) |out| return .{ .ok = try a.dupe(u8, out) };
+        return .{ .err = "unknown command" };
     }
 };
 
@@ -228,6 +252,7 @@ const HostFixture = struct {
     host_link: link.HostEngine = undefined,
     rec: Recorder = undefined,
     peer: FakePeer = undefined,
+    bots: FakeBots = undefined,
     t: tools.Tools = undefined,
 
     fn create(origin: tools.Origin) !*HostFixture {
@@ -238,12 +263,14 @@ const HostFixture = struct {
         f.host_link = .{ .host = &f.host };
         f.rec = .{ .inner = f.host_link.engine(), .a = a };
         f.peer = .{ .a = a };
+        f.bots = .{ .a = a };
         f.t = .{
             .io = testing.io,
             .engine = f.rec.engine(),
             .origin = origin,
             .peer = f.peer.peerSend(),
             .relay = .{ .io = testing.io, .dir = null },
+            .bots = f.bots.cli(),
             .git = null,
             .fixed_now_ms = host_now,
         };
@@ -305,6 +332,7 @@ const WorldFixture = struct {
     arena: std.heap.ArenaAllocator,
     world: World = undefined,
     peer: FakePeer = undefined,
+    bots: FakeBots = undefined,
     t: tools.Tools = undefined,
 
     fn create(origin: tools.Origin) !*WorldFixture {
@@ -314,12 +342,14 @@ const WorldFixture = struct {
         const a = f.arena.allocator();
         f.world = .{ .a = a };
         f.peer = .{ .a = a };
+        f.bots = .{ .a = a };
         f.t = .{
             .io = testing.io,
             .engine = f.world.engine(),
             .origin = origin,
             .peer = f.peer.peerSend(),
             .relay = .{ .io = testing.io, .dir = null },
+            .bots = f.bots.cli(),
             .git = null,
             .fixed_now_ms = host_now,
         };
@@ -971,6 +1001,103 @@ test "mcp rooms: the Zig engine's RoomRequest reply is passed through as it is" 
     const listed = try ok(try f.call("list_rooms", "{}"));
     try testing.expect(u.get(listed, "rooms").? == .null);
     try expectErrStarts(try f.call("read_room", "{\"room\":\"build\"}"), "no room named \"build\" that you can see");
+}
+
+// ---- bots --------------------------------------------------------------------------------------
+
+const bots_list =
+    \\[{"name":"triage","job":"Sort new issues","model":"","yolo":false},{"name":"notes","job":"Draft release notes","model":"gpt-9","yolo":true}]
+;
+const routines_list =
+    \\[{"bot":"triage","id":"r1","instruction":"sweep","when":"every 6h","paused":false,"done":false,"runs":2,"message":"[routine r1] sweep"},
+    \\ {"bot":"notes","id":"r2","instruction":"draft","when":"daily","paused":true,"done":false,"runs":0,"message":"[routine r2] draft"}]
+;
+const due_list =
+    \\[{"bot":"triage","id":"r1","instruction":"sweep","system":"You are triage.","message":"[routine r1] sweep"}]
+;
+
+test "mcp list_bots: each bot's routines and which are due" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer f.destroy();
+    try f.bots.set("list --json", bots_list);
+    try f.bots.set("routine list --json", routines_list);
+    try f.bots.set("due --json", due_list);
+    const v = try ok(try f.call("list_bots", "{}"));
+    try testing.expectEqualStrings("comet", sval(v, &.{ "project", "name" }).?);
+    const listed = u.array(v, "bots").?;
+    try testing.expectEqual(@as(usize, 2), listed.len);
+    try testing.expect(u.get(listed[0], "model").? == .null);
+    try testing.expect(u.boolean(u.array(listed[0], "routines").?[0], "due").?);
+    try testing.expect(!u.boolean(u.array(listed[1], "routines").?[0], "due").?);
+    try testing.expect(u.boolean(listed[1], "skipsApprovals").?);
+    try testing.expectEqualStrings("/repo/comet: list --json", f.bots.calls.items[0]);
+
+    f.t.origin = .{};
+    try expectErr(try f.call("list_bots", "{}"), "name the project: this server is not speaking for a chat");
+    try f.bots.set("list --json", "not json");
+    try expectErr(try f.call("list_bots", "{\"project\":\"comet\"}"), "graff bot list did not print the JSON this Harness reads");
+    // A project hosted elsewhere.
+    try f.setup("{\"op\":\"createSpace\",\"spaceId\":\"space-far\",\"deviceId\":\"dev-far\",\"path\":\"/far/repo\"}");
+    try expectErr(try f.call("list_bots", "{\"project\":\"space-far\"}"), "bots are files in the project folder, and repo is hosted on another device; ask a chat on that device");
+}
+
+test "mcp run_bot and run_due_bots: graff chats that open with the bot's standing text" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer f.destroy();
+    try f.bots.set("list --json", bots_list);
+    try f.bots.set("routine list triage --json", routines_list);
+    try f.bots.set("prompt triage", "You are triage.");
+    try f.bots.set("prompt notes", "You write notes.");
+    const ran = try ok(try f.call("run_bot", "{\"bot\":\"triage\",\"message\":\"look at #12\"}"));
+    try testing.expectEqualStrings("triage", u.str(ran, "bot").?);
+    try testing.expectEqualStrings("graff", u.str(ran, "harness").?);
+    try testing.expectEqualStrings("triage", u.str(ran, "title").?);
+    try testing.expectEqualStrings("You are triage.\n\nlook at #12", sval(f.rec.last("QueueCommand").?, &.{ "command", "request", "prompt" }).?);
+
+    const routine = try ok(try f.call("run_bot", "{\"bot\":\"triage\",\"routine\":\"r1\"}"));
+    try testing.expectEqualStrings("triage: r1", u.str(routine, "title").?);
+    // A model this device does not offer is dropped, and said so.
+    const notes = try ok(try f.call("run_bot", "{\"bot\":\"notes\",\"message\":\"go\"}"));
+    try testing.expectEqualStrings("gpt-9", u.str(notes, "modelIgnored").?);
+    try testing.expect(u.get(notes, "model").? == .null);
+
+    try expectErr(try f.call("run_bot", "{\"bot\":\"triage\"}"), "pass message or routine, one of them");
+    try expectErr(try f.call("run_bot", "{\"bot\":\"triage\",\"message\":\"a\",\"routine\":\"r1\"}"), "pass message or routine, one of them");
+    try expectErr(try f.call("run_bot", "{\"bot\":\"ghost\",\"message\":\"a\"}"), "no bot named \"ghost\" in comet; it has: triage, notes");
+    try expectErr(try f.call("run_bot", "{\"bot\":\"triage\",\"routine\":\"r9\"}"), "triage has no routine \"r9\" (see list_bots)");
+    try expectErr(try f.call("run_bot", "{\"message\":\"a\"}"), "invalid arguments: missing field `bot`");
+
+    try f.bots.set("due --claim --json", due_list ++ "");
+    const due = try ok(try f.call("run_due_bots", "{}"));
+    const started = u.array(due, "started").?;
+    try testing.expectEqual(@as(usize, 1), started.len);
+    try testing.expectEqualStrings("r1", u.str(started[0], "routine").?);
+    try testing.expect(u.get(due, "failed") == null);
+    try f.bots.set("due --claim --json",
+        \\[{"bot":"gone","id":"r7","instruction":"x","system":"s","message":"m"}]
+    );
+    const failed = try ok(try f.call("run_due_bots", "{}"));
+    try testing.expectEqualStrings("its bot is gone", u.str(u.array(failed, "failed").?[0], "error").?);
+    try testing.expect(std.mem.startsWith(u8, u.str(failed, "note").?, "A failed routine was already moved"));
+    try f.bots.set("due --claim --json", "[]");
+    try testing.expectEqualStrings("Nothing is due.", u.str(try ok(try f.call("run_due_bots", "{}")), "note").?);
+}
+
+test "mcp bots: the person's own bots run in their standing chat through the engine" {
+    const w = try WorldFixture.create(.{});
+    defer w.destroy();
+    w.world.own_bots = "{\"bots\":[{\"name\":\"scout\",\"job\":\"Watch CI\"}]}";
+    const listed = try ok(try w.call("list_bots", "{}"));
+    try testing.expectEqualStrings("scout", u.str(u.array(listed, "yours").?[0], "name").?);
+    try testing.expect(u.get(listed, "bots") == null);
+    const ran = try ok(try w.call("run_bot", "{\"bot\":\"scout\",\"message\":\"check main\"}"));
+    try testing.expectEqualStrings("chat-standing", u.str(ran, "chatId").?);
+    try testing.expect(u.boolean(ran, "standingChat").?);
+    try testing.expectEqualStrings("check main", u.str(w.lastWrite("RunBot").?, "message").?);
+    try expectErr(try w.call("run_bot", "{\"bot\":\"scout\"}"), "pass message or routine, one of them");
+    // Without own bots and without a project, the project error stands.
+    w.world.own_bots = null;
+    try expectErr(try w.call("list_bots", "{}"), "name the project: this server is not speaking for a chat");
 }
 
 fn repeat(a: Allocator, unit: []const u8, n: usize) ![]const u8 {
