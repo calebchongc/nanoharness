@@ -302,5 +302,6 @@ test {
 
 test {
     _ = @import("agent_claude.zig");
+    _ = @import("agent_codex.zig");
     _ = @import("turn_host.zig");
 }

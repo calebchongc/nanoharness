@@ -24,6 +24,7 @@ const Event = agent_turn.Event;
 pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
     const map = .{
         .{ "claude-code", &@import("agent_claude.zig").adapter },
+        .{ "codex", &@import("agent_codex.zig").adapter },
     };
     inline for (map) |e| if (std.mem.eql(u8, harness, e[0])) return e[1];
     return null;
