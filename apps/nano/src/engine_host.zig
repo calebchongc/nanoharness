@@ -2350,35 +2350,14 @@ pub const EngineHost = struct {
                     .{json.fmt(path, .{})},
                 ) };
             },
-            .ListBranches => {
-                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return self.gitReply(try git_host.listBranchesJson(self.gpa, self.io, cwd));
-            },
-            .ListRefs => {
-                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return self.gitReply(try git_host.listRefsJson(self.gpa, self.io, cwd));
-            },
-            .ListGitHistory, .SearchGitHistory => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"commits\":[]}") };
-            },
-            .ResolveGitAvatars => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"avatars\":{}}") };
-            },
-            .FetchAll => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"fetched\":true}") };
-            },
-            .SwitchRef => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"switched\":true}") };
-            },
-            .GetCheckoutFileDiffText => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const path = requireStr(obj, "path") orelse "";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"path\":{f},\"diff\":\"\"}}",
-                    .{json.fmt(path, .{})},
-                ) };
-            },
+            .ListBranches => return @import("rpcg_rpc.zig").listBranches(self, params),
+            .ListRefs => return @import("rpcg_rpc.zig").listRefs(self, params),
+            .ListGitHistory => return @import("rpcg_rpc.zig").listGitHistory(self, params),
+            .SearchGitHistory => return @import("rpcg_rpc.zig").searchGitHistory(self, params),
+            .ResolveGitAvatars => return @import("rpcg_avatars.zig").resolveGitAvatars(self, params),
+            .FetchAll => return @import("rpcg_rpc.zig").fetchAll(self, params),
+            .SwitchRef => return @import("rpcg_rpc.zig").switchRef(self, params),
+            .GetCheckoutFileDiffText => return @import("rpcg_rpc.zig").getCheckoutFileDiffText(self, params),
             .ListDrives => {
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
@@ -2806,22 +2785,9 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.queue, chat_id, q_frame);
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"finished\":{}}}", .{finished}) };
             },
-            .WatchCheckoutDiffs => {
-                return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"checkouts\":[]}"));
-            },
-            .GetCheckoutDiff => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const cwd = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "mode") orelse return .{ .err = .{ .bad_params = "missing mode" } };
-                return self.gitReply(try git_host.runGitDiffJson(self.gpa, self.io, cwd));
-            },
-            .DiscardWorkingTree => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "checkoutId") orelse return .{ .err = .{ .bad_params = "missing checkoutId" } };
-                _ = requireStr(obj, "expectedChecksum") orelse return .{ .err = .{ .bad_params = "missing expectedChecksum" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"discarded\":false}") };
-            },
+            .WatchCheckoutDiffs => return @import("rpcg_rpc.zig").watchCheckoutDiffs(self, call_id, params),
+            .GetCheckoutDiff => return @import("rpcg_rpc.zig").getCheckoutDiff(self, params),
+            .DiscardWorkingTree => return @import("rpcg_rpc.zig").discardWorkingTree(self, params),
             .ListWorkspaceDirectory => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
@@ -2913,12 +2879,7 @@ pub const EngineHost = struct {
             .WatchWorkspaceFiles => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"changed\":[]}"));
             },
-            .WatchWorkspaceGitStatus => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const checkout_path = requireStr(obj, "checkoutPath") orelse return .{ .err = .{ .bad_params = "missing checkoutPath" } };
-                return self.oneStreamItem(false, try git_host.runGitStatusJson(self.gpa, self.io, checkout_path));
-            },
+            .WatchWorkspaceGitStatus => return @import("rpcg_rpc.zig").watchWorkspaceGitStatus(self, call_id, params),
             .ListProjectActions => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
@@ -2944,13 +2905,7 @@ pub const EngineHost = struct {
                 const deleted = self.deleteAction(space_id, action_id);
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"deleted\":{}}}", .{deleted}) };
             },
-            .RunProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "actionId") orelse return .{ .err = .{ .bad_params = "missing actionId" } };
-                return .{ .err = .{ .exec_error = "project action not found" } };
-            },
+            .RunProjectAction => return @import("rpcg_terminals.zig").runProjectAction(self, params),
             .UpdateStatus => {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
@@ -3104,55 +3059,11 @@ pub const EngineHost = struct {
                 const routine: ?[]const u8 = if (obj.get("routine")) |rv| (if (rv == .string) rv.string else null) else null;
                 return self.handleRunBot(bot, msg, routine);
             },
-            .OpenTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse "term-1";
-                const cwd = requireStr(obj, "cwd") orelse "/tmp";
-                const cols: u16 = if (obj.get("cols")) |cv| (if (cv == .integer and cv.integer > 0) @intCast(cv.integer) else 80) else 80;
-                const rows: u16 = if (obj.get("rows")) |rv| (if (rv == .integer and rv.integer > 0) @intCast(rv.integer) else 24) else 24;
-                const sess = try self.terminals.getOrCreate(tid, cwd, cols, rows, false);
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"terminalId\":{f},\"cols\":{d},\"rows\":{d}}}",
-                    .{ json.fmt(sess.id, .{}), sess.cols, sess.rows },
-                ) };
-            },
-            .SubscribeTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                if (self.terminals.sessions.getPtr(tid)) |sess| {
-                    return self.oneStreamItem(
-                        false,
-                        try std.fmt.allocPrint(
-                            self.gpa,
-                            "{{\"terminalId\":{f},\"output\":{f},\"exited\":{}}}",
-                            .{ json.fmt(sess.id, .{}), json.fmt(sess.scrollback.items, .{}), sess.exited },
-                        ),
-                    );
-                }
-                return .{ .err = .{ .exec_error = "terminal not found" } };
-            },
-            .WriteTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const data = requireStr(obj, "data") orelse return .{ .err = .{ .bad_params = "missing data" } };
-                const written = try self.terminals.writeInput(tid, data);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"written\":{}}}", .{written}) };
-            },
-            .ResizeTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const cols: u16 = if (obj.get("cols")) |cv| (if (cv == .integer and cv.integer > 0) @intCast(cv.integer) else 80) else 80;
-                const rows: u16 = if (obj.get("rows")) |rv| (if (rv == .integer and rv.integer > 0) @intCast(rv.integer) else 24) else 24;
-                const resized = self.terminals.resize(tid, cols, rows);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"resized\":{}}}", .{resized}) };
-            },
-            .CloseTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const closed = self.terminals.close(tid);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"closed\":{}}}", .{closed}) };
-            },
+            .OpenTerminal => return @import("rpcg_terminals.zig").openTerminal(self, params),
+            .SubscribeTerminal => return @import("rpcg_terminals.zig").subscribeTerminal(self, call_id, params),
+            .WriteTerminal => return @import("rpcg_terminals.zig").writeTerminal(self, params),
+            .ResizeTerminal => return @import("rpcg_terminals.zig").resizeTerminal(self, params),
+            .CloseTerminal => return @import("rpcg_terminals.zig").closeTerminal(self, params),
             .ListSimulators => {
                 const sims = @import("simulators_host.zig");
                 const shared_sims = try sims.shared(self.io, self.data_dir);
@@ -3197,19 +3108,8 @@ pub const EngineHost = struct {
                 _ = requireStr(obj, "action") orelse return .{ .err = .{ .bad_params = "missing action" } };
                 return .{ .err = .{ .exec_error = "chat has no graff worktree" } };
             },
-            .WatchCheckoutChangeRequest => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "branch") orelse return .{ .err = .{ .bad_params = "missing branch" } };
-                return self.oneStreamItem(true, try self.gpa.dupe(u8, "{\"status\":\"none\"}"));
-            },
-            .MergeChangeRequest => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "branch") orelse return .{ .err = .{ .bad_params = "missing branch" } };
-                if (obj.get("number") == null) return .{ .err = .{ .bad_params = "missing number" } };
-                return .{ .err = .{ .exec_error = "not a github repository" } };
-            },
+            .WatchCheckoutChangeRequest => return @import("rpcg_change_requests.zig").watchCheckoutChangeRequest(self, call_id, params),
+            .MergeChangeRequest => return @import("rpcg_change_requests.zig").mergeChangeRequest(self, params),
         }
     }
 
@@ -6478,26 +6378,17 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
         try testing.expect(std.mem.indexOf(u8, cmds.unary_json, "\"compact\"") != null);
     }
 
-    // 3. Test OpenTerminal -> WriteTerminal -> ResizeTerminal -> SubscribeTerminal -> CloseTerminal.
+    // 3. Terminal RPCs answer with Rust's shapes and errors (this host has no
+    // I/O, so no PTY opens; rpcg_terminals_tests.zig runs real shells).
     {
-        const open_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\",\"cwd\":\"/tmp\",\"cols\":100,\"rows\":30}", .{});
+        const open_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"chat-parity\",\"cwd\":\"/tmp\",\"cols\":100,\"rows\":30}", .{});
         const open_r = try host.handle("OpenTerminal", open_p);
-        defer gpa.free(open_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, open_r.unary_json, "\"cols\":100") != null);
-
-        const write_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\",\"data\":\"zig version\\n\"}", .{});
-        const write_r = try host.handle("WriteTerminal", write_p);
-        defer gpa.free(write_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, write_r.unary_json, "\"written\":true") != null);
-
+        try testing.expectEqualStrings("could not open a pty: the engine has no I/O", open_r.err.exec_error);
         const sub_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\"}", .{});
-        var sub_r = try host.handle("SubscribeTerminal", sub_p);
-        defer sub_r.stream_items_json.deinit(gpa);
-        try testing.expect(std.mem.indexOf(u8, sub_r.stream_items_json.items[0], "zig version") != null);
-
+        const sub_r = try host.handle("SubscribeTerminal", sub_p);
+        try testing.expectEqualStrings("Terminal not found", sub_r.err.exec_error);
         const close_r = try host.handle("CloseTerminal", sub_p);
-        defer gpa.free(close_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, close_r.unary_json, "\"closed\":true") != null);
+        try testing.expectEqualStrings("Terminal not found", close_r.err.exec_error);
     }
 
     // 4. Test Lean Theorem `complete_delete_zero_leak_and_no_resurrection`:
