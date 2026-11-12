@@ -6,24 +6,32 @@ cd "$(dirname "$0")/.."
 # corrupting memory, for 0.1 MB and no CPU measurable in bench/resource.py's
 # replay (8.9% streaming against ReleaseFast's 9.7%, the same within noise).
 zig build --release=safe -j1 "$@"
-# Use the same workspace version embedded in the executable (build.zig).
-# Refuse a placeholder bundle when the manifest is missing or malformed.
-version=$(awk '
-    /^\[workspace\.package\][[:space:]]*$/ { workspace = 1; next }
-    workspace && /^\[/ { exit }
-    workspace && /^[[:space:]]*version[[:space:]]*=[[:space:]]*"/ {
-        sub(/^[^"]*"/, ""); sub(/".*$/, ""); print; exit
-    }
-' ../../Cargo.toml)
+# Use the version embedded in the executable: build.zig.zon's `.version`
+# (build.zig). Refuse a placeholder bundle when it is missing or malformed.
+version=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)",[[:space:]]*$/\1/p' build.zig.zon | head -n 1)
 if [ -z "$version" ]; then
-    echo "Cannot package Harness Nano: missing workspace version in Cargo.toml" >&2
+    echo "Cannot package Harness Nano: missing .version in build.zig.zon" >&2
+    exit 1
+fi
+# The app icon: the repository's macOS icon (squircle and margins baked in).
+icon_png=../../dist/macos/icon-1024.png
+if [ ! -f "$icon_png" ]; then
+    echo "Cannot package Harness Nano: missing app icon $icon_png" >&2
     exit 1
 fi
 app="zig-out/Harness Nano.app/Contents"
 mkdir -p "$app/MacOS" "$app/Resources"
 cp zig-out/bin/harness-nano "$app/MacOS/"
-icon=/Applications/Harness.app/Contents/Resources/harness.icns
-[ -f "$icon" ] && cp "$icon" "$app/Resources/AppIcon.icns"
+iconset_dir=$(mktemp -d)
+trap 'rm -rf "$iconset_dir"' EXIT
+iconset="$iconset_dir/AppIcon.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$icon_png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    retina=$((size * 2))
+    sips -z "$retina" "$retina" "$icon_png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Resources/AppIcon.icns"
 cat > "$app/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

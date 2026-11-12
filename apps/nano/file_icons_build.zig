@@ -47,7 +47,7 @@ pub fn module(b: *std.Build) *std.Build.Module {
 }
 
 fn definition(definitions: *const std.StringHashMap(u16), name: []const u8) ?u16 {
-    // The same upstream aliases as crates/ui/src/file_icons.rs.
+    // The same upstream aliases as the GPUI app's file-icon lookup.
     const alias = if (std.mem.eql(u8, name, "less")) "brackets-sky" else if (std.mem.eql(u8, name, "yml")) "yaml" else name;
     return definitions.get(alias);
 }

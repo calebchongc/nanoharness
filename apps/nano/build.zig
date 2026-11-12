@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -47,8 +48,8 @@ pub fn build(b: *std.Build) void {
     );
     const icons_svg = b.createModule(.{ .root_source_file = icons_root });
     const file_icons_data = @import("file_icons_build.zig").module(b);
-    // The desktop catalog: GPUI deliberately recolors its Codegraff themes
-    // without changing the mobile palette. crates/theme checks this export.
+    // The desktop catalog (checked in, edited directly): GPUI deliberately
+    // recolors its Codegraff themes without changing the mobile palette.
     const theme_files = b.addWriteFiles();
     _ = theme_files.addCopyFile(b.path("themes.json"), "themes.json");
     _ = theme_files.addCopyFile(b.path("ios_themes.json"), "ios_themes.json");
@@ -59,35 +60,16 @@ pub fn build(b: *std.Build) void {
     );
     const themes_json = b.createModule(.{ .root_source_file = themes_root });
     const ios_themes_root = theme_files.add("ios_themes_json.zig",
-        \\//! The mobile 19-family theme catalog (crates/theme/src/registry.rs), as JSON.
+        \\//! The mobile 19-family theme catalog, as JSON.
         \\pub const json = @embedFile("ios_themes.json");
         \\
     );
     const ios_themes_json = b.createModule(.{ .root_source_file = ios_themes_root });
-    // Harness's version, read directly from `../../Cargo.toml` via WriteFiles
-    // so Zig's build runner hashes `Cargo.toml` on every build and never
-    // reuses a stale cached version string across releases.
-    const info_files = b.addWriteFiles();
-    _ = info_files.addCopyFile(b.path("../../Cargo.toml"), "Cargo.toml");
-    const info_root = info_files.add("build_info.zig",
-        \\const std = @import("std");
-        \\pub const version: []const u8 = blk: {
-        \\    @setEvalBranchQuota(100_000);
-        \\    const text = @embedFile("Cargo.toml");
-        \\    const section = std.mem.indexOf(u8, text, "[workspace.package]") orelse break :blk "0.0.0";
-        \\    var lines = std.mem.splitScalar(u8, text[section..], '\n');
-        \\    while (lines.next()) |line| {
-        \\        const t = std.mem.trim(u8, line, " \r");
-        \\        if (!std.mem.startsWith(u8, t, "version")) continue;
-        \\        const q = std.mem.indexOfScalar(u8, t, '"') orelse continue;
-        \\        const end = std.mem.indexOfScalarPos(u8, t, q + 1, '"') orelse continue;
-        \\        break :blk t[q + 1 .. end];
-        \\    }
-        \\    break :blk "0.0.0";
-        \\};
-        \\
-    );
-    const info_mod = b.createModule(.{ .root_source_file = info_root });
+    // Harness's version: build.zig.zon's, the one place a release sets it
+    // (scripts/bundle.sh and the iOS bundle read the same field).
+    const info_opts = b.addOptions();
+    info_opts.addOption([]const u8, "version", manifest.version);
+    const info_mod = info_opts.createModule();
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
@@ -98,6 +80,19 @@ pub fn build(b: *std.Build) void {
         .{ .name = "themes_json", .module = themes_json },
         .{ .name = "ios_themes_json", .module = ios_themes_json },
     };
+
+    // `zig build no-rust`: fails when the build graph, scripts/ or a test
+    // reaches for Rust (its toolchain or its sources); src/no_rust_gate.zig.
+    // Built for the host, so it runs under any -Dtarget.
+    const gate = b.addExecutable(.{ .name = "no-rust-gate", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/no_rust_gate.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    gate.use_llvm = true;
+    const run_gate = b.addRunArtifact(gate);
+    run_gate.addDirectoryArg(b.path("."));
+    b.step("no-rust", "Fail if the build, scripts or tests need Rust").dependOn(&run_gate.step);
 
     const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -114,7 +109,7 @@ pub fn build(b: *std.Build) void {
         const app_bundle = ios.app(b, exe, .{
             .name = "Harness",
             .id = "harness.codegraff.ios",
-            .version = "0.2.186",
+            .version = manifest.version,
             .multiple_windows = true,
             .assets = b.path("assets/ios/Assets.xcassets"),
             .info =
@@ -160,6 +155,8 @@ pub fn build(b: *std.Build) void {
     opts.addOption([]const u8, "protocol_dir", protocol);
     // And the app rules the phones share (apps/parity/vectors).
     opts.addOption([]const u8, "vectors_dir", b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
+    // This folder, for the zero-Rust gate's test (src/no_rust_gate.zig).
+    opts.addOption([]const u8, "nano_dir", b.root.joinString(b.allocator, ".") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
     b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
 
