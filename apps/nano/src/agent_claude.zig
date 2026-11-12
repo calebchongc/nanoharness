@@ -91,9 +91,20 @@ pub fn buildArgv(a: Allocator, exe: []const u8, req: agent_turn.Request, model_o
 
 /// A user message line (`wire.rs`), with Ultrathink's prefix.
 pub fn userLine(a: Allocator, text: []const u8, reasoning: ?[]const u8) ![]u8 {
+    return userLineWithImages(a, text, reasoning, &.{});
+}
+
+/// `user_message_line_with_images`: image blocks first, then the text.
+pub fn userLineWithImages(a: Allocator, text: []const u8, reasoning: ?[]const u8, images: []const agent_turn.InlineImage) ![]u8 {
     const ultra = if (reasoning) |r| eq(r, "ultrathink") and !std.mem.startsWith(u8, std.mem.trimStart(u8, text, " \t\n"), "/") else false;
     const body = if (ultra) try std.fmt.allocPrint(a, "Ultrathink:\n{s}", .{text}) else text;
-    return std.fmt.allocPrint(a, "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{f}}},\"parent_tool_use_id\":null}}", .{json.fmt(body, .{})});
+    if (images.len == 0) return std.fmt.allocPrint(a, "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{f}}},\"parent_tool_use_id\":null}}", .{json.fmt(body, .{})});
+    var out: std.Io.Writer.Allocating = .init(a);
+    const w = &out.writer;
+    try w.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[");
+    for (images) |img| try w.print("{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":{f},\"data\":{f}}}}},", .{ json.fmt(img.media_type, .{}), json.fmt(img.data_b64, .{}) });
+    try w.print("{{\"type\":\"text\",\"text\":{f}}}]}},\"parent_tool_use_id\":null}}", .{json.fmt(body, .{})});
+    return out.written();
 }
 
 /// `decode_tool_use`.
@@ -380,7 +391,7 @@ fn run(t: *Turn) !void {
         std.log.warn("harness-engine: previous claude process still open on {s}; resuming anyway", .{r});
     };
     const proc = try t.spawn(argv, &env, .{});
-    _ = t.send(try userLine(a, t.req.prompt, t.req.reasoning));
+    _ = t.send(try userLineWithImages(a, t.req.prompt, t.req.reasoning, try agent_turn.loadImages(a, t.io, t.req.attachments)));
 
     var norm: Normalizer = .{};
     var held = false;
@@ -436,7 +447,9 @@ fn answer(t: *Turn, p: *const agent_turn.Pending, answers: ?[]const agent_turn.A
     const input = get(data, "input") orelse json.Value{ .null = {} };
     const payload: []const u8 = switch (p.kind) {
         kind_approve => if (agent_turn.answeredYes(answers)) allowPayload(a, input) catch return else deny_payload,
-        kind_ask => if (answers) |as| askAnswersPayload(a, input, as) catch return else deny_payload,
+        // A dismissed question is answered empty (`unwrap_or_default`), so
+        // the agent is unblocked rather than told the tool was declined.
+        kind_ask => askAnswersPayload(a, input, answers orelse &.{}) catch return,
         else => return,
     };
     _ = t.send(controlResponse(a, rid, payload) catch return);
@@ -698,4 +711,77 @@ test "claude: a queued turn resumes only after the previous claude process exite
     const saw = try rig.readFile("second-saw");
     defer testing.allocator.free(saw);
     try testing.expectEqualStrings("yes\n", saw);
+}
+
+const mock_build_wait =
+    \\#!/bin/sh
+    \\d=$(dirname "$0")
+    \\[ -d "$HARNESS_BUILD_WAIT_DIR" ] && printf '%s' "$HARNESS_BUILD_WAIT_DIR" > "$d/bwd.txt"
+    \\IFS= read -r first
+    \\echo '{"type":"result","subtype":"success","session_id":"s"}'
+    \\
+;
+
+test "claude: the agent gets its run's own build-wait directory, removed when the run ends" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    const rig = try testkit.Rig.create(.{ .harness = "claude-code", .override_var = "CLAUDE_CODE_EXECUTABLE", .script = mock_build_wait, .autonomy = "full-access" });
+    defer rig.destroy();
+    try rig.env.put("HARNESS_BUILD_WAIT_DIR", "/synthetic/inherited");
+    try rig.env.put("TMPDIR", rig.dir);
+    try rig.run("m-1", "hi");
+    try rig.waitIdle(5000);
+    const bwd = try rig.readFile("bwd.txt");
+    defer testing.allocator.free(bwd);
+    const prefix = try std.fmt.allocPrint(testing.allocator, "{s}/harness-build-wait-", .{rig.dir});
+    defer testing.allocator.free(prefix);
+    try testing.expect(std.mem.startsWith(u8, bwd, prefix));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, bwd, .{}));
+}
+
+const mock_ask =
+    \\#!/bin/sh
+    \\d=$(dirname "$0")
+    \\IFS= read -r first
+    \\echo '{"type":"system","subtype":"init","session_id":"sess-ask"}'
+    \\echo '{"type":"control_request","request_id":"cr1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Pick","question":"Which?","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}}'
+    \\IFS= read -r resp
+    \\printf '%s\n' "$resp" > "$d/resp.txt"
+    \\while IFS= read -r line; do case "$line" in *'"subtype":"interrupt"'*) echo '{"type":"result","subtype":"error_during_execution","session_id":"sess-ask"}';; esac; done
+    \\
+;
+
+test "claude: dismissing AskUserQuestion answers it empty instead of denying the tool" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    const rig = try testkit.Rig.create(.{ .harness = "claude-code", .override_var = "CLAUDE_CODE_EXECUTABLE", .script = mock_ask, .autonomy = "full-access" });
+    defer rig.destroy();
+    try rig.run("m-1", "ask me");
+    try rig.waitQuestion(5000);
+    const rid = (try rig.openRequestId()).?;
+    defer testing.allocator.free(rid);
+    const cmd = try std.fmt.allocPrint(testing.allocator, "{{\"kind\":\"dismissInput\",\"requestId\":{f}}}", .{json.fmt(rid, .{})});
+    defer testing.allocator.free(cmd);
+    try rig.command(cmd);
+    try rig.waitIdle(8000);
+    const resp = try rig.readFile("resp.txt");
+    defer testing.allocator.free(resp);
+    try testing.expect(std.mem.indexOf(u8, resp, "\"behavior\":\"allow\"") != null);
+    try testing.expect(std.mem.indexOf(u8, resp, "\"answers\":{\"Which?\":\"\"}") != null);
+}
+
+test "claude: image attachments ride the first prompt inline, other files only as refs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rnd: [6]u8 = undefined;
+    testing.io.random(&rnd);
+    const dir = try std.fmt.allocPrint(a, "/tmp/harness-zig-img-{x}", .{rnd});
+    try std.Io.Dir.cwd().createDirPath(testing.io, dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const png = try std.fmt.allocPrint(a, "{s}/shot.bin", .{dir});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = png, .data = "\x89PNGdata" });
+    const txt = try std.fmt.allocPrint(a, "{s}/notes.txt", .{dir});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = txt, .data = "hello" });
+    const images = try agent_turn.loadImages(a, testing.io, &.{ png, txt, "/nonexistent/x.png" });
+    try testing.expectEqual(@as(usize, 1), images.len);
+    try testing.expectEqualStrings("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBOR2RhdGE=\"}},{\"type\":\"text\",\"text\":\"look\"}]},\"parent_tool_use_id\":null}", try userLineWithImages(a, "look", null, images));
 }
