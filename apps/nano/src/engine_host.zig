@@ -2732,7 +2732,8 @@ pub const EngineHost = struct {
                 const root = self.chatWorkspacePath(chat_id);
                 return .{ .unary_json = try workspace_files_host.listWorkspaceDirectoryJson(self.gpa, self.io, root, dir) };
             },
-            .SearchWorkspaceFiles, .SearchFiles => {
+            .SearchWorkspaceFiles => return @import("rpcw_search.zig").searchWorkspaceFiles(self, params),
+            .SearchFiles => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const cid_opt = requireStr(obj, "chatId");
                 const sid_opt = requireStr(obj, "spaceId");

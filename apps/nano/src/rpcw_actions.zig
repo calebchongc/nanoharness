@@ -562,7 +562,7 @@ fn u16Param(o: json.ObjectMap, comptime key: []const u8) union(enum) { ok: u16, 
 
 /// `Repos::workspace_checkout`: the canonical `candidate` when it is the
 /// repository folder or one of its worktrees.
-fn workspaceCheckout(a: Allocator, io: std.Io, repo_path: []const u8, candidate: []const u8) !?[]const u8 {
+pub fn workspaceCheckout(a: Allocator, io: std.Io, repo_path: []const u8, candidate: []const u8) !?[]const u8 {
     const cand = common.canonicalize(a, io, candidate) orelse return null;
     var paths: std.ArrayList([]const u8) = .empty;
     try paths.append(a, repo_path);
