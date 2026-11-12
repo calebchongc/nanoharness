@@ -306,5 +306,6 @@ test {
     _ = @import("agent_acp.zig");
     _ = @import("agent_cursor.zig");
     _ = @import("agent_pi.zig");
+    _ = @import("agent_opencode.zig");
     _ = @import("turn_host.zig");
 }

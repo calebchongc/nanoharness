@@ -353,6 +353,7 @@ pub fn currentEnv(gpa: Allocator) !Environ.Map {
 
 pub const SpawnOpts = struct {
     stdin: bool = true,
+    stdout: bool = true,
 };
 
 pub const AgentProc = struct {
@@ -370,6 +371,9 @@ pub const AgentProc = struct {
     line: std.ArrayList(u8) = .empty,
     scan: usize = 0,
     eof: bool = false,
+    /// Set when the child's stderr reached end of stream (it exited, or
+    /// closed stderr): a non-blocking "is it gone?" for servers.
+    stderr_closed: std.atomic.Value(bool) = .init(false),
     /// Set once `wait` reaped the child; signals are no longer sent.
     reaped: std.atomic.Value(bool) = .init(false),
     term: ?std.process.Child.Term = null,
@@ -398,7 +402,7 @@ pub const AgentProc = struct {
             .cwd = if (cwd) |c| (if (c.len > 0) .{ .path = c } else .inherit) else .inherit,
             .environ_map = env,
             .stdin = if (opts.stdin) .pipe else .ignore,
-            .stdout = .pipe,
+            .stdout = if (opts.stdout) .pipe else .ignore,
             .stderr = .pipe,
             .pgid = 0,
         }) catch |err| switch (err) {
@@ -438,6 +442,7 @@ pub const AgentProc = struct {
             self.tail.push(pending.items);
             self.stderr_mutex.unlock(self.io);
         }
+        self.stderr_closed.store(true, .release);
     }
 
     /// The stderr tail so far (owned), or null.
