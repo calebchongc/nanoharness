@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, subcmd, "mcp")) {
-        try runMcpStdio(gpa, io);
+        try mcp_server.serveStdio(gpa, io, init.environ_map);
         return;
     }
     if (std.mem.eql(u8, subcmd, "login") or std.mem.eql(u8, subcmd, "logout") or std.mem.eql(u8, subcmd, "sync")) {
@@ -345,25 +345,6 @@ pub fn main(init: std.process.Init) !void {
             th.detach();
         } else |_| {
             ClientWorker.run(ctx);
-        }
-    }
-}
-
-fn runMcpStdio(gpa: Allocator, io: Io) !void {
-    var in_buf: [65536]u8 = undefined;
-    var out_buf: [65536]u8 = undefined;
-    var reader = Io.File.stdin().readerStreaming(io, &in_buf);
-    var writer = Io.File.stdout().writerStreaming(io, &out_buf);
-    const r = &reader.interface;
-    const w = &writer.interface;
-
-    while (true) {
-        const line = (r.takeDelimiter('\n') catch break) orelse break;
-        if (try mcp_server.handleMcpJsonRpcLine(gpa, line)) |resp| {
-            defer gpa.free(resp);
-            try w.writeAll(resp);
-            try w.writeByte('\n');
-            try w.flush();
         }
     }
 }
