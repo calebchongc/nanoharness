@@ -54,6 +54,12 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .link_libcpp = true,
     });
     for (include_dirs) |dir| mod.addIncludePath(dep.path(dir));
+    // Zig ships no iOS libc headers; libc++ needs the SDK's (as nanoui links its frameworks).
+    if (target.result.os.tag == .ios or (target.result.os.tag == .macos and !target.query.isNative())) {
+        if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
+            mod.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+        }
+    }
     mod.addCSourceFiles(.{ .root = dep.path(""), .files = &sources, .flags = &flags });
     return mod;
 }
