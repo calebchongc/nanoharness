@@ -56,7 +56,8 @@ if [[ "$ENGINE_VER" != "$VERSION" ]]; then
   echo "error: harness-engine version ($ENGINE_VER) != build.zig.zon version ($VERSION)" >&2
   exit 1
 fi
-if [[ "$(strings "$APP/Contents/MacOS/harness-nano" | grep -Fc "version = \"$VERSION\"" || true)" -lt 1 ]]; then
+# The Zig app embeds build.zig.zon's version as its own string (build_info).
+if [[ "$(strings "$APP/Contents/MacOS/harness-nano" | grep -Fxc "$VERSION" || true)" -lt 1 ]]; then
   echo "error: harness-nano binary does not embed version $VERSION (stale .zig-cache)" >&2
   exit 1
 fi
