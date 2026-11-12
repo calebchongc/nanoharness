@@ -61,7 +61,7 @@ pub fn checkFields(obj: json.ObjectMap, required: []const []const u8, optional: 
         if (!known) return "unknown field";
     }
     for (required) |r| {
-        const v = obj.get(r) orelse return "missing field";
+        const v = obj.get(r) orelse return @import("../rpcw_common.zig").errText("missing field `{s}`", .{r});
         if (v != .string) return "invalid type: expected a string";
     }
     for (optional) |o| if (obj.get(o)) |v| if (v != .string and v != .null) return "invalid type: expected a string";
@@ -426,7 +426,7 @@ test "ShowImage refuses bad params, other chats and files it may not publish" {
         @memcpy(big[0..8], png[0..8]);
         try t.tmp.dir.writeFile(testing.io, .{ .sub_path = "ws/big.png", .data = big });
     }
-    try t.expectErr("ShowImage", "{\"chatId\":\"chat-1\",\"id\":\"x\"}", "missing field");
+    try t.expectErr("ShowImage", "{\"chatId\":\"chat-1\",\"id\":\"x\"}", "missing field `path`");
     try t.expectErr("ShowImage", "{\"chatId\":\"chat-1\",\"id\":\"x\",\"path\":\"a.png\",\"extra\":1}", "unknown field");
     try t.expectErr("ShowImage", "{\"chatId\":\"nope\",\"id\":\"x\",\"path\":\"a.png\"}", "chat not found");
     try t.expectErr("ShowImage", "{\"chatId\":\"chat-1\",\"id\":\"bad id!\",\"path\":\"a.png\"}", "show_image id is invalid");

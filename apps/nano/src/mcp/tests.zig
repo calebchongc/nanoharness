@@ -1294,20 +1294,19 @@ test "mcp show_image and show_visual: origin chat only, bounded, minted ids, eng
     try expectErr(try f.call("show_visual", "{\"title\":\"t\",\"script\":\"s\",\"id\":\"x\"}"), "invalid arguments: unknown field `id`, expected `title` or `script`");
 
     f.t.origin = .{ .chat_id = "chat-alpha-1" };
-    const img = try ok(try f.call("show_image", "{\"path\":\"shots/after.png\",\"caption\":\"After\"}"));
-    try testing.expect(u.boolean(img, "attached").?);
+    // The engine attaches an image to the chat's running turn only; with
+    // none running it refuses, and the refusal reaches the caller.
+    try expectErr(try f.call("show_image", "{\"path\":\"shots/after.png\",\"caption\":\"After\"}"), "ShowImage: No active run accepts images for this chat");
     const sent = f.rec.last("ShowImage").?;
     try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
     try testing.expectEqual(@as(usize, 36), u.str(sent, "id").?.len);
-    try testing.expectEqualStrings(u.str(sent, "id").?, u.str(img, "id").?);
     try testing.expectEqualStrings("After", u.str(sent, "caption").?);
     try expectErr(try f.call("show_image", "{\"path\":\"   \"}"), "show_image path must be 1-4096 characters");
     const x201 = try repeat(f.arena.allocator(), "x", 201);
     const long_caption = try std.fmt.allocPrint(f.arena.allocator(), "{{\"path\":\"a.png\",\"caption\":\"{s}\"}}", .{x201});
     try expectErr(try f.call("show_image", long_caption), "show_image caption is limited to 200 characters");
 
-    const vis = try ok(try f.call("show_visual", "{\"title\":\"Overview\",\"script\":\"return function() return ui.text('hi') end\"}"));
-    try testing.expect(u.boolean(vis, "attached").?);
+    try expectErr(try f.call("show_visual", "{\"title\":\"Overview\",\"script\":\"return function() return ui.text('hi') end\"}"), "ShowVisual: No active run accepts visuals for this chat");
     try testing.expectEqualStrings("return function() return ui.text('hi') end", u.str(f.rec.last("ShowVisual").?, "script").?);
     try expectErr(try f.call("show_visual", "{\"title\":\" \",\"script\":\"x\"}"), "visual title must be nonblank and at most 200 characters");
     try expectErr(try f.call("show_visual", "{\"title\":\"t\",\"script\":\"\\n\\t\"}"), "visual script must be nonblank and at most 64 KiB of UTF-8");

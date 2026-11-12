@@ -114,7 +114,7 @@ test "ShowVisual returns Rust's errors for bad params and invalid scripts" {
     try t.init();
     defer t.deinit();
     try t.startRun();
-    try t.expectErr("ShowVisual", "{\"chatId\":\"chat-1\",\"id\":\"v\",\"title\":\"T\"}", "missing field");
+    try t.expectErr("ShowVisual", "{\"chatId\":\"chat-1\",\"id\":\"v\",\"title\":\"T\"}", "missing field `script`");
     try t.expectErr("ShowVisual", "{\"chatId\":\"chat-1\",\"id\":\"v\",\"title\":\"T\",\"script\":\"x\",\"style\":1}", "unknown field");
     try t.expectErr("ShowVisual", "{\"chatId\":\"nope\",\"id\":\"v\",\"title\":\"T\",\"script\":\"x\"}", "chat not found");
     try t.expectErr("ShowVisual", "{\"chatId\":\"chat-1\",\"id\":\"v v\",\"title\":\"T\",\"script\":\"x\"}", "show_visual id is invalid");
