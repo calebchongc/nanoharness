@@ -106,35 +106,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .ios) {
         exe.use_llvm = true;
         linkSqlite(b, exe.root_module, target);
-        const ios = @import("nanoui").ios;
-        const app_bundle = ios.app(b, exe, .{
-            .name = "Harness",
-            .id = "harness.codegraff.ios",
-            .version = manifest.version,
-            .multiple_windows = true,
-            .assets = b.path("assets/ios/Assets.xcassets"),
-            .info =
-                \\    <key>CFBundleURLTypes</key>
-                \\    <array>
-                \\        <dict>
-                \\            <key>CFBundleURLName</key>
-                \\            <string>harness.codegraff.ios</string>
-                \\            <key>CFBundleURLSchemes</key>
-                \\            <array><string>harness</string></array>
-                \\        </dict>
-                \\    </array>
-                \\    <key>NSAppTransportSecurity</key>
-                \\    <dict>
-                \\        <key>NSAllowsLocalNetworking</key>
-                \\        <true/>
-                \\    </dict>
-            ,
-        });
-        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-            .source_dir = app_bundle,
-            .install_dir = .prefix,
-            .install_subdir = "ios/Harness.app",
-        }).step);
+        // The Keychain (session_store.zig), push (ios_push.zig) and
+        // MetricKit (ios_crash_reports.zig).
+        for ([_][]const u8{ "Security", "UserNotifications", "MetricKit" }) |f| exe.root_module.linkFramework(f, .{});
+        iosBundle(b, exe, target, optimize);
         return;
     }
 
@@ -219,6 +194,126 @@ pub fn build(b: *std.Build) void {
         artifact.use_llvm = true;
         linkSqlite(b, artifact.root_module, target);
     }
+}
+
+/// The iOS app, `zig-out/ios/Harness.app` (and `zig build ipa`'s
+/// `zig-out/ios/Harness.ipa`), assembled from nanoui's pieces
+/// (`ios.infoPlist`, `ios.executable`, tools/ios/finish.sh) so the
+/// Info.plist can carry what `ios.app`'s options don't reach. The rules are
+/// src/ios_build_rules.zig's; docs/releases/nano-ios.md explains the options.
+fn iosBundle(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const ios = @import("nanoui").ios;
+    const rules = @import("src/ios_build_rules.zig");
+    const dep = b.dependency("nanoui", .{ .target = target, .optimize = optimize });
+    const t = target.result;
+    const simulator = t.abi == .simulator;
+
+    const id_option = b.option([]const u8, "ios-bundle-id", "Bundle identifier (default harness.codegraff.ios.nano; harness.codegraff.ios at the cutover)");
+    const display_option = b.option([]const u8, "ios-display-name", "Name under the icon (default by bundle id)");
+    const version = b.option([]const u8, "ios-version", "CFBundleShortVersionString (default build.zig.zon's version)") orelse manifest.version;
+    const build_number = b.option([]const u8, "ios-build-number", "CFBundleVersion, a TestFlight upload's build number (default the version)");
+    const identity = b.option([]const u8, "ios-identity", "Signing identity for a device build (from the environment, never committed)");
+    const profile = b.option([]const u8, "ios-profile", "Provisioning profile path for a device build");
+    const team = b.option([]const u8, "ios-team", "Team id (default the one in testflight.yml)");
+    const adhoc = b.option(bool, "ios-adhoc", "Device build signed ad hoc: a compile check that won't install") orelse false;
+    const distribution = b.option(bool, "ios-distribution", "App Store / TestFlight signing (production push)") orelse false;
+    const widgets = b.option([]const u8, "ios-widgets-appex", "A signed HarnessWidgets.appex from Xcode, embedded in PlugIns/");
+
+    const ipa_step = b.step("ipa", "Package a signed device build as zig-out/ios/Harness.ipa");
+    const bundle_id = rules.bundleId(id_option) catch {
+        const fail = b.addFail(b.fmt("-Dios-bundle-id={s} isn't a bundle identifier (reverse DNS: letters, digits, hyphens)", .{id_option.?}));
+        b.getInstallStep().dependOn(&fail.step);
+        ipa_step.dependOn(&fail.step);
+        return;
+    };
+    const signing = switch (rules.signingPlan(.{
+        .simulator = simulator,
+        .identity = identity,
+        .profile = profile,
+        .team = team,
+        .adhoc = adhoc,
+        .distribution = distribution,
+    })) {
+        .fail => |why| {
+            const fail = b.addFail(b.fmt("ios: {s}", .{why}));
+            b.getInstallStep().dependOn(&fail.step);
+            ipa_step.dependOn(&fail.step);
+            return;
+        },
+        .sign => |s| s,
+    };
+
+    const opts: ios.Options = .{
+        .name = "Harness",
+        .id = bundle_id,
+        .version = version,
+        .multiple_windows = true,
+        .info = rules.extraInfo(b.allocator, .{ .bundle_id = bundle_id, .live_activities = widgets != null }) catch @panic("OOM"),
+    };
+    // What Xcode would stamp: App Store Connect checks a device build's SDK
+    // and Xcode by these keys.
+    const dt: ?[]const u8 = if (simulator) null else rules.dtKeys(b.allocator, .{
+        .sdk_version = b.run(&.{ "xcrun", "--sdk", "iphoneos", "--show-sdk-version" }),
+        .sdk_build = b.run(&.{ "xcrun", "--sdk", "iphoneos", "--show-sdk-build-version" }),
+        .xcodebuild_version = b.run(&.{ "xcodebuild", "-version" }),
+        .os_build = b.run(&.{ "sw_vers", "-buildVersion" }),
+    }) catch |err| std.debug.panic("ios: can't read Xcode's version for DTXcode: {t}", .{err});
+    const info = rules.patchInfo(b.allocator, ios.infoPlist(b, exe.name, t, opts), .{
+        .display_name = rules.displayName(display_option, bundle_id),
+        .version = version,
+        .build_number = build_number,
+        .dt = dt,
+    }) catch |err| std.debug.panic("ios: nanoui's Info.plist changed shape ({t}); update src/ios_build_rules.zig patchInfo", .{err});
+
+    const wf = b.addWriteFiles();
+    _ = wf.add("Harness.app/Info.plist", info);
+    _ = wf.addCopyFile(ios.executable(b, exe), b.fmt("Harness.app/{s}", .{exe.name}));
+    if (widgets) |appex| _ = wf.addCopyDirectory(.{ .cwd_relative = appex }, "Harness.app/PlugIns/HarnessWidgets.appex", .{});
+    const made = wf.getDirectory().path(b, "Harness.app");
+    const entitlements = b.addWriteFiles().add("Harness.entitlements", rules.entitlementsPlist(b.allocator, signing, bundle_id) catch @panic("OOM"));
+
+    // The asset catalog, compiled as nanoui's `ios.app` does it.
+    const min = t.os.version_range.semver.min;
+    const actool = b.addSystemCommand(&.{ "xcrun", "actool", "--notices", "--warnings", "--errors", "--output-format", "human-readable-text" });
+    actool.addArgs(&.{ "--platform", if (simulator) "iphonesimulator" else "iphoneos", "--minimum-deployment-target", b.fmt("{d}.{d}", .{ min.major, min.minor }) });
+    actool.addArgs(&.{ "--target-device", "iphone", "--target-device", "ipad", "--app-icon", "AppIcon", "--output-partial-info-plist" });
+    const partial = actool.addOutputFileArg("partial.plist");
+    actool.addArg("--compile");
+    const compiled = actool.addOutputDirectoryArg("compiled");
+    actool.addDirectoryArg(b.addWriteFiles().addCopyDirectory(b.path("assets/ios/Assets.xcassets"), "Assets.xcassets", .{}));
+
+    const finish = std.Build.Step.Run.create(b, "finish Harness.app");
+    var finished: ?std.Build.LazyPath = null;
+    for (rules.finishArgv(signing)) |arg| switch (arg) {
+        .text => |text| finish.addArg(text),
+        .finish_script => finish.addFileArg(dep.path("tools/ios/finish.sh")),
+        .bundle_in => finish.addDirectoryArg(made),
+        .bundle_out => finished = finish.addOutputDirectoryArg("Harness.app"),
+        .profile => finish.addFileArg(.{ .cwd_relative = signing.profile.? }),
+        .entitlements => finish.addFileArg(entitlements),
+        .catalog => finish.addDirectoryArg(compiled),
+        .catalog_plist => finish.addFileArg(partial),
+        .signed_bundle, .ipa_out => unreachable,
+    };
+    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+        .source_dir = finished.?,
+        .install_dir = .prefix,
+        .install_subdir = "ios/Harness.app",
+    }).step);
+
+    if (rules.ipaRefusal(signing)) |why| {
+        ipa_step.dependOn(&b.addFail(b.fmt("ios: {s}", .{why})).step);
+        return;
+    }
+    const package = std.Build.Step.Run.create(b, "package Harness.ipa");
+    var ipa: ?std.Build.LazyPath = null;
+    for (rules.ipaArgv()) |arg| switch (arg) {
+        .text => |text| package.addArg(text),
+        .signed_bundle => package.addDirectoryArg(finished.?),
+        .ipa_out => ipa = package.addOutputFileArg("Harness.ipa"),
+        else => unreachable,
+    };
+    ipa_step.dependOn(&b.addInstallFile(ipa.?, "ios/Harness.ipa").step);
 }
 
 /// SQLite for `module` (docs_store.zig): the SDK's libsqlite3 on Apple
