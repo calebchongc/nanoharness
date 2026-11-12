@@ -61,7 +61,10 @@ Fixed in Zig, each with a test that fails without it:
    prefetched. `remote_tail.zig` now drops the cached tail when a remote
    chat's `chats`/`sessions` row changes, prefetches open-but-empty chats, and
    the host now PUTs its tails before it pushes the rows that announce them.
-   Tests: the three `remote tail:` tests.
+   Only rows from the edge count: the saved registry an engine replays at
+   start keeps its saved tails. Tests: the three `remote tail:` tests, and the
+   existing `Zero-latency SSD registry-cache.json + tail disk cache
+   round-trip` for the replay.
 
 Open:
 
@@ -98,6 +101,16 @@ Worker behaviour the engine follows, not mismatches:
 - Without Hyperdrive, dev auth keeps agent rooms in the Worker's in-memory
   store, so an edge restart empties them. Step 8 doesn't check rooms.
 
+## The Zig test suite
+
+One full `zig build test` run on this branch: 1332 of 1339 passed, 2 skipped,
+5 failed. The registry-cache round-trip failure came from fix 3 and is fixed
+(the replay rule above). The other four fail the same way with the base
+commit's sources: `catalog_graff an older graff without the extension uses
+route and models`, the two `catalog_devin` catalog tests, and `git_host: a
+folder git can't read answers git's own error` (crashes). None of them touch
+the code changed here.
+
 ## `up`
 
 `scripts/local-edge.sh up --phone` leaves the local edge, engine A (signed
@@ -119,18 +132,18 @@ from the Worker.
 ## Last run
 
 <!-- local-edge:run:begin -->
-Last `scripts/local-edge.sh check` run: commit `b69f242e`, harness-engine 0.2.186, Zig 0.17.0, Node v24.10.0, wrangler 4.120.0 (the lockfile's).
+Last `scripts/local-edge.sh check` run: commit `36203a1f`, harness-engine 0.2.186, Zig 0.17.0, Node v24.10.0, wrangler 4.120.0 (the lockfile's). Passed; run 3 of 3 in a row.
 
 | Step | | Result | Time | Detail |
 |---|---|---|---|---|
 | 1 | local edge starts on fresh persisted state | pass | 1.2 s | wrangler dev --local, dev auth, 2 loopback ports |
-| 2 | engine A (Zig) starts against it | pass | 0.7 s | harness-engine 0.2.186, scope development |
-| 3 | A signs in, org, device registered | pass | 0.0 s | CLI status ok; AuthStatus signedIn ada-tv879n in user-ada-tv879n (= /auth/orgs); engine ListOrgs [] (dev mode); org creation not offered by the Worker (405); device row + relay host online (1 socket) |
-| 4 | A: project, mock chat, turn, transcript | pass | 0.5 s | 2 messages read back, assistant complete, 2 tool parts |
+| 2 | engine A (Zig) starts against it | pass | 0.6 s | harness-engine 0.2.186, scope development |
+| 3 | A signs in, org, device registered | pass | 0.0 s | CLI status ok; AuthStatus signedIn ada-pvio0o in user-ada-pvio0o (= /auth/orgs); engine ListOrgs [] (dev mode); org creation not offered by the Worker (405); device row + relay host online (1 socket) |
+| 4 | A: project, mock chat, turn, transcript | pass | 0.1 s | 2 messages read back, assistant complete, 2 tool parts |
 | 5 | the Worker holds the chat row and its history | pass | 0.5 s | chats row (title "Summarise the synthetic demo repo", host A), spaces row present; /chat2/:id/tail 2 messages with the turn; chat2 log headSeq 0 |
 | 6 | engine B: lists, reads, relays a prompt to A | pass | 2.7 s | B lists "Summarise the synthetic demo repo" hosted on A and reads it; B's prompt ran on A, reply on B, Worker tail has both turns |
 | 7 | rooms, tool blob, attachment | pass | 0.1 s | room: B read A's post; tool blob: skipped, no turn produced one (the Zig engine uploads no tool sidecars); FetchToolBlob of a Worker-held blob ok; attachment: landed in A's uploads, relayed prompt ran on A |
-| 8 | edge and A restart on the same state | pass | 2.8 s | A signed in again (dev bearer), chat + both turns local, Worker tail + rows persisted, a rename synced |
+| 8 | edge and A restart on the same state | pass | 2.3 s | A signed in again (dev bearer), chat + both turns local, Worker tail + rows persisted, a rename synced |
 | 9 | everything stopped, no process or port left | pass | 0.3 s | 3 process groups stopped; 14 ports closed |
 
 Non-loopback connections seen from the edge and engines during the run: none.
