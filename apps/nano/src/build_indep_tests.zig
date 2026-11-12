@@ -39,3 +39,23 @@ test "the build's version comes from build.zig.zon, a real release number" {
     try testing.expect(!std.mem.eql(u8, version, "0.0.0"));
     try testing.expect(!std.mem.eql(u8, version, "0.0.1"));
 }
+
+test "the README builds, runs and tests with the Zig engine, never the Rust one" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, @import("parity_options").nano_dir, .{});
+    defer dir.close(io);
+    const text = try dir.readFileAlloc(io, "README.md", gpa, .limited(1 << 20));
+    defer gpa.free(text);
+    // Everything before the optional GPUI comparison is the Zig-only path.
+    const optional = std.mem.indexOf(u8, text, "## Checking it against the GPUI app (optional, needs Rust)") orelse return error.MissingOptionalSection;
+    const zig_only = text[0..optional];
+    for ([_][]const u8{ "harness headless", "cargo ", "MacOS/harness ", "crates/rpc", "the Rust runner sends" }) |stale| {
+        if (std.mem.indexOf(u8, zig_only, stale)) |at| {
+            std.debug.print("README still says \"{s}\" at byte {d}\n", .{ stale, at });
+            return error.StaleRustInstruction;
+        }
+    }
+    try testing.expect(std.mem.indexOf(u8, zig_only, "harness-engine headless") != null);
+    try testing.expect(std.mem.indexOf(u8, zig_only, "zig build no-rust") != null);
+}
