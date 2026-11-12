@@ -7260,19 +7260,22 @@ test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectO
     defer gpa.free(cg_out.unary_json);
     try testing.expect(std.mem.indexOf(u8, cg_out.unary_json, "https://codegraff.example/cli/auth?code=ABCD-1234") != null);
 
+    // The poll runs every second over loopback; give it 10 s on a busy machine.
     var poll_tries: usize = 0;
-    while (poll_tries < 30) : (poll_tries += 1) {
+    while (poll_tries < 100) : (poll_tries += 1) {
         host.mutex.lockUncancelable(io);
         const updated = if (host.auth.codegraff_email) |em| std.mem.eql(u8, em, "grace@example.com") else false;
         host.mutex.unlock(io);
         if (updated) break;
         std.Io.sleep(io, .fromMilliseconds(100), .awake) catch break;
     }
+    // Unlock on failure too: a poll still running would block on the lock
+    // and `host.deinit` would wait for it forever.
     host.mutex.lockUncancelable(io);
+    defer host.mutex.unlock(io);
     try testing.expectEqualStrings("grace@example.com", host.auth.codegraff_email.?);
     try testing.expectEqualStrings("cg_sk_synthetic_device_2", host.auth.codegraff_api_key.?);
     try testing.expect(!host.auth.codegraff_pending);
-    host.mutex.unlock(io);
 }
 
 test "harness-updates-v1 capability and stateful Watch/Check/Policy/Dismiss/Apply/Cancel lifecycle" {
