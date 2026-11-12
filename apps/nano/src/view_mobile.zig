@@ -55,6 +55,7 @@ pub const Sheet = enum {
     write_dock,
     settings,
     session_switcher,
+    profile,
 };
 
 pub const State = struct {
@@ -82,6 +83,12 @@ pub const State = struct {
     effort_idx: usize = 2, // 0=low, 1=medium, 2=high
     last_frame_sec: f64 = 0,
     telemetry: ios_scroll.ScrollTelemetry = .{},
+    /// The account: sign-in, organizations, deletion (app_mobile_auth.zig).
+    auth: @import("app_mobile_auth.zig").State = .{},
+    /// `HARNESS_MOBILE_SCREEN` read (a capture's pinned screen, demo only).
+    preview_read: bool = false,
+    /// Running on the demo's made-up data (`--demo`): Profile says so.
+    demo: bool = false,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         @import("text_buffer.zig").deinit(&s.search_query);
@@ -171,6 +178,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
 
     const rt = c.access.reduce_transparency;
+    if (!a.mobile.preview_read) {
+        a.mobile.preview_read = true;
+        if (a.env) |env| if (env.get("HARNESS_MOBILE_SCREEN")) |which| @import("view_mobile_preview.zig").apply(a, which);
+    }
+    if (@import("view_mobile_signin.zig").gate(a, c, k, rt)) return;
     const split = ios_scroll.shouldSplitPhone(c.size.w, a.mobile.split_mode, c.size.w >= 660.0);
 
     {
@@ -208,6 +220,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (a.mobile.sheet != .none) {
         renderSheetOverlay(a, c, k, rt);
     }
+    @import("view_mobile_profile.zig").overlays(a, c, k);
 
     const t_end = std.Io.Clock.awake.now(a.io);
     const work_ns: f64 = @floatFromInt(t_start.durationTo(t_end).toNanoseconds());
@@ -352,6 +365,17 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
 
         if (mg.circleButton(c, "ios-home-settings-btn", .home_customize_circle, .@"settings-minimalistic", k.text, rt, null).clicked) {
             a.mobile.sheet = .settings;
+        }
+        {
+            // Profile: the account's initial in a glass circle (ProfileView's person button).
+            ui.key(c, "ios-home-profile-btn");
+            const side = mg.spec(.home_customize_circle).min_height_pt;
+            const pb = mg.styleGlassDiv(c, ui.div(c).row().center().w(side).h(side).control(), .home_customize_circle, rt, ui.Color.transparent, null);
+            defer pb.end();
+            const line: []const u8 = if (a.account.user) |u| (u.name orelse u.email) else "?";
+            const initial = [1]u8{@import("app_account.zig").initial(line)};
+            ui.text(c, c.print("{s}", .{&initial}), .{ .size = 15, .weight = .semibold, .color = k.text });
+            if (pb.clicked()) a.mobile.sheet = .profile;
         }
 
         // Horizontally scrollable `.scrollX()` Liquid Glass filter & Zen pills
@@ -1175,6 +1199,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
             .write_dock => "Compose",
             .settings => "Settings & Telemetry",
             .session_switcher => "Switch Session",
+            .profile => "Profile",
             .none => "",
         };
         ui.text(c, title, .{ .size = 17, .weight = .bold, .color = k.text });
@@ -1188,6 +1213,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
         .write_dock => renderWriteDockSheet(a, c, k, rt),
         .settings => renderSettingsSheet(a, c, k, rt),
         .session_switcher => renderSwitcherSheet(a, c, k),
+        .profile => @import("view_mobile_profile.zig").render(a, c, k),
         .none => {},
     }
 }

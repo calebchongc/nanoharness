@@ -1464,6 +1464,8 @@ pub const AuthManager = struct {
                     return try self.gpa.dupe(u8, resp.body);
                 }
             } else |_| {}
+            // A configured edge that didn't answer has no organizations to offer.
+            return error.ListOrgsFailed;
         }
         return self.gpa.dupe(
             u8,
@@ -1489,7 +1491,9 @@ pub const AuthManager = struct {
             var resp = try edgeRequestPooled(&self.h2_pool, self.gpa, rio, "POST", url, null, &.{}, req_body);
             defer resp.deinit(self.gpa);
             if (self.generation != gen_at_start) return error.SignInCanceled;
-            if (resp.status == 200) {
+            // The edge refused the organization: not signed in to it.
+            if (resp.status != 200) return error.SelectOrgFailed;
+            {
                 var parsed = try json.parseFromSlice(json.Value, self.gpa, resp.body, .{});
                 defer parsed.deinit();
                 if (parsed.value == .object) {
@@ -1629,6 +1633,16 @@ pub const AuthManager = struct {
         self.lost_session_marker = true;
         self.removeSessionFile(io);
         return false;
+    }
+
+    /// Tokens the edge rotated on a refused account deletion replace the
+    /// stored pair (AccountDeletion.swift `refused(tokens:)`).
+    pub fn adoptRotatedTokens(self: *AuthManager, io: std.Io, access: []const u8, refresh: []const u8) void {
+        if (access.len == 0 or refresh.len == 0) return;
+        self.replaceOptStr(&self.access_token, access) catch return;
+        self.replaceOptStr(&self.refresh_token, refresh) catch return;
+        self.access_expires_at_ms = 0;
+        self.persistSessionFile(io);
     }
 
     pub fn signInWithKey(self: *AuthManager, key: []const u8) !void {

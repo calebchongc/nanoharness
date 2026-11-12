@@ -292,6 +292,8 @@ pub const RpcMethod = enum {
     RemoveAgentAccount,
     SignInWithKey,
     SwitchAgentAccount,
+    // The phone's own (not in the reference engine's contract):
+    DeleteAccount,
 };
 
 pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
@@ -459,6 +461,8 @@ pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
     .{ "RemoveAgentAccount", .RemoveAgentAccount },
     .{ "SignInWithKey", .SignInWithKey },
     .{ "SwitchAgentAccount", .SwitchAgentAccount },
+    // The phone's own (not in the reference engine's contract):
+    .{ "DeleteAccount", .DeleteAccount },
 });
 
 /// All 17 `MutateParams` `op` variants from `crates/engine/src/rpc.rs`,
@@ -1730,6 +1734,53 @@ pub const EngineHost = struct {
         return .{ .stream_items_json = .{ .checked = checked, .items = items } };
     }
 
+    fn mobileSignIn(params: json.Value) bool {
+        const obj = requireObj(params) orelse return false;
+        const v = obj.get("mobile") orelse return false;
+        return v == .bool and v.bool;
+    }
+
+    /// `DeleteAccount`: the edge's `POST /auth/account/delete` with both
+    /// halves of the sign-in (AuthClient.swift `deleteAccount`). Deleted:
+    /// signed out here as `SignOut` does. Refused: the tokens the edge
+    /// rotated replace the stored pair, and the message is the Swift app's
+    /// (`mobile_parity.parseAccountDeletion`).
+    fn deleteAccount(self: *EngineHost) !RpcOutcome {
+        const mp = @import("mobile_parity.zig");
+        const reply = struct {
+            fn refused(gpa: Allocator, message: []const u8) !RpcOutcome {
+                return .{ .unary_json = try std.fmt.allocPrint(gpa, "{{\"deleted\":false,\"message\":{f}}}", .{json.fmt(message, .{})}) };
+            }
+        };
+        const io = self.io orelse return reply.refused(self.gpa, mp.account_unreachable_copy);
+        if (self.auth.codegraff_client_id == null or self.auth.refresh_token == null or self.auth.edge_url == null)
+            return reply.refused(self.gpa, mp.account_no_account_copy);
+        const token = self.auth.ensureAccessToken(io, false) orelse return reply.refused(self.gpa, mp.account_no_account_copy);
+        const token_copy = try self.gpa.dupe(u8, token);
+        defer self.gpa.free(token_copy);
+        const rt = self.auth.refresh_token orelse return reply.refused(self.gpa, mp.account_no_account_copy);
+        const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/account/delete", .{std.mem.trimEnd(u8, self.auth.edge_url.?, "/")});
+        defer self.gpa.free(url);
+        const body = try std.fmt.allocPrint(self.gpa, "{{\"refreshToken\":{f},\"confirm\":\"delete\"}}", .{json.fmt(rt, .{})});
+        defer self.gpa.free(body);
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", url, token_copy, &.{}, body) catch
+            return reply.refused(self.gpa, mp.account_unreachable_copy);
+        defer resp.deinit(self.gpa);
+        var arena: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena.deinit();
+        switch (try mp.parseAccountDeletion(arena.allocator(), resp.status, resp.body)) {
+            .deleted => {
+                const out = try self.handleWithId(0, "SignOut", .{ .object = .empty });
+                if (out == .unary_json) self.gpa.free(out.unary_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
+            },
+            .refused => |r| {
+                if (r.tokens) |t| self.auth.adoptRotatedTokens(io, t.access_token, t.refresh_token);
+                return reply.refused(self.gpa, r.message);
+            },
+        }
+    }
+
     fn requireObj(params: json.Value) ?json.ObjectMap {
         return if (params == .object) params.object else null;
     }
@@ -1782,6 +1833,25 @@ pub const EngineHost = struct {
                 );
             },
             .SignIn => {
+                // The phone's browser step (`{"mobile":true}`): the edge's iOS
+                // redirect hands `harness://callback` back to the app, which
+                // completes it with `CompleteSignIn`; no loopback listener.
+                if (self.auth.codegraff_client_id != null and self.io != null and mobileSignIn(params)) {
+                    if (self.oauth_capture) |old_cap| {
+                        self.oauth_capture = null;
+                        old_cap.cancel();
+                    }
+                    var rbuf: [512]u8 = undefined;
+                    const redirect_uri = @import("mobile_auth.zig").redirectUri(&rbuf, self.auth.edge_url orelse auth_host.default_edge_url);
+                    const url = try self.auth.startBrowserSignIn(self.io.?, redirect_uri);
+                    defer self.gpa.free(url);
+                    self.workspace_scope = "synced";
+                    return .{ .unary_json = try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
+                        .{json.fmt(url, .{})},
+                    ) };
+                }
                 if (self.auth.codegraff_client_id != null) {
                     if (self.oauth_capture) |old_cap| {
                         self.oauth_capture = null;
@@ -1934,6 +2004,7 @@ pub const EngineHost = struct {
                     .{ self.auth.signed_in, json.fmt(self.auth.email, .{}), self.auth.codegraff_connected },
                 ) };
             },
+            .DeleteAccount => return self.deleteAccount(),
             .SignInWithKey => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const key = requireStr(obj, "apiKey") orelse requireStr(obj, "key") orelse return .{ .err = .{ .bad_params = "missing apiKey" } };
@@ -2299,14 +2370,18 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
             },
             .ListOrgs => {
-                return .{ .unary_json = try self.auth.listOrgsJson(self.io) };
+                const orgs = self.auth.listOrgsJson(self.io) catch return .{ .err = .{ .exec_error = "couldn't list your organizations" } };
+                return .{ .unary_json = orgs };
             },
             .CreateOrg, .SelectOrg => {
                 const org_id = if (requireObj(params)) |obj|
                     (requireStr(obj, "organizationId") orelse requireStr(obj, "id") orelse requireStr(obj, "name") orelse "org-personal")
                 else
                     "org-personal";
-                try self.auth.selectOrg(self.io, org_id);
+                self.auth.selectOrg(self.io, org_id) catch |e| switch (e) {
+                    error.SignInCanceled => return .{ .err = .{ .exec_error = "sign-in canceled" } },
+                    else => return .{ .err = .{ .exec_error = "couldn't switch to that organization" } },
+                };
                 self.workspace_scope = "synced";
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
@@ -6409,7 +6484,7 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
     const a = arena.allocator();
 
     // 1. Verify O(1) static map contains all 158 canonical Rust RPC methods + 5 compatibility aliases = 163.
-    try testing.expectEqual(@as(usize, 163), rpc_method_map.kvs.len);
+    try testing.expectEqual(@as(usize, 164), rpc_method_map.kvs.len);
 
     var host = try EngineHost.init(gpa, "dev-parity", "ParityHost");
     defer host.deinit();
