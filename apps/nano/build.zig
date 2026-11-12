@@ -243,6 +243,11 @@ fn iosBundle(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.Reso
         .sign => |s| s,
     };
 
+    // The Simulator's entitlements go in the program (ios_ship.zig).
+    const build_opts = b.addOptions();
+    build_opts.addOption([]const u8, "simulated_entitlements", if (simulator) rules.simulatedEntitlementsPlist(b.allocator, signing.team, bundle_id) catch @panic("OOM") else "");
+    exe.root_module.addOptions("ios_build", build_opts);
+
     const opts: ios.Options = .{
         .name = "Harness",
         .id = bundle_id,

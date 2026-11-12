@@ -1646,6 +1646,7 @@ pub const AuthManager = struct {
     }
 
     pub fn signOutWithIo(self: *AuthManager, io: ?std.Io) void {
+        if (comptime builtin.os.tag == .ios) @import("ios_push.zig").runtime.signingOut(self, io);
         self.generation +%= 1;
         if (self.api_key) |old| {
             self.gpa.free(old);

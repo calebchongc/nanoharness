@@ -8,6 +8,7 @@ const auth_host = @import("auth_host.zig");
 test {
     _ = @import("ios_build_rules.zig");
     _ = session_store;
+    _ = @import("ios_push.zig");
 }
 
 test "auth_host restores, migrates and signs out through the session store" {

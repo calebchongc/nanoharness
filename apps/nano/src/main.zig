@@ -110,5 +110,6 @@ pub fn main(init: std.process.Init) !void {
     a.release.done = .{ .ctx = &a, .func = App.releaseCame };
     a.release.start();
     @import("graff_update.zig").start(&a);
+    if (comptime builtin.os.tag == .ios) @import("ios_ship.zig").start(init.gpa, init.io, &a, embedded_host.?, demo_flag);
     try app.run();
 }

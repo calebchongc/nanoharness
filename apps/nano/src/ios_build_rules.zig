@@ -183,6 +183,34 @@ pub const Arg = union(enum) {
     ipa_out,
 };
 
+/// The Simulator's entitlements, as Xcode gives them: not in the signature
+/// (see `signsEntitlements`) but in the program's `__TEXT,__entitlements`
+/// section, which the Simulator reads instead. Without an application
+/// identifier the Simulator's Keychain refuses every SecItem call.
+pub fn simulatedEntitlementsPlist(gpa: Allocator, team: []const u8, bundle_id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\  <key>application-identifier</key><string>{s}.{s}</string>
+        \\  <key>keychain-access-groups</key><array><string>{s}.{s}</string></array>
+        \\  <key>aps-environment</key><string>development</string>
+        \\</dict>
+        \\</plist>
+        \\
+    , .{ team, bundle_id, team, bundle_id });
+}
+
+/// Whether the signature carries the entitlements. Not the Simulator's: its
+/// app runs as a Mac process, and the Mac refuses to start one whose ad hoc
+/// signature claims a restricted entitlement such as `aps-environment`
+/// (launchd: "Launchd job spawn failed", POSIX 163). `simctl push` needs no
+/// entitlement.
+pub fn signsEntitlements(kind: Kind) bool {
+    return kind != .simulator;
+}
+
 /// The command that finishes the bundle: nanoui's tools/ios/finish.sh
 /// (`finish.sh IN OUT IDENTITY PROFILE ENTITLEMENTS COMPILED PARTIAL`),
 /// which merges the compiled catalog, embeds the profile, signs from the
@@ -197,7 +225,7 @@ pub fn finishArgv(s: Signing) [9]Arg {
         .bundle_out,
         .{ .text = s.identity },
         if (s.profile != null) .profile else .{ .text = "" },
-        .entitlements,
+        if (signsEntitlements(s.kind)) .entitlements else .{ .text = "" },
         .catalog,
         .catalog_plist,
     };
@@ -453,6 +481,10 @@ test "the finishing argv signs with the identity and embeds the profile only whe
     const sim = finishArgv(signingPlan(.{ .simulator = true }).sign);
     try testing.expectEqualStrings("-", sim[4].text);
     try testing.expectEqualStrings("", sim[5].text);
+    // The Simulator's ad hoc signature carries no entitlements: it wouldn't start.
+    try testing.expectEqualStrings("", sim[6].text);
+    const check = finishArgv(signingPlan(.{ .simulator = false, .adhoc = true }).sign);
+    try testing.expectEqual(Arg.entitlements, check[6]);
 }
 
 test "an ipa only comes from a real signature, zipped as Payload/Harness.app" {
@@ -491,6 +523,13 @@ test "entitlements: push always, production only for distribution, no extra keyc
     try testing.expect(std.mem.indexOf(u8, dist, "<key>beta-reports-active</key><true/>") != null);
     // The Swift app declares no Keychain sharing: the default group it is.
     for ([_][]const u8{ sim, dev, dist }) |text| try testing.expect(std.mem.indexOf(u8, text, "keychain-access-groups") == null);
+}
+
+test "the Simulator's entitlements name the app, for its Keychain" {
+    const text = try simulatedEntitlementsPlist(testing.allocator, "ABCDE12345", nano_bundle_id);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "<key>application-identifier</key><string>ABCDE12345.harness.codegraff.ios.nano</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "<array><string>ABCDE12345.harness.codegraff.ios.nano</string></array>") != null);
 }
 
 test "Info.plist extras: export compliance, the sign-in scheme, every privacy reason, nothing nanoui writes" {
