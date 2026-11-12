@@ -416,6 +416,14 @@ const STEP_FNS = {
     if (session.status !== 200 || session.json?.mode !== "local" || session.json?.userId !== run.state.identity.user) {
       throw new Error("the configured local session was not verified by the Worker");
     }
+    const protectedUrl = `${edgeUrl(run)}/registry/${run.state.identity.org}/rows`;
+    if ((await http("GET", protectedUrl)).status !== 401) throw new Error("registry accepted a missing bearer");
+    if ((await http("GET", protectedUrl, { bearer: run.state.identity.bearer })).status !== 200) {
+      throw new Error("registry rejected the session's permitted org");
+    }
+    if ((await http("GET", `${edgeUrl(run)}/registry/org-other-synthetic/rows`, { bearer: run.state.identity.bearer })).status !== 403) {
+      throw new Error("registry accepted a cross-org local session");
+    }
     // A live local Worker must still reject an engine with a forged session.
     for (const sub of ["home", "data"]) fs.mkdirSync(run.p("rejected", sub), { recursive: true });
     run.state.ports.rejected = await freePort();
@@ -426,7 +434,7 @@ const STEP_FNS = {
     if (rejected.error || rejected.status === 0 || !rejected.stderr.includes("InvalidLocalSession")) {
       throw new Error(`engine did not reject a forged local session (exit ${rejected.status})`);
     }
-    return { reason: `wrangler dev --local; missing/forged/stale sessions rejected; forged-session engine refused startup; ${Object.keys(run.state.ports).length} loopback ports` };
+    return { reason: `wrangler dev --local; missing/forged/stale sessions rejected; registry no-bearer 401, own-org 200, cross-org 403; forged-session engine refused startup; ${Object.keys(run.state.ports).length} loopback ports` };
   },
 
   async 2(ctx) {

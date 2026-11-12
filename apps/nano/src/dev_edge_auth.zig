@@ -83,6 +83,7 @@ test "dev edge auth: a bearer alone cannot bypass production or unavailable loca
         configure(&auth, testing.io, AuthEnv.from(&env), null, null) catch {};
         try testing.expect(!auth.signed_in);
         try testing.expect(auth.api_key == null);
+        try testing.expect(auth.edge_url == null);
     }
 }
 
@@ -99,6 +100,29 @@ test "dev edge auth: explicitly local auth never signs in without a live session
     configure(&auth, testing.io, AuthEnv.from(&env), null, null) catch {};
     try testing.expect(!auth.signed_in);
     try testing.expect(auth.api_key == null);
+    try testing.expect(auth.edge_url == null);
+}
+
+test "dev edge auth: normal defaults stay production; local auth needs an explicit URL and session" {
+    var env = try envWith(&.{});
+    defer env.deinit();
+    const normal = AuthEnv.from(&env);
+    try testing.expect(normal.codegraffEnabled());
+    try testing.expectEqualStrings(auth_host.default_edge_url, normal.edge_url);
+    try env.put("HARNESS_LOCAL_EDGE_AUTH", "1");
+    var auth = try auth_host.AuthManager.init(testing.allocator);
+    defer auth.deinit();
+    try testing.expectError(error.MissingLocalSession, configure(&auth, testing.io, AuthEnv.from(&env), null, null));
+    try env.put("HARNESS_EDGE_TOKEN", "synthetic-session");
+    // Omitted and blank URLs both default to production in the shared config,
+    // but are never eligible for the explicitly local authentication path.
+    for ([_][]const u8{ "", "   " }) |url| {
+        try env.put("HARNESS_EDGE_URL", url);
+        try testing.expectError(error.LocalAuthRequiresLoopback, configure(&auth, testing.io, AuthEnv.from(&env), null, null));
+        try testing.expect(!auth.signed_in);
+        try testing.expect(auth.api_key == null);
+        try testing.expect(auth.edge_url == null);
+    }
 }
 
 test "dev edge auth: auth turned off configures no edge" {
