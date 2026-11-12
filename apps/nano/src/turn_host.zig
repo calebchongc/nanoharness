@@ -135,6 +135,8 @@ fn reqStr(obj: json.ObjectMap, key: []const u8) ?[]const u8 {
 /// `io` (or for graff without a configured graff binary, as before) the
 /// engine acknowledges in place.
 pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, prompt: []const u8, cwd: []const u8, req: json.ObjectMap) anyerror!void {
+    // Whether this turn answers peer mail only: any origin but a person's.
+    if (findChat(host, chat_id)) |c| c.running_turn_peer_only = if (reqStr(req, "turnOrigin")) |o| !std.mem.eql(u8, o, "human") else false;
     setPaused(host.io orelse return ackInPlace(host, chat_id, asst_id, prompt), chat_id, false);
     const chat = findChat(host, chat_id);
     const harness = reqStr(req, "harness") orelse (if (chat) |c| (if (c.harness.len > 0) c.harness else null) else null) orelse "graff";
@@ -240,6 +242,15 @@ pub fn finishTurn(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, j
             if (host.gpa.dupe(u8, prev_slice)) |p_copy| {
                 if (c.preview) |old_p| host.gpa.free(old_p);
                 c.preview = p_copy;
+            } else |_| {}
+        }
+        // A successful turn advances the session's completion marker; an
+        // interrupt or a failure never does (`set_status_with_completion`).
+        if (std.mem.eql(u8, journal_status, "complete") and std.mem.eql(u8, activity, "idle")) {
+            if (host.gpa.dupe(u8, asst_id)) |turn| {
+                if (c.last_completed_turn) |old| host.gpa.free(old);
+                c.last_completed_turn = turn;
+                c.last_completed_peer_only = c.running_turn_peer_only;
             } else |_| {}
         }
         setActivity(host, c, activity, finish_now);

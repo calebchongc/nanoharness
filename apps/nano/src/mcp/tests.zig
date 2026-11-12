@@ -249,13 +249,24 @@ const World = struct {
 // ---- fixtures -------------------------------------------------------------------------
 
 /// A Claude Code CLI stand-in (stream-json over stdio): one text reply that
-/// quotes the prompt, then a successful result.
+/// quotes the prompt, then a successful result. A prompt starting `ask:`
+/// first asks to run a tool and quotes the answer (`allowed`/`denied`).
 const mock_claude =
     \\#!/bin/sh
     \\IFS= read -r first
     \\p=$(printf '%s' "$first" | /usr/bin/sed 's/.*"content":"\([^"]*\)".*/\1/')
     \\echo '{"type":"system","subtype":"init","session_id":"sess-mcp","model":"m"}'
-    \\echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Reply to: '"$p"'"}}}'
+    \\case "$p" in
+    \\  ask:*)
+    \\    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]}}'
+    \\    echo '{"type":"control_request","request_id":"cr1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+    \\    IFS= read -r resp
+    \\    case "$resp" in *'"behavior":"allow"'*) ok=allowed;; *) ok=denied;; esac
+    \\    echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","is_error":false}]}}'
+    \\    echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Reply to: '"$p"' ('"$ok"')"}}}'
+    \\    ;;
+    \\  *) echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Reply to: '"$p"'"}}}' ;;
+    \\esac
     \\echo '{"type":"result","subtype":"success","session_id":"sess-mcp"}'
     \\
 ;
@@ -1211,3 +1222,77 @@ fn repeat(a: Allocator, unit: []const u8, n: usize) ![]const u8 {
     for (0..n) |k| @memcpy(out[k * unit.len ..][0..unit.len], unit);
     return out;
 }
+
+// ---- waits against the in-process engine's asynchronous turns ---------------------------
+
+fn replyTexts(a: Allocator, turn: Value) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (u.array(turn, "replies") orelse u.none) |r| {
+        try out.appendSlice(a, u.str(r, "text") orelse "");
+        try out.append(a, '\n');
+    }
+    return out.items;
+}
+
+test "mcp waits: create_chat and send_message wait for the engine's turn, and answers reach the running turn" {
+    const f = try HostFixture.create(.{});
+    defer f.destroy();
+    const a = f.arena.allocator();
+    try f.setup(try std.fmt.allocPrint(a, "{{\"op\":\"createSpace\",\"spaceId\":\"space-real\",\"path\":\"{s}/home\",\"name\":\"real\"}}", .{f.base}));
+
+    // create_chat with a prompt and wait: the turn runs on its own thread and
+    // the wait sees it complete.
+    const created = try ok(try f.call("create_chat", "{\"project\":\"space-real\",\"harness\":\"claude-code\",\"parent\":\"chat-beta-2\",\"prompt\":\"hello there\",\"wait\":true,\"timeout_secs\":20}"));
+    const turn1 = u.get(created, "turn").?;
+    try testing.expectEqualStrings("completed", u.str(turn1, "outcome").?);
+    try testing.expect(!u.boolean(turn1, "timedOut").?);
+    try testing.expect(std.mem.indexOf(u8, try replyTexts(a, turn1), "Reply to: hello there") != null);
+    const new_id = u.str(created, "chatId").?;
+
+    // The engine kept the host device and the parent.
+    const got = try ok(try f.call("get_chat", try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\"}}", .{new_id})));
+    try testing.expectEqualStrings("dev-local", u.str(got, "deviceId").?);
+    try testing.expectEqualStrings("chat-beta-2", u.str(got, "parentChatId").?);
+
+    // The session row names the device and the completed turn.
+    const rows = try f.host_link.engine().call(a, "WatchSessions", "{}");
+    var marker: ?[]const u8 = null;
+    for (rows.ok.array.items) |row| if (std.mem.eql(u8, u.str(row, "chatId").?, new_id)) {
+        try testing.expectEqualStrings("dev-local", u.str(row, "deviceId").?);
+        try testing.expectEqualStrings("idle", u.str(row, "status").?);
+        marker = u.str(row, "lastCompletedTurn");
+    };
+    try testing.expect(marker != null);
+
+    // send_message with wait: a second turn, past the first marker.
+    const sent = try ok(try f.call("send_message", try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\",\"text\":\"second\",\"wait\":true,\"timeout_secs\":20}}", .{new_id})));
+    try testing.expectEqualStrings("run", sval(sent, &.{ "sent", "delivery" }).?);
+    try testing.expect(u.str(u.get(sent, "sent").?, "id").?.len > 0);
+    const turn2 = u.get(sent, "turn").?;
+    try testing.expectEqualStrings("completed", u.str(turn2, "outcome").?);
+    try testing.expect(std.mem.indexOf(u8, try replyTexts(a, turn2), "Reply to: second") != null);
+
+    // A turn that asks: the wait stops at the question, the answer goes to
+    // the running turn (not a new one), and the turn then completes.
+    const asked = try ok(try f.call("send_message", try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\",\"text\":\"ask: first\",\"wait\":true,\"timeout_secs\":20}}", .{new_id})));
+    const turn3 = u.get(asked, "turn").?;
+    try testing.expectEqualStrings("awaitingInput", u.str(turn3, "outcome").?);
+    const pending = u.get(turn3, "pendingInput").?;
+    try testing.expect(pending != .null);
+    const qs = u.array(pending, "questions").?;
+    const answer = try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\",\"answers\":[{{\"question_id\":\"{s}\",\"labels\":[\"Yes\"]}}]}}", .{ new_id, u.str(qs[0], "id").? });
+    const responded = try ok(try f.call("respond_to_input", answer));
+    try testing.expect(u.str(responded, "commandId").?.len > 0);
+    const done = try ok(try f.call("wait_for_turn", try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\",\"timeout_secs\":20}}", .{new_id})));
+    const turn4 = u.get(done, "turn").?;
+    try testing.expectEqualStrings("completed", u.str(turn4, "outcome").?);
+    const all = try ok(try f.call("read_chat", try std.fmt.allocPrint(a, "{{\"chat\":\"{s}\"}}", .{new_id})));
+    var saw_allowed = false;
+    for (u.array(all, "messages").?) |m| {
+        if (std.mem.indexOf(u8, u.str(m, "text") orelse "", "Reply to: ask: first (allowed)") != null) saw_allowed = true;
+    }
+    try testing.expect(saw_allowed);
+    // Three user turns, one each: the answer did not start a fourth.
+    try testing.expectEqual(@as(i64, 6), u.int(all, "total").?);
+}
+

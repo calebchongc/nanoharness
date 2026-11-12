@@ -591,6 +591,14 @@ pub const ChatRecord = struct {
     harness_session_id: ?[]u8 = null,
     source_context_json: ?[]u8 = null,
     activity_status: ?[]u8 = null,
+    /// The assistant entry of the last successfully completed turn
+    /// (`Session::last_completed_turn`). Kept while the next turn runs;
+    /// interrupts and failures never advance it.
+    last_completed_turn: ?[]u8 = null,
+    /// That turn answered peer mail only (no person's prompt).
+    last_completed_peer_only: bool = false,
+    /// The running turn's origin is not a person (set when it starts).
+    running_turn_peer_only: bool = false,
     activity_started_at_ms: i64 = 0,
     activity_updated_at_ms: i64 = 0,
     created_at_ms: i64 = 0,
@@ -615,6 +623,7 @@ pub const ChatRecord = struct {
         if (self.harness_session_id) |hs| gpa.free(hs);
         if (self.source_context_json) |sc| gpa.free(sc);
         if (self.activity_status) |a| gpa.free(a);
+        if (self.last_completed_turn) |t| gpa.free(t);
     }
 
     pub fn deinit(self: *ChatRecord, gpa: Allocator) void {
@@ -867,6 +876,8 @@ pub const EngineHost = struct {
     committed_uploads: std.StringHashMapUnmanaged([]u8) = .empty,
     committed_upload_order: std.ArrayList([]u8) = .empty,
     turn_counter: u64 = 0,
+    /// Ids for `QueueCommand` commands that came without a message id.
+    command_seq: u64 = 0,
     queue_seq: u64 = 0,
     lease_seq: u64 = 0,
     sync_probes: u64 = 0,
@@ -1311,14 +1322,15 @@ pub const EngineHost = struct {
         const op_json = if (c.activity_started_at_ms > 0)
             std.fmt.allocPrint(
                 self.gpa,
-                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"startedAt\":{d},\"updatedAt\":{d}}}}}",
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{f},\"lastCompletedPeerOnly\":{},\"startedAt\":{d},\"updatedAt\":{d}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(hlc, .{}),
                     json.fmt(c.id, .{}),
                     json.fmt(c.device_id, .{}),
                     json.fmt(status, .{}),
-                    self.turn_counter,
+                    json.fmt(c.last_completed_turn, .{}),
+                    c.last_completed_peer_only,
                     c.activity_started_at_ms,
                     updated_ms,
                 },
@@ -1326,14 +1338,15 @@ pub const EngineHost = struct {
         else
             std.fmt.allocPrint(
                 self.gpa,
-                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"updatedAt\":{d}}}}}",
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{f},\"lastCompletedPeerOnly\":{},\"updatedAt\":{d}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(hlc, .{}),
                     json.fmt(c.id, .{}),
                     json.fmt(c.device_id, .{}),
                     json.fmt(status, .{}),
-                    self.turn_counter,
+                    json.fmt(c.last_completed_turn, .{}),
+                    c.last_completed_peer_only,
                     updated_ms,
                 },
             ) catch return;
@@ -2521,9 +2534,16 @@ pub const EngineHost = struct {
                 const cmd_kind = command_kind_map.get(kind) orelse return .{ .err = .{ .bad_params = "unknown command.kind" } };
                 const doc = try self.getOrCreateDoc(chat_id);
                 const now = self.nowMs();
+                // `{commandId}`, as the Rust engine answers: the caller's
+                // message id when it gave one, else a fresh id (never a fixed
+                // one, which the processed-command log would drop as a repeat).
+                self.command_seq += 1;
+                const fresh_cmd_id = try std.fmt.allocPrint(self.gpa, "cmd-{s}-{d}", .{ self.device_id, self.command_seq });
+                defer self.gpa.free(fresh_cmd_id);
+                const command_id: []const u8 = requireStr(cmd_val.object, "messageId") orelse fresh_cmd_id;
                 switch (cmd_kind) {
                     .run => {
-                        const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-run";
+                        const msg_id = command_id;
                         const req_val = cmd_val.object.get("request") orelse return .{ .err = .{ .bad_params = "missing request" } };
                         if (req_val != .object) return .{ .err = .{ .bad_params = "request must be object" } };
                         const prompt = requireStr(req_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
@@ -2590,16 +2610,13 @@ pub const EngineHost = struct {
                         }
                     },
                     .steer => {
-                        const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-steer";
+                        const msg_id = command_id;
                         const prompt = requireStr(cmd_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
                         try turn_host.steer(self, chat_id, msg_id, prompt, now);
                     },
                     .interrupt => {
-                        if (turn_host.interrupt(self, chat_id)) return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
-                        self.turn_counter += 1;
-                        const cmd_id = try std.fmt.allocPrint(self.gpa, "cmd-interrupt-{d}", .{self.turn_counter});
-                        defer self.gpa.free(cmd_id);
-                        try doc.enqueueCommand(cmd_id, "interrupt", "{}", "completed", now);
+                        if (!turn_host.interrupt(self, chat_id)) {
+                        try doc.enqueueCommand(command_id, "interrupt", "{}", "completed", now);
                         try doc.abortStreamingMessages();
                         for (self.chats.items) |*c| {
                             if (std.mem.eql(u8, c.id, chat_id)) {
@@ -2617,6 +2634,7 @@ pub const EngineHost = struct {
                         const reset_frame = try doc.toResetFrameJson(self.gpa);
                         defer self.gpa.free(reset_frame);
                         try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
+                        }
                     },
                     .respond_input => {
                         const req_id = requireStr(cmd_val.object, "requestId") orelse requireStr(cmd_val.object, "messageId") orelse return .{ .err = .{ .bad_params = "missing requestId" } };
@@ -2631,7 +2649,7 @@ pub const EngineHost = struct {
                         _ = try turn_host.dismissInput(self, chat_id, req_id);
                     },
                 }
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"commandId\":{f}}}", .{json.fmt(command_id, .{})}) };
             },
             .WatchQueue => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -3309,6 +3327,10 @@ pub const EngineHost = struct {
                 const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
                 const cwd_opt: ?[]const u8 = if (obj.get("cwd")) |v| (if (v == .string) v.string else null) else null;
                 const branch_opt: ?[]const u8 = if (obj.get("branch")) |v| (if (v == .string) v.string else null) else null;
+                // The device that hosts the chat (another device's, from the
+                // MCP server or a phone) and the chat that spawned it.
+                const device_opt: ?[]const u8 = if (obj.get("deviceId")) |v| (if (v == .string and v.string.len > 0) v.string else null) else null;
+                const parent_opt: ?[]const u8 = if (obj.get("parentChatId")) |v| (if (v == .string and v.string.len > 0) v.string else null) else null;
 
                 var exists = false;
                 for (self.chats.items) |existing| {
@@ -3322,8 +3344,10 @@ pub const EngineHost = struct {
                     errdefer self.gpa.free(id_c);
                     const sp_c = if (space_id) |s| try self.gpa.dupe(u8, s) else null;
                     errdefer if (sp_c) |s| self.gpa.free(s);
-                    const dev_c = try self.gpa.dupe(u8, self.device_id);
+                    const dev_c = try self.gpa.dupe(u8, device_opt orelse self.device_id);
                     errdefer self.gpa.free(dev_c);
+                    const pa_c = if (parent_opt) |pa| try self.gpa.dupe(u8, pa) else null;
+                    errdefer if (pa_c) |pa| self.gpa.free(pa);
                     const h_c = try self.gpa.dupe(u8, harness);
                     errdefer self.gpa.free(h_c);
                     const t_c = if (title) |t| try self.gpa.dupe(u8, t) else null;
@@ -3347,6 +3371,7 @@ pub const EngineHost = struct {
                         .reasoning = r_c,
                         .cwd = cw_c,
                         .branch = br_c,
+                        .parent_chat_id = pa_c,
                         .created_at_ms = self.nowMs(),
                     });
                 }
@@ -3918,33 +3943,34 @@ pub const EngineHost = struct {
         try w.writeByte('[');
         for (self.chats.items, 0..) |c, idx| {
             if (idx > 0) try w.writeByte(',');
-            const status = c.activity_status orelse "idle";
-            const updated_ms = if (c.activity_updated_at_ms > 0)
-                c.activity_updated_at_ms
-            else if (c.last_message_at_ms > 0)
-                c.last_message_at_ms
-            else if (c.created_at_ms > 0)
-                c.created_at_ms
-            else
-                now;
-            var ubuf: [32]u8 = undefined;
-            const updated_rfc = auth_host.formatRfc3339Ms(&ubuf, updated_ms);
-            if (c.activity_started_at_ms > 0) {
-                var st_buf: [32]u8 = undefined;
-                const started_rfc = auth_host.formatRfc3339Ms(&st_buf, c.activity_started_at_ms);
-                try w.print(
-                    "{{\"chatId\":{f},\"status\":{f},\"startedAt\":{f},\"updatedAt\":{f}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(status, .{}), json.fmt(started_rfc, .{}), json.fmt(updated_rfc, .{}) },
-                );
-            } else {
-                try w.print(
-                    "{{\"chatId\":{f},\"status\":{f},\"updatedAt\":{f}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(status, .{}), json.fmt(updated_rfc, .{}) },
-                );
-            }
+            try writeSessionRow(w, c, now);
         }
         try w.writeByte(']');
         return aw.toOwnedSlice();
+    }
+
+    /// One `WatchSessions` row (`harness_proto::Session`): the chat, the
+    /// device hosting it, its status, the last completed turn and times.
+    pub fn writeSessionRow(w: *std.Io.Writer, c: ChatRecord, now: i64) !void {
+        const status = c.activity_status orelse "idle";
+        const updated_ms = if (c.activity_updated_at_ms > 0)
+            c.activity_updated_at_ms
+        else if (c.last_message_at_ms > 0)
+            c.last_message_at_ms
+        else if (c.created_at_ms > 0)
+            c.created_at_ms
+        else
+            now;
+        var ubuf: [32]u8 = undefined;
+        const updated_rfc = auth_host.formatRfc3339Ms(&ubuf, updated_ms);
+        try w.print("{{\"lastCompletedTurn\":{f},", .{json.fmt(c.last_completed_turn, .{})});
+        if (c.last_completed_peer_only) try w.writeAll("\"lastCompletedPeerOnly\":true,");
+        try w.print("\"chatId\":{f},\"deviceId\":{f},\"status\":{f},", .{ json.fmt(c.id, .{}), json.fmt(c.device_id, .{}), json.fmt(status, .{}) });
+        if (c.activity_started_at_ms > 0) {
+            var st_buf: [32]u8 = undefined;
+            try w.print("\"startedAt\":{f},", .{json.fmt(auth_host.formatRfc3339Ms(&st_buf, c.activity_started_at_ms), .{})});
+        } else try w.writeAll("\"startedAt\":null,");
+        try w.print("\"updatedAt\":{f}}}", .{json.fmt(updated_rfc, .{})});
     }
 
     fn ensureRegistryOrgCursor(self: *EngineHost, org_id: []const u8) void {
@@ -6772,7 +6798,10 @@ test "Mechanical 1:1 source-of-truth verification against the engine contract ve
         const p = try json.parseFromSliceLeaky(json.Value, a, payload, .{});
         const out = try host.handle("QueueCommand", p);
         defer gpa.free(out.unary_json);
-        try testing.expectEqualStrings("{\"queued\":true}", out.unary_json);
+        // `{commandId}`, the Rust engine's reply (`rpc.rs`, QUEUE_COMMAND).
+        try testing.expect(std.mem.startsWith(u8, out.unary_json, "{\"commandId\":\""));
+        const parsed_reply = try json.parseFromSliceLeaky(json.Value, a, out.unary_json, .{});
+        try testing.expect(parsed_reply.object.get("commandId").?.string.len > 0);
     }
 
     const edit_actions = [_][]const u8{ "commit", "cancel", "releaseUnchanged", "discard" };
