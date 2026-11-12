@@ -318,8 +318,26 @@ test "git_host parses porcelain v2 status, unified diffs, GitHub remotes, and ru
     try testing.expectEqual(@as(i64, 2), files[0].object.get("additions").?.integer);
     try testing.expectEqual(@as(i64, 1), files[0].object.get("deletions").?.integer);
 
-    // Real git status on current worktree
-    const live_status = try runGitStatusJson(gpa, testing.io, ".");
-    defer gpa.free(live_status);
-    try testing.expect(std.mem.indexOf(u8, live_status, "experimental-zig-branch") != null);
+    // Real git status, from a fresh repository on a made-up branch so the
+    // result never depends on the branch this checkout is on. Every git
+    // process here has a deadline: a hang fails the test.
+    if (comptime !std.process.can_spawn) return;
+    var repo = testing.tmpDir(.{});
+    defer repo.cleanup();
+    const repo_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{repo.sub_path});
+    defer gpa.free(repo_path);
+    const branch = "synthetic-status-branch";
+    const deadline: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } };
+    const init = try std.process.run(gpa, testing.io, .{ .argv = &.{ "git", "init", "-q", "-b", branch, repo_path }, .timeout = deadline });
+    defer gpa.free(init.stdout);
+    defer gpa.free(init.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, init.term);
+    const live = try std.process.run(gpa, testing.io, .{ .argv = &.{ "git", "status", "--porcelain=v2", "--branch" }, .cwd = .{ .path = repo_path }, .timeout = deadline });
+    defer gpa.free(live.stdout);
+    defer gpa.free(live.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, live.term);
+    var live_st = try parseGitStatusPorcelainV2(gpa, live.stdout);
+    defer live_st.deinit(gpa);
+    try testing.expectEqualStrings(branch, live_st.branch);
+    try testing.expect(live_st.isClean());
 }
