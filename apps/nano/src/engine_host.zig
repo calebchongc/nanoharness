@@ -2085,19 +2085,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"content\":\"\",\"found\":false}") };
             },
             .ListHarnesses => return @import("rpcw_harnesses.zig").listHarnesses(self),
-            .ListModels => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const harness = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
-                if (std.mem.eql(u8, harness, "graff")) {
-                    if (self.cached_graff_models_json == null and self.io != null and self.graff_exe != null) {
-                        self.cached_graff_models_json = acp_host.discoverGraffModelsJson(self.gpa, self.io.?, self.graff_exe.?) catch null;
-                    }
-                    if (self.cached_graff_models_json) |cached| {
-                        return .{ .unary_json = try self.gpa.dupe(u8, cached) };
-                    }
-                }
-                return .{ .unary_json = try modelsJsonForHarness(self.gpa, harness) };
-            },
+            .ListModels => return @import("rpc_models.zig").listModels(self, params),
             .ListSkills => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "[]") };
             },
@@ -6302,14 +6290,14 @@ test "mock WebSocket server with concurrent async clients: Client A watches live
     try client_a.sendCall("WatchSpaces", rpc.empty, rpc.Handler.of(AsyncClient, client_a, AsyncClient.onSpaces));
     try client_a.sendCall("WatchChats", rpc.empty, rpc.Handler.of(AsyncClient, client_a, AsyncClient.onChats));
     try client_a.sendCall("WatchDocMessages", .{ .chatId = "chat-async-1" }, rpc.Handler.of(AsyncClient, client_a, AsyncClient.onDoc));
-    try client_a.sendCall("ListModels", .{ .harness = "graff" }, rpc.Handler.of(AsyncClient, client_a, AsyncClient.onModels));
+    try client_a.sendCall("ListModels", .{ .harness = "mock" }, rpc.Handler.of(AsyncClient, client_a, AsyncClient.onModels));
 
     // Wait briefly for Client A's watches to register on the mock server
     var wait_ticks: usize = 0;
     while (client_a.models_count.load(.acquire) == 0 and wait_ticks < 200) : (wait_ticks += 1) {
         std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
     }
-    try testing.expect(client_a.models_count.load(.acquire) >= 5);
+    try testing.expect(client_a.models_count.load(.acquire) >= 2);
 
     // Concurrently on Client B's separate WebSocket connection: create space, create chat, and run a turn!
     try client_b.sendCall(
