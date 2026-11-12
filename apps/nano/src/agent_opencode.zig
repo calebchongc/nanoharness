@@ -708,6 +708,8 @@ const MockServer = struct {
     log: std.ArrayList(u8) = .empty,
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    /// Set when `acceptLoop` has returned.
+    exited: Io.Event = .unset,
 
     fn push(self: *MockServer, event: []const u8) void {
         self.mu.lockUncancelable(self.io);
@@ -722,6 +724,7 @@ const MockServer = struct {
     }
 
     fn acceptLoop(self: *MockServer) void {
+        defer self.exited.set(self.io);
         while (!self.stop.load(.acquire)) {
             const conn = self.server.accept(self.io) catch return;
             const th = std.Thread.spawn(.{}, serve, .{ self, conn }) catch {
@@ -830,9 +833,17 @@ fn startMock(rig: *testkit.Rig, srv: *MockServer) !void {
 
 fn stopMock(srv: *MockServer) void {
     srv.stop.store(true, .release);
-    if (net.IpAddress.parseIp4("127.0.0.1", srv.server.socket.address.ip4.port)) |addr| {
-        if (addr.connect(srv.io, .{ .mode = .stream })) |c| c.close(srv.io) else |_| {}
-    } else |_| {}
+    // Wake the blocked accept with a connection, again until the loop has
+    // returned: one wake-up can be lost, and a join that never returns hangs
+    // the whole suite. Past 5 s it is a failure, not a wait.
+    var tries: u32 = 0;
+    while (!srv.exited.isSet()) : (tries += 1) {
+        if (tries >= 50) @panic("opencode mock server did not stop within 5 s");
+        if (net.IpAddress.parseIp4("127.0.0.1", srv.server.socket.address.ip4.port)) |addr| {
+            if (addr.connect(srv.io, .{ .mode = .stream })) |c| c.close(srv.io) else |_| {}
+        } else |_| {}
+        srv.exited.waitTimeout(srv.io, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+    }
     if (srv.thread) |th| th.join();
     srv.server.deinit(srv.io);
     if (srv.bus) |b| b.close(srv.io);
