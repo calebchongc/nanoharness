@@ -9,6 +9,7 @@ test {
     _ = @import("ios_build_rules.zig");
     _ = session_store;
     _ = @import("ios_push.zig");
+    _ = @import("ios_crash_reports.zig");
 }
 
 test "auth_host restores, migrates and signs out through the session store" {

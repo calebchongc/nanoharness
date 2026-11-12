@@ -6,7 +6,8 @@
 //! the Keychain session store against the real Keychain with a synthetic
 //! session and prints `selftest keychain: ok` or the step that failed;
 //! `HARNESS_IOS_SELFTEST=push-prompt` asks for notifications as the
-//! person's yes does (the system's prompt shows).
+//! person's yes does (the system's prompt shows); `crash-reports` checks
+//! the MetricKit subscriber and the reports folder with a synthetic report.
 const std = @import("std");
 const App = @import("app.zig").App;
 const EmbeddedHost = @import("ios_host.zig").EmbeddedHost;
@@ -26,9 +27,11 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, a: *App, embedded: *EmbeddedHos
     if (simulated.len > 0) std.mem.doNotOptimizeAway(&simulated_bytes);
     @import("ios_push.zig").runtime.install(gpa, io, a, &embedded.host, demo);
     const env = a.env orelse return;
+    if (env.get("HOME")) |home| @import("ios_crash_reports.zig").runtime.start(gpa, io, &embedded.host, home);
     if (env.get("HARNESS_IOS_SELFTEST")) |what| {
         // The system's notification prompt, as the person's "yes" brings it.
         if (std.mem.eql(u8, what, "push-prompt")) @import("nanoui").objc.dispatchAfter(2 * std.time.ns_per_s, null, askForNotifications);
+        if (std.mem.eql(u8, what, "crash-reports")) std.debug.print("selftest crash-reports: {s}\n", .{@import("ios_crash_reports.zig").runtime.selfTest()});
         if (std.mem.eql(u8, what, "keychain")) {
             const result = keychainSelfTest(gpa, io, env.get("HOME") orelse return);
             std.debug.print("selftest keychain: {s}\n", .{result});

@@ -125,6 +125,19 @@ store only; it has not run against a real Swift app's Keychain.
   (`notifications.enabled`, `notifications.done|input|failed`). Screens call
   `ios_push.runtime.setEnabled`, `setKind` and `requestPermission`.
 
+## Crash and hang reports
+
+`src/ios_crash_reports.zig`, as `CrashReports.swift` does it: a MetricKit
+subscriber saves each diagnostic payload once (`Application Support/
+CrashReports/<ms>-<sha256 prefix>.json`, newest 50), and while signed in
+sends the ones the edge hasn't taken, oldest first, to
+`POST /diagnostics/crash-reports` as a JSON array (at most 10 reports and
+about 900 KB a request; 200 or 413 marks them sent in `sent.list`). It is on
+unless `crashReports.send` is false in NSUserDefaults, the Swift app's key;
+the Settings screen's switch writes it. `summary` gives the list's headline
+("Crash: EXC_BAD_ACCESS · SIGSEGV", "Hang (3.2 sec)", …). Reports carry
+addresses only; the Zig build keeps no dSYM yet (see "What remains").
+
 ## TestFlight: `.github/workflows/nano-ios.yml`
 
 Manual dispatch only, from `main` or a `zig/` branch. It reads the same
