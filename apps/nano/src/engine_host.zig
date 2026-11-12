@@ -2137,12 +2137,7 @@ pub const EngineHost = struct {
                         "]",
                 ) };
             },
-            .BrowseLinkStatus => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"browseRunning\":true,\"paired\":false,\"keyMismatch\":false,\"scopes\":[\"read\",\"act-own-pages\"]}",
-                ) };
-            },
+            .BrowseLinkStatus => return @import("rpc_browse.zig").handle(self, .status),
             .SetHarnessEnabled => return @import("rpcw_harnesses.zig").setHarnessEnabled(self, params),
             .CancelInstall => return @import("rpc_install.zig").cancelInstall(self, params),
             .McpServerAction => return @import("rpcw_mcp.zig").mcpServerAction(self, params),
@@ -2151,6 +2146,8 @@ pub const EngineHost = struct {
             .SignOutGraffLogin => return @import("rpcw_graff_logins.zig").signOutGraffLogin(self, params),
             .CreateWorktree => return @import("rpcw_worktrees.zig").createWorktree(self, params),
             .DeleteWorktree => return @import("rpcw_worktrees.zig").deleteWorktree(self, params),
+            .BrowseLinkPair => return @import("rpc_browse.zig").handle(self, .pair),
+            .BrowseLinkDisconnect => return @import("rpc_browse.zig").handle(self, .disconnect),
             .ActivateAgentAccount,
             .ForgetAgentAccount,
             .StartAgentLogin,
@@ -2159,8 +2156,6 @@ pub const EngineHost = struct {
             .CancelAgentLogin,
             => return @import("rpc_logins.zig").handle(self, method, params),
             .InstallHarness => return @import("rpc_install.zig").installHarness(self, params),
-            .BrowseLinkPair,
-            .BrowseLinkDisconnect,
             .SimulatorInput,
             .LocalhostPageInput,
             => {

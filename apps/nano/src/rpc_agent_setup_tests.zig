@@ -19,4 +19,6 @@ test {
     _ = @import("skills_discovery.zig");
     _ = @import("skills_commands.zig");
     _ = @import("rpc_skills.zig");
+    _ = @import("browse_link.zig");
+    _ = @import("rpc_browse.zig");
 }
