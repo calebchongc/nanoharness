@@ -49,24 +49,38 @@ checkout; it does not prove parity with newer desktop changes or the missing
 interactions above. Bring the GPUI reference up to date before a release
 parity run.
 
-The local bundler uses the workspace version for both macOS bundle version
-fields and ad-hoc signs the completed app. Public distribution still needs
+The version is `build.zig.zon`'s `.version`: the app, the engine, the iOS
+bundle and the macOS bundler's two version fields all read it, so a release
+bumps it there. The bundler builds the app icon from `dist/macos/icon-1024.png`
+and ad-hoc signs the completed app. Public distribution still needs
 Developer ID signing and notarization, passing unit and shared protocol
 tests, and a strict visual run (`--max-changed 0.0005`). An ad-hoc signature
 check alone is not a public-distribution gate.
 
 ## Build and run
 
-You need Zig 0.17.0 and, on macOS, Xcode or the Command Line Tools.
+You need Zig 0.17.0 and, on macOS, Xcode or the Command Line Tools. Nothing
+else: no Rust toolchain, and nothing from `crates/`.
 
 ```sh
 cd apps/nano
 zig build test          # unit tests
+zig build no-rust       # fails if the build, scripts/ or a test reaches for Rust
 zig build run           # build and open the window
 sh scripts/bundle.sh    # release build as zig-out/Harness Nano.app
 zig build snap -- scenes/narrow-panes.json /tmp/nano-snap   # draw a scene offscreen
 open "zig-out/Harness Nano.app"
+sh scripts/ios.sh sim       # iOS Simulator app, zig-out/ios/Harness.app
+sh scripts/ios.sh device    # the same for devices (aarch64-ios)
+zig build --release=safe -Dtarget=x86_64-linux-gnu     # cross-compile
+zig build --release=safe -Dtarget=x86_64-windows-gnu
 ```
+
+`scripts/ios.sh` exists because Zig 0.17.0's std can't build for iOS as it
+ships; it passes the patched lib folder the pinned nanoui's
+`tools/ios/zig-lib.sh` makes. Off Apple platforms SQLite is compiled from the
+amalgamation pinned in `build.zig.zon` (fetched only for those targets); on
+macOS and iOS the SDK's libsqlite3 is linked.
 
 The bundler forwards Zig build arguments. When testing a local nanoui fork,
 use the same override for the release app: `sh scripts/bundle.sh --fork=/path/to/nanoui`.
@@ -119,19 +133,21 @@ status marks, order), tool chips and group summaries, how transcript frames appl
 request this app sends the engine. Both sides run the same files (`src/parity.zig` here; `crates/*/tests/desktop_*`
 in Rust), and the Rust runner sends each request to a real engine. See `protocol/desktop/README.md`.
 
-After changing a request on purpose: `zig build vectors`, then `cargo test -p harness-engine --test desktop_requests`.
+After changing a request on purpose: `zig build vectors`.
+
+The engine's RPC contract (method names, `Mutate` ops, queued-edit actions,
+command kinds, queue gates) and its doc and sync constants are data too:
+`src/engine_contract.json`, which the engine's parity tests assert against.
 
 ## Matching the desktop app
 
 Nano embeds the **desktop** theme catalog, not the mobile catalog (desktop
-Codegraff has its own palette). Regenerate it after desktop palette changes:
-
-```sh
-cargo run -p harness-theme --bin harness-theme-export -- --desktop --output apps/nano/themes.json
-```
-
-`desktop_catalog_matches_nano_bundle` checks that export. Desktop color-vector
-changes also update `protocol/desktop/theme.json`, consumed by Rust and Nano.
+Codegraff has its own palette). Both catalogs, `themes.json` and
+`ios_themes.json`, are checked-in inputs edited directly; nothing generates
+them at build time. `src/theme_catalog_check.zig` refuses a catalog with a
+repeated id, a variant outside its family, an unknown appearance, a missing
+role section or a malformed colour. Desktop color-vector changes also update
+`protocol/desktop/theme.json`.
 
 Sizes, spacing, colours and rules come from the GPUI source and are checked
 side by side against the real app on the same throwaway engine: the title
