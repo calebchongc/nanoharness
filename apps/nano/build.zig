@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "file_icons_data", .module = file_icons_data },
         .{ .name = "themes_json", .module = themes_json },
         .{ .name = "ios_themes_json", .module = ios_themes_json },
+        .{ .name = "mcp_tools_json", .module = @import("mcp_tools_build.zig").module(b) },
     };
 
     // `zig build no-rust`: fails when the build graph, scripts/ or a test
@@ -201,6 +202,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
+        .{ .name = "mcp_tools_json", .module = @import("mcp_tools_build.zig").module(b) },
     };
     const engine_exe = b.addExecutable(.{ .name = "harness-engine", .root_module = b.createModule(.{
         .root_source_file = b.path("src/engine_main.zig"),

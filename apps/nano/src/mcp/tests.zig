@@ -500,7 +500,49 @@ fn sval(v: Value, path: []const []const u8) ?[]const u8 {
 
 // ---- protocol --------------------------------------------------------------------------
 
-test "mcp catalog: the checked-in fixture is the Rust server's tool list" {
+/// `protocol/mcp-tools.json`, read from the repository at test time.
+fn sharedCatalog(a: Allocator) ![]const Value {
+    const protocol_dir = @import("parity_options").protocol_dir;
+    const path = try std.fs.path.join(a, &.{ protocol_dir, "..", "mcp-tools.json" });
+    const text = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, a, .limited(1 << 20));
+    return (try json.parseFromSliceLeaky(Value, a, text, .{})).array.items;
+}
+
+test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, order, descriptions and input schemas" {
+    const f = try WorldFixture.create(.{ .chat_id = "chat-beta-2" });
+    defer f.destroy();
+    const a = f.arena.allocator();
+    const shared = try sharedCatalog(a);
+    try testing.expectEqual(@as(usize, 31), shared.len);
+    for (shared) |t| {
+        // Exactly these keys, so nothing else could be served.
+        try testing.expectEqual(@as(usize, 3), t.object.count());
+        try testing.expect(u.str(t, "name") != null and u.str(t, "description") != null);
+        try testing.expect(u.get(t, "inputSchema").? == .object);
+    }
+    // The embedded copy is the file, byte for byte.
+    const protocol_dir = @import("parity_options").protocol_dir;
+    const raw = try std.Io.Dir.cwd().readFileAlloc(testing.io, try std.fs.path.join(a, &.{ protocol_dir, "..", "mcp-tools.json" }), a, .limited(1 << 20));
+    try testing.expectEqualStrings(raw, tools.catalog_json);
+
+    // From a chat: every tool, in the file's order, each exactly as written.
+    const served = u.array(u.get(try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(1), "tools/list", .null), .{}), "result").?, "tools").?;
+    try testing.expectEqual(shared.len, served.len);
+    for (shared, served) |want, got| try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, got));
+    // From a terminal: the same, without the two that publish into a chat.
+    f.t.origin = .{};
+    const plain = u.array(u.get(try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(2), "tools/list", .null), .{}), "result").?, "tools").?;
+    var k: usize = 0;
+    for (shared) |want| {
+        const name = u.str(want, "name").?;
+        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual")) continue;
+        try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, plain[k]));
+        k += 1;
+    }
+    try testing.expectEqual(plain.len, k);
+}
+
+test "mcp catalog: the shared catalog is the Rust server's tool list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

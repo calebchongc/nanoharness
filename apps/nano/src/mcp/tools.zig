@@ -18,9 +18,10 @@ pub const rooms = @import("rooms.zig");
 pub const bots = @import("bots.zig");
 const Value = json.Value;
 
-/// The checked-in catalog: the Rust server's tools, names, descriptions and
-/// input schemas, in its order.
-pub const catalog_json = @embedFile("tools.json");
+/// The tool catalog, `protocol/mcp-tools.json` (the one shared copy): the
+/// Rust server's tools, names, descriptions and input schemas, in its
+/// order. `tools/list` serves it unchanged.
+pub const catalog_json = @import("mcp_tools_json").json;
 
 /// Default and ceiling for blocking waits.
 const default_wait_ms: i64 = 600_000;
