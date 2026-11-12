@@ -17,6 +17,7 @@ pub fn isReleaseVersion(v: []const u8) bool {
 const testing = std.testing;
 
 test {
+    _ = @import("build_rules.zig");
     _ = @import("engine_contract.zig");
     _ = @import("no_rust_gate.zig");
     _ = @import("theme_catalog_check.zig");

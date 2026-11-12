@@ -1,5 +1,6 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
+const build_rules = @import("src/build_rules.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -104,7 +105,7 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .ios) {
         exe.use_llvm = true;
-        exe.root_module.linkSystemLibrary("sqlite3", .{});
+        linkSqlite(b, exe.root_module, target);
         const ios = @import("nanoui").ios;
         const app_bundle = ios.app(b, exe, .{
             .name = "Harness",
@@ -216,6 +217,28 @@ pub fn build(b: *std.Build) void {
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors, engine_exe }) |artifact| {
         artifact.use_llvm = true;
-        artifact.root_module.linkSystemLibrary("sqlite3", .{});
+        linkSqlite(b, artifact.root_module, target);
     }
+}
+
+/// SQLite for `module` (docs_store.zig): the SDK's libsqlite3 on Apple
+/// platforms, otherwise one static library compiled from the pinned
+/// amalgamation (fetched only for those targets; src/build_rules.zig).
+fn linkSqlite(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (!build_rules.sqliteFromSource(target.result.os.tag)) {
+        module.linkSystemLibrary("sqlite3", .{});
+        return;
+    }
+    const State = struct {
+        var lib: ?*std.Build.Step.Compile = null;
+    };
+    const lib = State.lib orelse blk: {
+        const dep = b.lazyDependency("sqlite", .{}) orelse return;
+        const sqlite_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true });
+        sqlite_module.addCSourceFile(.{ .file = dep.path("sqlite3.c"), .flags = &build_rules.sqlite_flags });
+        const lib = b.addLibrary(.{ .name = "sqlite3", .linkage = .static, .root_module = sqlite_module });
+        State.lib = lib;
+        break :blk lib;
+    };
+    module.linkLibrary(lib);
 }

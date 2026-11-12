@@ -12,6 +12,13 @@
             .url = "git+https://github.com/justrach/http-zig#5b0324bb3ab49fe18947b2f17fe7649760e1540a",
             .hash = "http_zig-0.1.0-2CB7E00SAwAnwnBkJDgCDm3zLwrCmZZkHNSw5t7X9Vbf",
         },
+        .sqlite = .{
+            .url = "https://sqlite.org/2026/sqlite-autoconf-3540100.tar.gz",
+            .hash = "N-V-__8AAIAUxgDw-ekdWkSyn-UlfnooAhAFgfPfuwjTrMp-",
+            // SQLite compiled from source, only for targets without a system
+            // libsqlite3 to link (Linux, Windows): build.zig's linkSqlite.
+            .lazy = true,
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "file_icons_build.zig", "themes.json", "ios_themes.json", "src", "assets" },
 }

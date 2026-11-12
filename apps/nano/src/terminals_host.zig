@@ -37,8 +37,12 @@ pub const TerminalSession = struct {
     exit_code: ?i32 = null,
 
     pub fn deinit(self: *TerminalSession, gpa: Allocator) void {
-        if (self.master_fd) |fd| _ = std.c.close(fd);
-        if (self.slave_fd) |fd| _ = std.c.close(fd);
+        // PTY descriptors are POSIX ones, only ever opened on macOS and Linux
+        // (Windows' C `close` takes a HANDLE).
+        if (comptime builtin.os.tag != .windows) {
+            if (self.master_fd) |fd| _ = std.c.close(fd);
+            if (self.slave_fd) |fd| _ = std.c.close(fd);
+        }
         gpa.free(self.id);
         gpa.free(self.cwd);
         self.scrollback.deinit(gpa);
@@ -131,9 +135,9 @@ pub const TerminalManager = struct {
 
     pub fn writeInput(self: *TerminalManager, terminal_id: []const u8, data: []const u8) !bool {
         const sess = self.sessions.getPtr(terminal_id) orelse return false;
-        if (sess.master_fd) |fd| {
+        if (comptime builtin.os.tag != .windows) if (sess.master_fd) |fd| {
             _ = std.c.write(fd, data.ptr, data.len);
-        }
+        };
         try sess.appendOutput(self.gpa, data);
         return true;
     }
