@@ -96,7 +96,7 @@ const node_hint = "node (required to run the agent's npm-distributed ACP adapter
 var install_mutex: Io.Mutex = .init;
 
 fn findTool(t: *Turn, name: []const u8) !?[]const u8 {
-    const login = if (t.req.env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(t.gpa, t.io, t.req.env);
+    const login = if (t.req.env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(t.gpa, t.io, t.req.env, &t.interrupted);
     const found = try agent_proc.findExecutable(t.gpa, t.io, .{ .name = name, .path_env = t.req.env.get("PATH"), .login_path = login, .home = t.req.env.get("HOME"), .fnm_dir = t.req.env.get("FNM_DIR") });
     const f = found orelse return null;
     defer t.gpa.free(f);
@@ -110,7 +110,12 @@ fn ensureShim(t: *Turn) ![]const u8 {
     const root = (try adaptersRoot(a, io, t.req.env)) orelse return t.fail("adapter install failed: cannot locate a platform data directory for managed adapters", .{});
     const final_dir = try installDir(a, root);
     const marker = try std.fs.path.join(a, &.{ final_dir, ok_marker });
-    install_mutex.lockUncancelable(io);
+    // Another turn may be installing (up to 10 minutes): wait for it, but
+    // not past this turn's interrupt.
+    while (!install_mutex.tryLock()) {
+        if (t.interrupted.load(.acquire)) return t.fail("interrupted", .{});
+        Io.sleep(io, .fromMilliseconds(50), .awake) catch return t.fail("interrupted", .{});
+    }
     defer install_mutex.unlock(io);
     if (Io.Dir.cwd().access(io, marker, .{})) |_| {
         return materializeShim(a, io, final_dir);
@@ -130,6 +135,7 @@ fn ensureShim(t: *Turn) ![]const u8 {
         return t.fail("adapter install failed: npm install of the Cursor adapter ({s}) could not start: {t}", .{ spec, err });
     defer proc.destroy();
     t.setProc(proc);
+    if (t.interrupted.load(.acquire)) proc.terminate();
     defer {
         t.mu.lockUncancelable(io);
         t.proc = null;

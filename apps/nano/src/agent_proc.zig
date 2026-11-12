@@ -5,8 +5,9 @@
 //! group, so an interrupt or shutdown signals every process the agent started
 //! (npm wrappers, shells). stdout is read line by line on the turn's thread;
 //! stderr is drained on its own thread into a short tail for crash messages;
-//! stdin writes are serialized so the turn thread and RPC threads (answers,
-//! steering, interrupts) can both write.
+//! stdin lines queue for a writer thread (Rust's `StdinMsg` channel), so the
+//! turn thread and RPC threads (answers, steering, interrupts, some under the
+//! engine lock) never block on a child that stopped reading.
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -273,10 +274,14 @@ var login_path_done: bool = false;
 var login_path_value: ?[]u8 = null;
 
 /// The PATH the user's login shell reports, cached for the process
-/// (`$SHELL -l -i -c` between markers; 5 s budget). Null when unavailable.
-pub fn loginShellPath(gpa: Allocator, io: Io, env: *const Environ.Map) ?[]const u8 {
+/// (`$SHELL -l -i -c` between markers; 5 s budget). Null when unavailable,
+/// or when `cancel` is set while another caller is still capturing it.
+pub fn loginShellPath(gpa: Allocator, io: Io, env: *const Environ.Map, cancel: ?*const std.atomic.Value(bool)) ?[]const u8 {
     if (builtin.os.tag == .windows or !std.process.can_spawn) return null;
-    login_path_mutex.lockUncancelable(io);
+    while (!login_path_mutex.tryLock()) {
+        if (cancel) |c| if (c.load(.acquire)) return null;
+        Io.sleep(io, .fromMilliseconds(20), .awake) catch return null;
+    }
     defer login_path_mutex.unlock(io);
     if (login_path_done) return login_path_value;
     login_path_done = true;
@@ -357,13 +362,35 @@ pub const SpawnOpts = struct {
     stdout: bool = true,
 };
 
+/// Most bytes queued for an agent's stdin before writes fail.
+pub const stdin_queue_cap: usize = 64 * 1024 * 1024;
+/// Longest stdout line read before the stream is treated as broken.
+pub const max_line_bytes: usize = 64 * 1024 * 1024;
+
 pub const AgentProc = struct {
     gpa: Allocator,
     io: Io,
     child: std.process.Child,
     pid: posix.pid_t,
+    /// The pipe ends, taken out of `child`: reaping it closes whatever it
+    /// still holds, under the threads reading and writing them.
+    stdin_file: ?Io.File = null,
+    stdout_file: ?Io.File = null,
+    stderr_file: ?Io.File = null,
+    /// Guards the stdin queue, `stdin_open` and `stdin_closing`.
     write_mutex: Io.Mutex = .init,
+    write_cond: Io.Condition = .init,
+    /// Lines (with their newline) waiting for the writer thread.
+    queue: std.ArrayList([]u8) = .empty,
+    queued_bytes: usize = 0,
+    /// Accepting lines (false once closing or after a failed write).
     stdin_open: bool,
+    /// Close stdin once the queue is written.
+    stdin_closing: bool = false,
+    writer: ?std.Thread = null,
+    writer_stop: std.atomic.Value(bool) = .init(false),
+    /// Guards `watchdog` (never held across I/O).
+    wd_mutex: Io.Mutex = .init,
     stderr_thread: ?std.Thread = null,
     stderr_mutex: Io.Mutex = .init,
     tail: StderrTail = .{},
@@ -418,19 +445,92 @@ pub const AgentProc = struct {
             .child = child,
             .pid = child.id.?,
             .stdin_open = opts.stdin,
+            .stdin_file = child.stdin,
+            .stdout_file = child.stdout,
+            .stderr_file = child.stderr,
         };
+        self.child.stdin = null;
+        self.child.stdout = null;
+        self.child.stderr = null;
         self.stderr_thread = std.Thread.spawn(.{}, drainStderr, .{self}) catch null;
+        if (opts.stdin) self.writer = std.Thread.spawn(.{}, writeLoop, .{self}) catch null;
         return self;
     }
 
+    /// The writer thread: writes queued lines in order, then closes stdin
+    /// when asked. Stops at once on `writer_stop` (the child was reaped).
+    fn writeLoop(self: *AgentProc) void {
+        const f = self.stdin_file orelse return;
+        const nonblocking = setNonblocking(f.handle);
+        while (true) {
+            self.write_mutex.lockUncancelable(self.io);
+            while (self.queue.items.len == 0 and !self.stdin_closing and !self.writer_stop.load(.acquire)) {
+                self.write_cond.waitUncancelable(self.io, &self.write_mutex);
+            }
+            if (self.writer_stop.load(.acquire) or self.queue.items.len == 0) {
+                self.write_mutex.unlock(self.io);
+                break;
+            }
+            const line = self.queue.orderedRemove(0);
+            self.queued_bytes -= line.len;
+            self.write_mutex.unlock(self.io);
+            defer self.gpa.free(line);
+            const ok = if (nonblocking) self.writeStoppable(f.handle, line) else blk: {
+                f.writeStreamingAll(self.io, line) catch break :blk false;
+                break :blk true;
+            };
+            if (!ok) break;
+        }
+        self.write_mutex.lockUncancelable(self.io);
+        self.stdin_open = false;
+        for (self.queue.items) |l| self.gpa.free(l);
+        self.queue.clearRetainingCapacity();
+        self.queued_bytes = 0;
+        self.stdin_file = null;
+        self.write_mutex.unlock(self.io);
+        f.close(self.io);
+    }
+
+    fn setNonblocking(fd: Io.File.Handle) bool {
+        if (comptime is_windows or !builtin.link_libc) return false;
+        const flags = std.c.fcntl(fd, std.c.F.GETFL);
+        if (flags < 0) return false;
+        const nb: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        return std.c.fcntl(fd, std.c.F.SETFL, flags | nb) >= 0;
+    }
+
+    /// Write all of `bytes` to the non-blocking `fd`, waiting for room in
+    /// 50 ms steps; false on a write error or once `writer_stop` is set.
+    fn writeStoppable(self: *AgentProc, fd: Io.File.Handle, bytes: []const u8) bool {
+        if (comptime is_windows or !builtin.link_libc) unreachable;
+        var off: usize = 0;
+        while (off < bytes.len) {
+            if (self.writer_stop.load(.acquire)) return false;
+            const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+            if (n > 0) {
+                off += @intCast(n);
+                continue;
+            }
+            switch (std.c.errno(n)) {
+                .INTR => continue,
+                .AGAIN => {
+                    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+                    _ = posix.poll(&fds, 50) catch return false;
+                },
+                else => return false,
+            }
+        }
+        return true;
+    }
+
     fn drainStderr(self: *AgentProc) void {
-        const f = self.child.stderr orelse return;
+        const f = self.stderr_file orelse return;
         var chunk: [4096]u8 = undefined;
         var pending: std.ArrayList(u8) = .empty;
         defer pending.deinit(self.gpa);
         while (true) {
             const n = f.readStreaming(self.io, &.{&chunk}) catch break;
-            if (n == 0) continue;
+            if (n == 0) break;
             pending.appendSlice(self.gpa, chunk[0..n]) catch break;
             while (std.mem.indexOfScalar(u8, pending.items, '\n')) |nl| {
                 self.stderr_mutex.lockUncancelable(self.io);
@@ -455,29 +555,48 @@ pub const AgentProc = struct {
         return self.tail.snapshot(gpa) catch null;
     }
 
-    /// Write `bytes` and a trailing newline to stdin (serialized across threads).
+    /// Queue `bytes` and a trailing newline for stdin; never blocks on the
+    /// child. Lines are written in order by the writer thread.
     pub fn writeLine(self: *AgentProc, bytes: []const u8) !void {
+        const nl = bytes.len == 0 or bytes[bytes.len - 1] != '\n';
+        const line = try self.gpa.alloc(u8, bytes.len + @intFromBool(nl));
+        errdefer self.gpa.free(line);
+        @memcpy(line[0..bytes.len], bytes);
+        if (nl) line[bytes.len] = '\n';
         self.write_mutex.lockUncancelable(self.io);
         defer self.write_mutex.unlock(self.io);
-        if (!self.stdin_open) return error.StdinClosed;
-        const f = self.child.stdin orelse return error.StdinClosed;
-        f.writeStreamingAll(self.io, bytes) catch return error.StdinClosed;
-        if (bytes.len == 0 or bytes[bytes.len - 1] != '\n') f.writeStreamingAll(self.io, "\n") catch return error.StdinClosed;
+        if (!self.stdin_open or self.stdin_file == null) return error.StdinClosed;
+        if (self.writer == null) {
+            // No writer thread could be started: write in place.
+            self.stdin_file.?.writeStreamingAll(self.io, line) catch return error.StdinClosed;
+            self.gpa.free(line);
+            return;
+        }
+        if (self.queued_bytes + line.len > stdin_queue_cap) return error.StdinClosed;
+        try self.queue.append(self.gpa, line);
+        self.queued_bytes += line.len;
+        self.write_cond.signal(self.io);
     }
 
+    /// End stdin once the queued lines are written (never blocks).
     pub fn closeStdin(self: *AgentProc) void {
         self.write_mutex.lockUncancelable(self.io);
         defer self.write_mutex.unlock(self.io);
         if (!self.stdin_open) return;
         self.stdin_open = false;
-        if (self.child.stdin) |f| f.close(self.io);
-        self.child.stdin = null;
+        self.stdin_closing = true;
+        if (self.writer == null) {
+            if (self.stdin_file) |f| f.close(self.io);
+            self.stdin_file = null;
+            return;
+        }
+        self.write_cond.signal(self.io);
     }
 
     /// The next stdout line without its newline, valid until the next call;
     /// null at end of stream. Lines of any length are assembled.
     pub fn readLine(self: *AgentProc) !?[]const u8 {
-        const f = self.child.stdout orelse return null;
+        const f = self.stdout_file orelse return null;
         while (true) {
             if (std.mem.indexOfScalarPos(u8, self.buf.items, self.scan, '\n')) |nl| {
                 self.line.clearRetainingCapacity();
@@ -495,6 +614,7 @@ pub const AgentProc = struct {
                 self.scan = 0;
                 return self.line.items;
             }
+            if (self.buf.items.len >= max_line_bytes) return error.LineTooLong;
             try self.buf.ensureUnusedCapacity(self.gpa, 16 * 1024);
             const dst = self.buf.unusedCapacitySlice();
             const n = f.readStreaming(self.io, &.{dst}) catch |err| switch (err) {
@@ -570,8 +690,8 @@ pub const AgentProc = struct {
     }
 
     fn startWatchdog(self: *AgentProc) void {
-        self.write_mutex.lockUncancelable(self.io);
-        defer self.write_mutex.unlock(self.io);
+        self.wd_mutex.lockUncancelable(self.io);
+        defer self.wd_mutex.unlock(self.io);
         if (self.watchdog == null and !self.reaped.load(.acquire)) {
             self.watchdog = std.Thread.spawn(.{}, watch, .{self}) catch null;
         }
@@ -600,14 +720,32 @@ pub const AgentProc = struct {
         if (self.reaped.load(.acquire)) return self.term;
         self.closeStdin();
         self.term = self.child.wait(self.io) catch null;
+        // The leader is gone: kill what's left of its group (`shutdown_child`)
+        // before joining stderr, so a straggler holding the pipe can't block
+        // the join or outlive the run.
+        if (comptime !is_windows) posix.kill(-self.pid, .KILL) catch {};
         self.reaped.store(true, .release);
+        self.writer_stop.store(true, .release);
+        self.write_mutex.lockUncancelable(self.io);
+        self.write_cond.signal(self.io);
+        const wr = self.writer;
+        self.writer = null;
+        self.write_mutex.unlock(self.io);
+        if (wr) |t| t.join();
+        // No writer thread: stdin is ours to close.
+        self.write_mutex.lockUncancelable(self.io);
+        if (self.stdin_file) |f| f.close(self.io);
+        self.stdin_file = null;
+        self.write_mutex.unlock(self.io);
         if (self.stderr_thread) |t| t.join();
         self.stderr_thread = null;
+        if (self.stderr_file) |f| f.close(self.io);
+        self.stderr_file = null;
         self.watchdog_stop.store(true, .release);
-        self.write_mutex.lockUncancelable(self.io);
+        self.wd_mutex.lockUncancelable(self.io);
         const wd = self.watchdog;
         self.watchdog = null;
-        self.write_mutex.unlock(self.io);
+        self.wd_mutex.unlock(self.io);
         if (wd) |t| t.join();
         return self.term;
     }
@@ -618,6 +756,9 @@ pub const AgentProc = struct {
             self.signal(.KILL);
             _ = self.wait();
         }
+        for (self.queue.items) |l| self.gpa.free(l);
+        self.queue.deinit(self.gpa);
+        if (self.stdout_file) |f| f.close(self.io);
         self.buf.deinit(self.gpa);
         self.line.deinit(self.gpa);
         self.gpa.destroy(self);
@@ -698,4 +839,58 @@ test "agent_proc: missing binary and missing cwd are reported, a slow child is k
     const tail = p.stderrTail(testing.allocator);
     defer if (tail) |t| testing.allocator.free(t);
     try testing.expectEqualStrings("oops", tail.?);
+}
+
+test "agent_proc: a child that stops reading stdin blocks neither writers nor the watchdog" {
+    if (!std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = testing.io;
+    const p = try AgentProc.spawn(testing.allocator, io, &.{ "/bin/sh", "-c", "sleep 30" }, null, null, .{});
+    defer p.destroy();
+    const Ctx = struct {
+        p: *AgentProc,
+        done: std.atomic.Value(bool) = .init(false),
+        fn go(c: *@This()) void {
+            const big: [256 * 1024]u8 = @splat('x');
+            // Far more than a pipe holds: an engine thread must not wait on it.
+            for (0..8) |_| c.p.writeLine(&big) catch break;
+            c.p.armDeadline(30_000);
+            c.done.store(true, .release);
+        }
+    };
+    var ctx: Ctx = .{ .p = p };
+    const th = try std.Thread.spawn(.{}, Ctx.go, .{&ctx});
+    var waited: u32 = 0;
+    while (!ctx.done.load(.acquire) and waited < 3000) : (waited += 10) try Io.sleep(io, .fromMilliseconds(10), .awake);
+    const ok = ctx.done.load(.acquire);
+    // Kill the group either way, so a writer stuck in the pipe returns.
+    p.terminate();
+    th.join();
+    try testing.expect(ok);
+}
+
+test "agent_proc: reaping kills the leader's group, so a straggler holding stderr can't block the join" {
+    if (!std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = testing.io;
+    // The leader exits at once; its background child keeps stderr open.
+    const p = try AgentProc.spawn(testing.allocator, io, &.{ "/bin/sh", "-c", "sleep 30 & echo started; exit 0" }, null, null, .{});
+    defer p.destroy();
+    try testing.expectEqualStrings("started", (try p.readLine()).?);
+    const Ctx = struct {
+        p: *AgentProc,
+        done: std.atomic.Value(bool) = .init(false),
+        fn go(c: *@This()) void {
+            _ = c.p.wait();
+            c.done.store(true, .release);
+        }
+    };
+    var ctx: Ctx = .{ .p = p };
+    const pid = p.pid;
+    const th = try std.Thread.spawn(.{}, Ctx.go, .{&ctx});
+    var waited: u32 = 0;
+    while (!ctx.done.load(.acquire) and waited < 3000) : (waited += 10) try Io.sleep(io, .fromMilliseconds(10), .awake);
+    const ok = ctx.done.load(.acquire);
+    // Unblock a join stuck on the straggler either way.
+    if (!ok) posix.kill(-pid, .KILL) catch {};
+    th.join();
+    try testing.expect(ok);
 }
