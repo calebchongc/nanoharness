@@ -3,6 +3,11 @@
 This is a separate, explicitly **Rust-dependent** mode. It is not the
 historical all-Zig `HZD1`/tail-only proof in `REPORT.md`.
 
+The current local runner consumes a separate prebuilt Rust dylib, not the
+original static archive. The table below is the historical static acceptance;
+see [the dynamic artifact proof](SIDELOADED-LORO.md) for its loading contract,
+Rust-free consumer build/runtime checks and fresh ten-stage acceptance.
+
 ## Boundary and versions
 
 - Native Zig 0.17.0 calls the project-owned C ABI in `crates/nano-loro`.

@@ -68,9 +68,12 @@ is not Loro-compatible.
 
 For retained-Loro synchronization, use `scripts/local-loro.sh build` or
 `scripts/local-loro.sh check` from the repository root. This explicit mode
-links a thin project-owned C ABI around the existing `harness-doc` schema
-and locked Loro core, and **requires Rust**. It is not an official
-`loro-ffi` Zig binding. See [the ABI and persistence boundary](../../crates/nano-loro/README.md).
+loads a separate prebuilt Rust dylib through a thin project-owned C ABI
+around the existing `harness-doc` schema and locked Loro core. Only its
+producer/acceptance peer requires Rust: supply `HARNESS_LORO_PREBUILT` to
+build/run Zig without Cargo/Rust installed. It is still **not pure Zig** or
+an official `loro-ffi` Zig binding. See [the ABI and persistence boundary](../../crates/nano-loro/README.md)
+and [the artifact/loading contract](docs/proof/SIDELOADED-LORO.md).
 
 ```sh
 cd apps/nano
@@ -106,7 +109,7 @@ its own environment, and writes the engine's output to
 when harness-nano quits: it holds the chats' runs, and other windows and
 chats attach to it. Stop it with `harness-engine daemon stop` or by its pid
 in `engine.lock` in the data folder. Set `HARNESS_NANO_NO_ENGINE_START` to
-wait for an engine instead. `sh scripts/bundle.sh` packages only the app;
+wait for an engine instead. `sh scripts/bundle.sh` packages app and engine;
 `scripts/package-macos.sh` (at the repository root) ships the app and
 `harness-engine` together.
 

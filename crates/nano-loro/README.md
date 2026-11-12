@@ -23,19 +23,24 @@ export HARNESS_HEAVY_BUILD_LOCK="$(pwd)/../zigfull.lock"
 scripts/build-loro.sh
 cd apps/nano
 ../../scripts/heavy-build.sh zig build install \
-  -Dloro-lib="$(cd ../.. && pwd)/target/nano-loro/debug/libharness_nano_loro.a"
+  -Dloro-dylib="$(cd ../.. && pwd)/target/nano-loro/prebuilt/macos-$(uname -m)/libharness_nano_loro.dylib"
 ```
 
 Or use `scripts/local-loro.sh build` / `scripts/local-loro.sh check`.
-This mode intentionally **requires Rust**. Default Nano builds remain the
+The producer requires Rust; consumers can supply `HARNESS_LORO_PREBUILT` and
+build/run Zig without Cargo/Rust. The separate dylib is still Rust code, not
+pure Zig or another engine process. The static archive is retained for explicit
+`-Dloro-lib` developer tests. See the [sideloading contract and local proof](../../apps/nano/docs/proof/SIDELOADED-LORO.md). Default Nano builds remain the
 legacy/offline `HZD1` mode and do not gain Loro interoperability merely by
-retaining files. `zig build no-rust -Dloro-lib=...` explicitly fails; the
+retaining files. `zig build no-rust -Dloro-lib=...` or `-Dloro-dylib=...` explicitly fails; the
 zero-Rust scanner has not been loosened to exempt the bridge. The historical
 `prove-zig.sh` proof concerns the legacy/offline mode, not this mode.
 
 ## ABI and persistence
 
-`include/harness_loro.h` is the boundary. A document is an opaque,
+`include/harness_loro.h` is the boundary. ABI version 1 and capability mask
+0x3f are validated before handles are created; dynamic builds retain the
+loaded library until its handles/buffers are freed. A document is an opaque,
 non-concurrently-used handle. Input pointer/length spans are borrowed.
 Return buffers are Rust-owned boxed slices, copied by the Zig wrapper and
 freed by `harness_loro_buffer_free`, including on errors. Rust panics are
