@@ -155,6 +155,25 @@ pub fn waitAllExited(io: Io, ms: u32) bool {
 pub var allow_exe_search: bool = !@import("builtin").is_test;
 
 pub const interrupt_grace_ms: u32 = 2000;
+
+/// Longest a resume waits for the previous process on its session: the
+/// interrupt and kill graces plus slack (`live_sessions::WAIT`).
+pub const session_wait_ms: u32 = 10_000;
+
+/// Native sessions whose agent process is still alive
+/// (`claude/live_sessions.rs`): two processes on one session drop the new
+/// prompt, so a resume waits for the old one to be reaped.
+const SessionHold = struct { id: []u8, owner: *const Turn };
+var sessions_mu: Io.Mutex = .init;
+var live_sessions: std.ArrayList(SessionHold) = .empty;
+const sessions_gpa = std.heap.smp_allocator;
+
+fn sessionOpen(io: Io, id: []const u8) bool {
+    sessions_mu.lockUncancelable(io);
+    defer sessions_mu.unlock(io);
+    for (live_sessions.items) |h| if (std.mem.eql(u8, h.id, id)) return true;
+    return false;
+}
 pub const kill_grace_ms: u32 = 3000;
 
 pub const Turn = struct {
@@ -252,6 +271,8 @@ pub const Turn = struct {
             self.mu.unlock(self.io);
             p.destroy();
         }
+        // The child is reaped: its native session is free for the next run.
+        self.releaseSessions();
         self.finished.store(true, .release);
     }
 
@@ -274,6 +295,46 @@ pub const Turn = struct {
         self.mu.lockUncancelable(self.io);
         defer self.mu.unlock(self.io);
         self.proc = p;
+    }
+
+    /// Mark native session `id` as open in this turn's process until the
+    /// process is reaped (`live_sessions::register`). A newer hold on the
+    /// same id replaces an older one.
+    pub fn holdSession(self: *Turn, id: []const u8) void {
+        const copy = sessions_gpa.dupe(u8, id) catch return;
+        sessions_mu.lockUncancelable(self.io);
+        defer sessions_mu.unlock(self.io);
+        var i: usize = 0;
+        while (i < live_sessions.items.len) {
+            if (std.mem.eql(u8, live_sessions.items[i].id, id)) {
+                sessions_gpa.free(live_sessions.swapRemove(i).id);
+            } else i += 1;
+        }
+        live_sessions.append(sessions_gpa, .{ .id = copy, .owner = self }) catch sessions_gpa.free(copy);
+    }
+
+    /// Drop this turn's holds (only its own: a newer run may hold the id now).
+    fn releaseSessions(self: *Turn) void {
+        sessions_mu.lockUncancelable(self.io);
+        defer sessions_mu.unlock(self.io);
+        var i: usize = 0;
+        while (i < live_sessions.items.len) {
+            if (live_sessions.items[i].owner == self) {
+                sessions_gpa.free(live_sessions.swapRemove(i).id);
+            } else i += 1;
+        }
+    }
+
+    /// Wait until no process holds session `id`, at most `ms`, and no longer
+    /// than this turn stays uninterrupted (`wait_until_closed`). True when
+    /// the session was free in time.
+    pub fn waitSessionClosed(self: *Turn, id: []const u8, ms: u32) bool {
+        var waited: u32 = 0;
+        while (true) : (waited += 20) {
+            if (!sessionOpen(self.io, id)) return true;
+            if (waited >= ms or self.interrupted.load(.acquire)) return false;
+            Io.sleep(self.io, .fromMilliseconds(20), .awake) catch return false;
+        }
     }
 
     /// Write one line to the agent (any thread). False if it's gone.

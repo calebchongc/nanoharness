@@ -374,10 +374,16 @@ fn run(t: *Turn) !void {
     const argv = try buildArgv(a, exe, t.req, opts);
     var env = try t.childEnv(exe);
     defer env.deinit();
+    // A previous run's process may still be exiting: two processes on one
+    // session drop the new prompt (`live_sessions.rs`).
+    if (t.req.resume_id) |r| if (!t.waitSessionClosed(r, agent_turn.session_wait_ms)) {
+        std.log.warn("harness-engine: previous claude process still open on {s}; resuming anyway", .{r});
+    };
     const proc = try t.spawn(argv, &env, .{});
     _ = t.send(try userLine(a, t.req.prompt, t.req.reasoning));
 
     var norm: Normalizer = .{};
+    var held = false;
     var line_arena = std.heap.ArenaAllocator.init(t.gpa);
     defer line_arena.deinit();
     var saw_done = false;
@@ -385,6 +391,10 @@ fn run(t: *Turn) !void {
         defer _ = line_arena.reset(.retain_capacity);
         const la = line_arena.allocator();
         const out = try norm.apply(la, line, t.interrupted.load(.acquire));
+        if (!held) if (norm.session_id) |sid| {
+            t.holdSession(sid);
+            held = true;
+        };
         for (out.events.items) |ev| {
             if (ev == .done) saw_done = true;
             t.emit(ev);
@@ -657,4 +667,35 @@ test "claude: a CLI that exits without a result surfaces the crash message" {
     const doc = try rig.docJson();
     defer testing.allocator.free(doc);
     try testing.expect(std.mem.indexOf(u8, doc, "claude exited unexpectedly (exit code 3): boom: Bearer [REDACTED]") != null);
+}
+
+const mock_live_session =
+    \\#!/bin/sh
+    \\d=$(dirname "$0")
+    \\case "$*" in *--resume=*)
+    \\  if [ -f "$d/first-exited" ]; then echo yes > "$d/second-saw"; else echo no > "$d/second-saw"; fi;;
+    \\esac
+    \\IFS= read -r first
+    \\echo '{"type":"system","subtype":"init","session_id":"sess-live"}'
+    \\echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Working"}}}'
+    \\case "$*" in *--resume=*) ;; *) while [ ! -f "$d/go" ]; do sleep 0.05; done;; esac
+    \\echo '{"type":"result","subtype":"success","session_id":"sess-live"}'
+    \\case "$*" in *--resume=*) ;; *) sleep 1; touch "$d/first-exited";; esac
+    \\
+;
+
+test "claude: a queued turn resumes only after the previous claude process exited" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    const rig = try testkit.Rig.create(.{ .harness = "claude-code", .override_var = "CLAUDE_CODE_EXECUTABLE", .script = mock_live_session, .autonomy = "full-access" });
+    defer rig.destroy();
+    try rig.run("m-1", "first");
+    try rig.waitFor("Working", 5000);
+    try rig.call("QueueMessage", "{\"chatId\":\"chat-1\",\"id\":\"q-1\",\"text\":\"second\",\"holdForTurnEnd\":true}");
+    const go = try std.fmt.allocPrint(testing.allocator, "{s}/go", .{rig.dir});
+    defer testing.allocator.free(go);
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = go, .data = "" });
+    try rig.waitIdle(15000);
+    const saw = try rig.readFile("second-saw");
+    defer testing.allocator.free(saw);
+    try testing.expectEqualStrings("yes\n", saw);
 }
