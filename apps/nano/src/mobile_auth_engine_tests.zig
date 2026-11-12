@@ -109,9 +109,11 @@ test "mobile sign-in: random PKCE to the iOS redirect, callback, exchange, org c
         th.join();
     }
 
-    const dir = "/tmp/harness-zig-mobile-auth-test";
-    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    std.Io.Dir.cwd().deleteFile(io, dir ++ "/session.json") catch {};
+    // A fresh folder per run: a fixed path collides with another run's.
+    var dir_tmp = testing.tmpDir(.{});
+    defer dir_tmp.cleanup();
+    const dir = try dir_tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
 
     var host = try engine_host.EngineHost.init(gpa, "dev-phone", "Test Phone");
     defer host.deinit();

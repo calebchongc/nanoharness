@@ -64,6 +64,15 @@ fn id8(id: []const u8) []const u8 {
     return id[0..@min(id.len, 8)];
 }
 
+/// The committed file's name in the uploads folder: `{id8}-{sanitize(name)}`
+/// (Rust's `UploadCommit`). Every reader of a `pending://{uploadId}/{name}`
+/// ref finds the file through this.
+pub fn storedLeaf(gpa: Allocator, upload_id: []const u8, file_name: []const u8) ![]u8 {
+    const name = try sanitize(gpa, file_name);
+    defer gpa.free(name);
+    return std.fmt.allocPrint(gpa, "{s}-{s}", .{ id8(upload_id), name });
+}
+
 /// `UploadCommit { uploadId, fileName }` → `{ "path": … }`.
 pub fn commit(host: *engine_host.EngineHost, params: json.Value) !RpcOutcome {
     const gpa = host.gpa;
@@ -82,9 +91,7 @@ pub fn commit(host: *engine_host.EngineHost, params: json.Value) !RpcOutcome {
     const dir = try std.fs.path.join(gpa, &.{ data_dir, "uploads" });
     defer gpa.free(dir);
     std.Io.Dir.cwd().createDirPath(io, dir) catch |e| return common.failed("io: {s}", .{@errorName(e)});
-    const name = try sanitize(gpa, file_name);
-    defer gpa.free(name);
-    const leaf = try std.fmt.allocPrint(gpa, "{s}-{s}", .{ id8(upload_id), name });
+    const leaf = try storedLeaf(gpa, upload_id, file_name);
     defer gpa.free(leaf);
     const full_path = try std.fs.path.join(gpa, &.{ dir, leaf });
     var path_owned = true;
@@ -255,3 +262,24 @@ test "rpcw_uploads ShowImage, ShowVisual and OpenTerminal need their ids (no mad
     try expectErr(try f.call("ShowVisual", "{\"chatId\":\"c1\",\"title\":\"t\",\"script\":\"\"}"), "missing field `id`");
     try expectErr(try f.call("OpenTerminal", "{\"cols\":80,\"rows\":24}"), "missing field `chatId`");
 }
+
+test "rpcw_uploads a relayed command finds the file UploadCommit wrote, by its pending:// ref" {
+    var f: Fx = undefined;
+    try f.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const id = "0123456789abcdef";
+    const chunk = try f.call("UploadChunk", "{\"uploadId\":\"0123456789abcdef\",\"seq\":0,\"data\":\"aGVsbG8tcG5n\"}");
+    gpa.free(chunk.unary_json);
+    const out = try f.call("UploadCommit", "{\"uploadId\":\"0123456789abcdef\",\"fileName\":\"Screen Shot 2026-11-12 at 9.41.png\"}");
+    defer gpa.free(out.unary_json);
+    var parsed = try json.parseFromSlice(json.Value, gpa, out.unary_json, .{});
+    defer parsed.deinit();
+    const written = parsed.value.object.get("path").?.string;
+    const uploads = try std.fs.path.join(gpa, &.{ f.data, "uploads" });
+    defer gpa.free(uploads);
+    const found = (try @import("relay_command.zig").pendingTargetPath(gpa, uploads, "pending://" ++ id ++ "/Screen Shot 2026-11-12 at 9.41.png")).?;
+    defer gpa.free(found);
+    try testing.expectEqualStrings(written, found);
+}
+

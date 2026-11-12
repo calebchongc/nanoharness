@@ -37,6 +37,8 @@ pub const Room = struct {
     accept_thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
     acked: std.atomic.Value(u32) = .init(0),
+    /// Set when the accept loop has returned.
+    accept_exited: Io.Event = .unset,
 
     pub fn start(gpa: Allocator, io: Io) !*Room {
         const addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -50,8 +52,9 @@ pub const Room = struct {
 
     pub fn stop(r: *Room) void {
         r.stopping.store(true, .release);
-        (net.Stream{ .socket = r.listener.socket }).shutdown(r.io, .both) catch {};
-        if (r.accept_thread) |t| t.join();
+        // A listening socket's shutdown does not wake `accept` on macOS.
+        if (r.accept_thread) |t| @import("test_server_stop.zig").stopAcceptLoop(r.io, r.port, &r.accept_exited, t);
+        r.accept_thread = null;
         r.lock.lockUncancelable(r.io);
         for (r.members.items) |m| m.peer.shutdown();
         r.lock.unlock(r.io);
@@ -126,6 +129,7 @@ pub const Room = struct {
     }
 
     fn acceptLoop(r: *Room) void {
+        defer r.accept_exited.set(r.io);
         while (!r.stopping.load(.acquire)) {
             const stream = r.listener.accept(r.io) catch return;
             r.join(stream) catch stream.close(r.io);

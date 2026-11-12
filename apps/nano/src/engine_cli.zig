@@ -1043,6 +1043,8 @@ const FakeEdge = struct {
     port: u16,
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
+    /// Set when `run` has returned.
+    exited: Io.Event = .unset,
     seen: [8][64]u8 = undefined,
     seen_len: [8]usize = @splat(0),
     seen_count: usize = 0,
@@ -1053,6 +1055,7 @@ const FakeEdge = struct {
     }
 
     fn run(self: *FakeEdge) void {
+        defer self.exited.set(testing.io);
         while (!self.stop.load(.acquire)) {
             var stream = self.server.accept(testing.io) catch return;
             defer stream.close(testing.io);
@@ -1102,11 +1105,7 @@ const FakeEdge = struct {
 
     fn shutdown(self: *FakeEdge) void {
         self.stop.store(true, .release);
-        // Wake the accept with one last connection.
-        if (Io.net.IpAddress.parseIp4("127.0.0.1", self.port)) |addr| {
-            if (addr.connect(testing.io, .{ .mode = .stream })) |s| s.close(testing.io) else |_| {}
-        } else |_| {}
-        if (self.thread) |t| t.join();
+        if (self.thread) |t| @import("test_server_stop.zig").stopAcceptLoop(testing.io, self.port, &self.exited, t);
         self.server.deinit(testing.io);
     }
 };

@@ -71,6 +71,7 @@ step() {
     [[ $rc -eq 124 ]] && echo "   timed out after ${secs} s" >>"$log"
     RESULTS+=("| $name | **FAIL** (exit $rc) | $((end - start)) s |")
     FAILED=1
+    grep -E "^error: '|terminated with signal" "$log" | head -n 20 | sed 's/^/   /'
     tail -n 30 "$log" | sed 's/^/   /'
   fi
   return $rc
@@ -142,7 +143,7 @@ fi
 # 5. The desktop app, offscreen, showing that chat from that engine.
 mkdir -p "$PROOF"
 rm -f "$PROOF"/*.png
-step desktop-render 120 "${ISO_ENV[@]}" "HARNESS_NANO_NO_ENGINE_START=1" "HARNESS_NANO_OPEN_CHAT=chat-proof" \
+step desktop-render 120 "${ISO_ENV[@]}" "HARNESS_NANO_NO_ENGINE_START=1" "HARNESS_SETUP_OFF=1" "HARNESS_NANO_OPEN_CHAT=chat-proof" \
   "$APP/Contents/MacOS/harness-nano" "--nanoui-snapshot=$PROOF/desktop-chat.png" "--nanoui-wait=6"
 test -s "$PROOF/desktop-chat.png" || { RESULTS+=("| desktop-png | **FAIL** (no image) | 0 s |"); FAILED=1; }
 IOS_NOTE="skipped: a booted simulator holds the person's own Harness install, which the proof does not replace"
@@ -174,6 +175,12 @@ SCENARIO_CLEAN="$(printf '%s' "$SCENARIO" | sed -e "s#$WORK#<tmp>#g")"
   echo "|---|---|---|"
   printf '%s\n' "${RESULTS[@]}"
   echo
+  if grep -qE "^error: '" "$WORK/tests-without-rust.log" 2>/dev/null; then
+    echo "## Failed tests"
+    echo
+    grep -E "^error: '" "$WORK/tests-without-rust.log" | sed -e "s#$WORK#<tmp>#g" -e 's/^error: /- /' | head -n 20
+    echo
+  fi
   echo "## Engine scenario"
   echo
   echo "The bundle's harness-engine, isolated (temporary HOME, data folder and port, auth off, previews on a free port):"

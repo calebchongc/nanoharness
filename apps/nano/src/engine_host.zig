@@ -6415,8 +6415,10 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
     host.io = io;
 
     const edge_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{edge_port});
-    const session_dir = "/tmp/harness-zig-auth-test";
-    std.Io.Dir.cwd().createDirPath(io, session_dir) catch {};
+    // A fresh folder per run: a fixed path collides with another run's.
+    var session_tmp = testing.tmpDir(.{});
+    defer session_tmp.cleanup();
+    const session_dir = try session_tmp.dir.realPathFileAlloc(io, ".", a);
     try host.auth.configureCodegraff(edge_url, "cg_client_test", "https://codegraff.example", session_dir);
 
     const empty_params = try json.parseFromSliceLeaky(json.Value, a, "{}", .{});
@@ -6478,7 +6480,7 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
         try testing.expectEqualStrings("rotated-1", host.auth.refresh_token.?);
 
         // Verify persisted session.json contains rotated-1
-        const sess_bytes = try std.Io.Dir.cwd().readFileAlloc(io, "/tmp/harness-zig-auth-test/session.json", a, .limited(64 * 1024));
+        const sess_bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(a, "{s}/session.json", .{session_dir}), a, .limited(64 * 1024));
         try testing.expect(std.mem.indexOf(u8, sess_bytes, "\"refreshToken\":\"rotated-1\"") != null);
         try testing.expect(std.mem.indexOf(u8, sess_bytes, "\"orgId\":\"org_1\"") != null);
     }

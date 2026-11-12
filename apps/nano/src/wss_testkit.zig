@@ -202,6 +202,8 @@ pub const Server = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     current: std.atomic.Value(?*Peer) = .init(null),
     accepted: std.atomic.Value(usize) = .init(0),
+    /// Set when `run` has returned.
+    exited: Io.Event = .unset,
 
     pub fn start(gpa: Allocator, io: Io, script: Script) !*Server {
         return startWith(gpa, io, script, 101, 1);
@@ -235,6 +237,7 @@ pub const Server = struct {
     }
 
     fn run(s: *Server) void {
+        defer s.exited.set(s.io);
         var n: usize = 0;
         while (n < s.max_conns and !s.stopping.load(.acquire)) {
             const stream = s.listener.accept(s.io) catch |err| {
@@ -292,9 +295,10 @@ pub const Server = struct {
     /// Unblocks everything (accept, a blocked read) and frees.
     pub fn stop(s: *Server) void {
         s.stopping.store(true, .release);
-        (net.Stream{ .socket = s.listener.socket }).shutdown(s.io, .both) catch {};
         if (s.current.load(.acquire)) |p| p.shutdown();
-        if (s.thread) |t| t.join();
+        // A listening socket's shutdown does not wake `accept` on macOS.
+        if (s.thread) |t| @import("test_server_stop.zig").stopAcceptLoop(s.io, s.port, &s.exited, t);
+        s.thread = null;
         s.listener.deinit(s.io);
         s.gpa.destroy(s);
     }
@@ -313,6 +317,8 @@ pub const MuteServer = struct {
     thread: std.Thread,
     held: std.atomic.Value(i64) = .init(-1),
     stopping: std.atomic.Value(bool) = .init(false),
+    /// Set when `run` has returned.
+    exited: Io.Event = .unset,
 
     pub fn start(io: Io) !*MuteServer {
         const addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -325,6 +331,7 @@ pub const MuteServer = struct {
     }
 
     fn run(m: *MuteServer) void {
+        defer m.exited.set(m.io);
         const stream = m.listener.accept(m.io) catch return;
         defer stream.close(m.io);
         while (!m.stopping.load(.acquire)) Io.sleep(m.io, .fromMilliseconds(10), .awake) catch return;
@@ -332,8 +339,10 @@ pub const MuteServer = struct {
 
     pub fn stop(m: *MuteServer) void {
         m.stopping.store(true, .release);
-        (net.Stream{ .socket = m.listener.socket }).shutdown(m.io, .both) catch {};
-        m.thread.join();
+        // Shutting a listening socket down does not wake `accept` on macOS:
+        // a test whose client never dialed would join forever. Wake it with
+        // a connection instead, bounded (test_server_stop.zig).
+        @import("test_server_stop.zig").stopAcceptLoop(m.io, m.port, &m.exited, m.thread);
         m.listener.deinit(m.io);
         std.heap.page_allocator.destroy(m);
     }

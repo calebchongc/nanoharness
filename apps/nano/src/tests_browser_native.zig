@@ -57,7 +57,7 @@ const Http = struct {
 
     fn run(h: *Http) void {
         var fds = [_]std.posix.pollfd{.{ .fd = h.server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        if ((std.posix.poll(&fds, 5000) catch return) <= 0) return;
+        if ((std.posix.poll(&fds, 15_000) catch return) <= 0) return;
         const stream = h.server.accept(testing.io) catch return;
         defer stream.close(testing.io);
         var bytes: [4096]u8 = undefined;
@@ -90,7 +90,14 @@ test "the native Browser loads a real localhost HTTP preview without an engine" 
     defer testing.allocator.free(address);
     native.navigate(address);
     try testing.expect(native.allowsBackForwardGestures());
-    nanoui.runFor(3);
+    // WebKit's first load can be slow on a busy machine: run the loop in
+    // short slices until the page is served and titled, 15 s at most.
+    var waited: f64 = 0;
+    while (waited < 15) : (waited += 0.25) {
+        nanoui.runFor(0.25);
+        if (http.served.load(.acquire) and std.mem.eql(u8, native.title(), "Synthetic localhost preview")) break;
+    }
+    if (!http.served.load(.acquire)) std.debug.print("the native browser never requested the local page within 15 s\n", .{});
     try testing.expect(http.served.load(.acquire));
     try testing.expectEqualStrings("Synthetic localhost preview", native.title());
     try testing.expectEqualStrings(address, native.url());

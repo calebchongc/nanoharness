@@ -1259,8 +1259,10 @@ test "AgentAccountsHost 1:1 parity: Claude Max 20x, Codex ChatGPT Pro, Cursor Ke
         s: *std.Io.net.Server,
         tio: std.Io,
         stop: *std.atomic.Value(bool),
+        exited: *std.Io.Event,
 
         fn run(ctx: @This()) void {
+            defer ctx.exited.set(ctx.tio);
             while (!ctx.stop.load(.acquire)) {
                 var stream = ctx.s.accept(ctx.tio) catch return;
                 defer stream.close(ctx.tio);
@@ -1309,13 +1311,11 @@ test "AgentAccountsHost 1:1 parity: Claude Max 20x, Codex ChatGPT Pro, Cursor Ke
         }
     };
 
-    const th = try std.Thread.spawn(.{}, MockUsage.run, .{MockUsage{ .s = &srv, .tio = io, .stop = &stop_mock }});
+    var mock_exited: std.Io.Event = .unset;
+    const th = try std.Thread.spawn(.{}, MockUsage.run, .{MockUsage{ .s = &srv, .tio = io, .stop = &stop_mock, .exited = &mock_exited }});
     defer {
         stop_mock.store(true, .release);
-        if (std.Io.net.IpAddress.parse("127.0.0.1", port)) |wake_addr| {
-            if (wake_addr.connect(io, .{ .mode = .stream })) |ws_wake| ws_wake.close(io) else |_| {}
-        } else |_| {}
-        th.join();
+        @import("test_server_stop.zig").stopAcceptLoop(io, port, &mock_exited, th);
     }
 
     var host_acc = try AgentAccountsHost.init(gpa);

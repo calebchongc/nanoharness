@@ -180,14 +180,17 @@ pub fn pendingRefs(gpa: Allocator, entry: Entry) Allocator.Error![][]const u8 {
 }
 
 /// Where this engine's `UploadCommit` put `pending://{uploadId}/{fileName}`:
-/// `{uploads}/{uploadId}-{basename(fileName)}`. Null for a malformed ref.
+/// `{uploads}/{id8}-{sanitize(fileName)}` (rpcw_uploads.storedLeaf). Null
+/// for a malformed ref.
 pub fn pendingTargetPath(gpa: Allocator, uploads_dir: []const u8, ref: []const u8) Allocator.Error!?[]u8 {
     const rest = if (std.mem.startsWith(u8, ref, pending_ref_prefix)) ref[pending_ref_prefix.len..] else return null;
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
     const upload_id = rest[0..slash];
-    const base = std.fs.path.basename(rest[slash + 1 ..]);
-    if (upload_id.len == 0 or base.len == 0 or std.mem.indexOfAny(u8, upload_id, "/\\") != null or std.mem.eql(u8, upload_id, "..")) return null;
-    return try std.fmt.allocPrint(gpa, "{s}/{s}-{s}", .{ std.mem.trimEnd(u8, uploads_dir, "/"), upload_id, base });
+    const file_name = rest[slash + 1 ..];
+    if (upload_id.len == 0 or file_name.len == 0 or std.mem.indexOfAny(u8, upload_id, "/\\") != null or std.mem.eql(u8, upload_id, "..")) return null;
+    const leaf = try @import("rpcw_uploads.zig").storedLeaf(gpa, upload_id, file_name);
+    defer gpa.free(leaf);
+    return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ std.mem.trimEnd(u8, uploads_dir, "/"), leaf });
 }
 
 fn uploadsDirAlloc(host: *engine_host.EngineHost) Allocator.Error![]u8 {
@@ -395,7 +398,7 @@ test "relay command: pending refs and where they land" {
     try testing.expectEqual(@as(usize, 1), refs.len);
     const path = (try pendingTargetPath(testing.allocator, "/d/uploads/", refs[0])).?;
     defer testing.allocator.free(path);
-    try testing.expectEqualStrings("/d/uploads/up-1-shot.png", path);
+    try testing.expectEqualStrings("/d/uploads/up-1-shot.png", path); // `{id8}-{sanitize(name)}`
     try testing.expect((try pendingTargetPath(testing.allocator, "/d", "pending://../x")) == null);
     try testing.expect((try pendingTargetPath(testing.allocator, "/d", "file:///x")) == null);
 }
