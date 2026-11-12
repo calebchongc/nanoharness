@@ -251,6 +251,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_palette.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
+    @import("view_slash_menu.zig").overlay(c, a, popup);
     @import("view_image_preview.zig").overlay(c, a, k);
     @import("view_workspace_gate.zig").overlay(c, a, k);
     // First-run setup, over the whole window.
@@ -500,6 +501,7 @@ fn keys(c: *ui.Context, a: *App) void {
     if (@import("view_setup.zig").keys(c, a)) return;
     if (@import("view_image_preview.zig").keys(c, a)) return;
     if (@import("view_workspace_gate.zig").keys(c, a)) return;
+    if (@import("view_slash_menu.zig").keys(c, a)) return;
     if (@import("view_project_setup.zig").keys(c, a)) return;
     if (@import("view_open_chooser.zig").keys(c, a)) return;
     // ⌘K, the command palette (fixed, as the GPUI app binds it); open, it

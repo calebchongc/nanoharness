@@ -10,4 +10,7 @@ test {
     _ = @import("view_workspace_gate.zig");
     _ = @import("app_keep_awake.zig");
     _ = @import("view_settings_keep_awake.zig");
+    _ = @import("slash_menu.zig");
+    _ = @import("app_slash.zig");
+    _ = @import("view_slash_menu.zig");
 }

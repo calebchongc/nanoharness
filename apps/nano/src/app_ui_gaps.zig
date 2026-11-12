@@ -9,11 +9,13 @@ pub const State = struct {
     notes: @import("app_annotate.zig").Notes = .{},
     gate: @import("app_workspace_gate.zig").State = .{},
     keep_awake: @import("app_keep_awake.zig").State = .{},
+    slash: @import("app_slash.zig").State = .{},
 
     pub fn deinit(s: *State, a: *App) void {
         s.preview.deinit(a);
         s.notes.deinit(a.gpa);
         s.gate.deinit(a.gpa);
         s.keep_awake.deinit(a.gpa);
+        s.slash.deinit(a.gpa);
     }
 };

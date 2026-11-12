@@ -244,7 +244,7 @@ fn encode(c: *ui.Context, s: []const u8) []const u8 {
     return w.written();
 }
 
-fn startRename(a: *App, ch: workspace.Chat) void {
+pub fn startRename(a: *App, ch: workspace.Chat) void {
     close(a);
     var id: std.ArrayList(u8) = .empty;
     id.appendSlice(a.gpa, ch.id) catch return;
