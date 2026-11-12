@@ -2146,7 +2146,7 @@ pub const EngineHost = struct {
                 ) };
             },
             .SetHarnessEnabled => return @import("rpcw_harnesses.zig").setHarnessEnabled(self, params),
-            .CancelInstall => return @import("rpcw_harnesses.zig").cancelInstall(self, params),
+            .CancelInstall => return @import("rpc_install.zig").cancelInstall(self, params),
             .McpServerAction => return @import("rpcw_mcp.zig").mcpServerAction(self, params),
             .CodegraffCancelJob => return @import("rpcw_codegraff.zig").cancelJob(self, params),
             .CodegraffGithubRunnerAction => return @import("rpcw_codegraff.zig").githubRunnerAction(self, params),
@@ -2160,9 +2160,9 @@ pub const EngineHost = struct {
             .PollAgentLogin,
             .CancelAgentLogin,
             => return @import("rpc_logins.zig").handle(self, method, params),
+            .InstallHarness => return @import("rpc_install.zig").installHarness(self, params),
             .BrowseLinkPair,
             .BrowseLinkDisconnect,
-            .InstallHarness,
             .SimulatorInput,
             .LocalhostPageInput,
             => {

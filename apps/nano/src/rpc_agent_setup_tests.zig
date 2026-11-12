@@ -14,4 +14,6 @@ test {
     _ = @import("rpc_models.zig");
     _ = @import("agent_logins.zig");
     _ = @import("rpc_logins.zig");
+    _ = @import("harness_install.zig");
+    _ = @import("rpc_install.zig");
 }
