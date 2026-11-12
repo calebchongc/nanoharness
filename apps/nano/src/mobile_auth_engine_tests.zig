@@ -195,3 +195,18 @@ test "mobile sign-in: random PKCE to the iOS redirect, callback, exchange, org c
     try testing.expectEqual(auth_host.AuthPhase.signed_out, host.auth.phase);
     try testing.expect(host.auth.refresh_token == null);
 }
+
+test "Graff compaction: the engine keeps the `pct` the apps send, and null is graff's default" {
+    const gpa = testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var host = try engine_host.EngineHost.init(gpa, "dev-c", "Box");
+    defer host.deinit();
+    const set70 = try call(&host, a, "SetGraffCompactAt", "{\"pct\":70}");
+    defer gpa.free(set70.unary_json);
+    try testing.expectEqualStrings("70", set70.unary_json);
+    const reset = try call(&host, a, "SetGraffCompactAt", "{\"pct\":null}");
+    defer gpa.free(reset.unary_json);
+    try testing.expectEqualStrings("80", reset.unary_json);
+}

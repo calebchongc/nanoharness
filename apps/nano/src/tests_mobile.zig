@@ -13,4 +13,7 @@ test {
     _ = @import("mobile_attach.zig");
     _ = @import("ios_photos.zig");
     _ = @import("view_mobile_attach.zig");
+    _ = @import("mobile_settings.zig");
+    _ = @import("view_mobile_settings.zig");
+    _ = @import("view_mobile_onboarding.zig");
 }

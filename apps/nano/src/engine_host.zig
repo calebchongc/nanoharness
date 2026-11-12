@@ -2319,8 +2319,11 @@ pub const EngineHost = struct {
             },
             .SetGraffCompactAt => {
                 if (requireObj(params)) |obj| {
-                    if (obj.get("percent")) |v| if (v == .integer) {
-                        self.graff_compact_at = v.integer;
+                    // `pct` is what the apps send (null: graff's default, 80); `percent` too.
+                    if (obj.get("pct") orelse obj.get("percent")) |v| switch (v) {
+                        .integer => |n| self.graff_compact_at = n,
+                        .null => self.graff_compact_at = 80,
+                        else => {},
                     };
                 }
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };

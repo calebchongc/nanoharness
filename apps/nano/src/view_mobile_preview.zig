@@ -11,4 +11,6 @@ pub fn apply(a: *App, which: []const u8) void {
     if (!std.mem.eql(u8, demo, "1")) return;
     @import("view_mobile_signin.zig").applyPreview(a, which);
     @import("view_mobile_profile.zig").applyPreview(a, which);
+    @import("view_mobile_settings.zig").applyPreview(a, which);
+    @import("view_mobile_onboarding.zig").applyPreview(a, which);
 }

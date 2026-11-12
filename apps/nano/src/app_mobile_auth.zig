@@ -300,6 +300,8 @@ fn onSelected(a: *App, _: u64, r: rpc.Reply) void {
             s.exchanging = false;
             s.busy = false;
             s.engine_state = .signed_in;
+            // A fresh sign-in: the first-run setup (`Onboarding.signedInFresh`).
+            @import("view_mobile_onboarding.zig").start(a);
         },
         .err => |e| if (s.picking) s.org_err.set(e) else {
             s.exchanging = false;

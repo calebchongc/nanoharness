@@ -94,6 +94,8 @@ pub const State = struct {
     question_h: f32 = 0,
     /// The attach menu and its last error (view_mobile_attach.zig).
     attach: @import("view_mobile_attach.zig").State = .{},
+    /// Settings' page and its per-computer values (view_mobile_settings.zig).
+    settings_ui: @import("view_mobile_settings.zig").State = .{},
     /// The error row whose agent sign-in sheet is open (view_mobile_reauth.zig).
     reauth: @import("view_mobile_reauth.zig").Open = .{},
 
@@ -228,6 +230,8 @@ pub fn view(a: *App, c: *ui.Context) void {
         renderSheetOverlay(a, c, k, rt);
     }
     @import("view_mobile_profile.zig").overlays(a, c, k);
+    // First-run setup, over everything (view_mobile_onboarding.zig).
+    _ = @import("view_mobile_onboarding.zig").render(a, c, k);
 
     const t_end = std.Io.Clock.awake.now(a.io);
     const work_ns: f64 = @floatFromInt(t_start.durationTo(t_end).toNanoseconds());
@@ -371,6 +375,7 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
         defer top_bar.end();
 
         if (mg.circleButton(c, "ios-home-settings-btn", .home_customize_circle, .@"settings-minimalistic", k.text, rt, null).clicked) {
+            a.mobile.settings_ui.page = .root;
             a.mobile.sheet = .settings;
         }
         {
@@ -803,6 +808,7 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
         }
 
         if (mg.circleButton(c, "ios-session-menu-btn", .session_menu_circle, .@"more-horizontal", k.text, rt, null).clicked) {
+            a.mobile.settings_ui.page = .root;
             a.mobile.sheet = .settings;
         }
     }
@@ -1186,7 +1192,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
         const title = switch (a.mobile.sheet) {
             .new_session => "New Session",
             .write_dock => "Compose",
-            .settings => "Settings & Telemetry",
+            .settings => @import("view_mobile_settings.zig").title(a),
             .session_switcher => "Switch Session",
             .profile => "Profile",
             .reauth => "Reconnect ChatGPT",
@@ -1201,7 +1207,7 @@ fn renderSheetOverlay(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
     switch (a.mobile.sheet) {
         .new_session => renderNewSessionSheet(a, c, k, rt),
         .write_dock => renderWriteDockSheet(a, c, k, rt),
-        .settings => renderSettingsSheet(a, c, k, rt),
+        .settings => @import("view_mobile_settings.zig").render(a, c, k, rt),
         .session_switcher => renderSwitcherSheet(a, c, k),
         .profile => @import("view_mobile_profile.zig").render(a, c, k),
         .reauth => @import("view_mobile_reauth.zig").sheet(a, c, k),
@@ -1318,74 +1324,6 @@ fn renderSwitcherSheet(a: *App, c: *ui.Context, k: theme.Colors) void {
             a.openChat(ch.id, ch.space_id);
             a.mobile.sheet = .none;
             nanoui.haptics.selection();
-        }
-    }
-}
-
-fn renderSettingsSheet(a: *App, c: *ui.Context, k: theme.Colors, rt: bool) void {
-    ui.key(c, "ios-settings-scroll");
-    const sc = ui.div(c).column().wFull().maxH(420).gap(12).scrollY();
-    defer sc.end();
-
-    // 1. Live 120Hz ProMotion & perf-contract.json Telemetry
-    const sum = a.mobile.telemetry.summarize();
-    {
-        const tcard = ui.div(c).column().wFull().p(12).gap(6).rounded(16).bg(k.shell).border(k.border).borderW(1);
-        defer tcard.end();
-        {
-            const thdr = ui.div(c).row().wFull().itemsCenter().justifyBetween();
-            defer thdr.end();
-            ui.text(c, "120Hz ProMotion Telemetry", .{ .size = 13.5, .weight = .semibold, .color = k.text });
-            const ok = sum.meetsPerfContract();
-            ui.text(c, if (ok) "1:1 PASS (< 8.0ms)" else "WARMING", .{ .size = 11.5, .weight = .bold, .color = if (ok) k.success else k.warning });
-        }
-        ui.text(
-            c,
-            c.print("p50: {d:.2} ms  \u{00B7}  p95: {d:.2} ms  \u{00B7}  {d:.0} fps", .{ sum.p50_work_ms, sum.p95_work_ms, sum.est_fps }),
-            .{ .size = 11.5, .mono = true, .wrap = true, .color = k.muted },
-        );
-        ui.text(
-            c,
-            c.print("Scroll: {d} fr  \u{00B7}  Peak: {d:.0} pt/s (0.998/ms)", .{ sum.scroll_frames, sum.peak_velocity_pt_s }),
-            .{ .size = 11.5, .mono = true, .wrap = true, .color = k.faint },
-        );
-    }
-
-    // 2. PhoneSplit Mode (`Auto` / `On` / `Off`)
-    ui.text(c, "Phone Split (>= 600pt)", .{ .size = 12.5, .weight = .semibold, .color = k.muted });
-    {
-        const srow = ui.div(c).row().wFull().gap(6);
-        defer srow.end();
-        for ([_]ios_scroll.SplitMode{ .auto, .on, .off }) |sm| {
-            if (mg.pillButton(c, c.print("ios-split-{s}", .{sm.asText()}), .write_toolbar_pill, null, sm.asText(), null, k.text, a.mobile.split_mode == sm, k.accent, rt).clicked) {
-                a.mobile.split_mode = sm;
-            }
-        }
-    }
-
-    // 3. 19-Family / 31-Variant iOS Theme Catalog
-    const all_mobile = themes.mobileAll();
-    ui.text(c, c.print("iOS Themes ({d} variants)", .{all_mobile.len}), .{ .size = 12.5, .weight = .semibold, .color = k.muted });
-    {
-        const tlist = ui.div(c).column().wFull().gap(5);
-        defer tlist.end();
-        for (all_mobile) |v| {
-            const active = if (a.mobile.theme_override_id) |tid| std.mem.eql(u8, tid, v.id) else false;
-            ui.key(c, c.print("ios-theme-{s}", .{v.id}));
-            const trow = ui.div(c).row().wFull().px(12).py(8).rounded(12).itemsCenter().justifyBetween().bg(if (active) k.accent.alpha(0.18) else k.raised.alpha(0.55)).control();
-            defer trow.end();
-            {
-                const left = ui.div(c).row().itemsCenter().gap(8);
-                defer left.end();
-                _ = ui.div(c).size(14, 14).roundedFull().circular().bg(v.colors.accent).border(v.colors.border).borderW(1).end();
-                ui.text(c, v.name, .{ .size = 13.5, .weight = if (active) .semibold else .medium, .color = k.text });
-            }
-            ui.text(c, if (v.dark) "Dark" else "Light", .{ .size = 11.5, .color = k.faint });
-            if (trow.clicked()) {
-                a.mobile.setThemeOverride(a.gpa, v.id);
-                a.dark = v.dark;
-                nanoui.haptics.selection();
-            }
         }
     }
 }

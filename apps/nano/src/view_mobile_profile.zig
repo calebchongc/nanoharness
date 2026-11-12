@@ -62,6 +62,14 @@ pub fn render(a: *App, c: *ui.Context, k: theme.Colors) void {
             ui.text(c, u.email, .{ .size = 15, .color = k.muted });
         }
         _ = ui.div(c).wFull().h(1).bg(k.border.alpha(0.5)).end();
+        {
+            const usage = row(c, "profile-usage");
+            defer usage.end();
+            ui.text(c, "Usage", .{ .size = 15, .color = k.text });
+            @import("icons.zig").icon(c, .@"alt-arrow-right", 12, k.faint, 0);
+            if (usage.clicked()) @import("view_mobile_settings.zig").openUsage(a);
+        }
+        _ = ui.div(c).wFull().h(1).bg(k.border.alpha(0.5)).end();
         const out = row(c, "profile-sign-out");
         defer out.end();
         ui.text(c, "Sign out", .{ .size = 15, .color = k.danger });
