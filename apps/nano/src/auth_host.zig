@@ -66,7 +66,7 @@ pub const SocketWatchdog = struct {
     }
 };
 
-fn shutdownSocket(handle: std.Io.net.Socket.Handle) void {
+pub fn shutdownSocket(handle: std.Io.net.Socket.Handle) void {
     if (comptime builtin.os.tag == .windows) {
         _ = std.os.windows.ws2_32.shutdown(handle, std.os.windows.ws2_32.SD_BOTH);
     } else {
