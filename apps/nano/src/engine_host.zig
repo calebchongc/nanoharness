@@ -947,6 +947,7 @@ pub const EngineHost = struct {
 
     pub fn deinit(self: *EngineHost) void {
         self.stop_requested = true;
+        @import("rpcw_actions.zig").shutdown();
         turn_host.shutdownHost(self);
         _ = self.device_poll_gen.fetchAdd(1, .acq_rel);
         if (self.oauth_capture) |cap| {
@@ -2085,9 +2086,7 @@ pub const EngineHost = struct {
                     "[{\"name\":\"compact\",\"description\":\"Compact conversation history\"},{\"name\":\"clear\",\"description\":\"Start a fresh chat\"}]",
                 ) };
             },
-            .TakeProjectActionSetup => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"command\":null}") };
-            },
+            .TakeProjectActionSetup => return @import("rpcw_actions.zig").takeSetup(self, params),
             .ListAgentAccounts => {
                 if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     const force_usage: bool = if (requireObj(params)) |obj|
@@ -2818,38 +2817,10 @@ pub const EngineHost = struct {
                 const checkout_path = requireStr(obj, "checkoutPath") orelse return .{ .err = .{ .bad_params = "missing checkoutPath" } };
                 return self.oneStreamItem(false, try git_host.runGitStatusJson(self.gpa, self.io, checkout_path));
             },
-            .ListProjectActions => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                return .{ .unary_json = try self.actionsJson(space_id) };
-            },
-            .UpsertProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const action_id = requireStr(obj, "actionId") orelse "test";
-                const act_val = obj.get("action") orelse return .{ .err = .{ .bad_params = "missing action" } };
-                if (act_val != .object) return .{ .err = .{ .bad_params = "action must be object" } };
-                const name = requireStr(act_val.object, "name") orelse return .{ .err = .{ .bad_params = "missing action.name" } };
-                const command = requireStr(act_val.object, "command") orelse return .{ .err = .{ .bad_params = "missing action.command" } };
-                const icon = requireStr(act_val.object, "icon") orelse "play";
-                const run_wt = if (act_val.object.get("runOnWorktreeCreate")) |v| (if (v == .bool) v.bool else false) else false;
-                try self.upsertAction(space_id, action_id, name, command, icon, run_wt);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"actionId\":{f}}}", .{json.fmt(action_id, .{})}) };
-            },
-            .DeleteProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const action_id = requireStr(obj, "actionId") orelse return .{ .err = .{ .bad_params = "missing actionId" } };
-                const deleted = self.deleteAction(space_id, action_id);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"deleted\":{}}}", .{deleted}) };
-            },
-            .RunProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "actionId") orelse return .{ .err = .{ .bad_params = "missing actionId" } };
-                return .{ .err = .{ .exec_error = "project action not found" } };
-            },
+            .ListProjectActions => return @import("rpcw_actions.zig").list(self, params),
+            .UpsertProjectAction => return @import("rpcw_actions.zig").upsert(self, params),
+            .DeleteProjectAction => return @import("rpcw_actions.zig").delete(self, params),
+            .RunProjectAction => return @import("rpcw_actions.zig").run(self, params),
             .UpdateStatus => {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
