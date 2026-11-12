@@ -103,6 +103,7 @@ pub const Peer = struct {
             try w.print("HTTP/1.1 {d} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{status});
             return w.flush();
         }
+        if (key_len == 0) return error.MissingWebSocketKey;
         var accept: [28]u8 = undefined;
         ws_server.computeAcceptKey(key[0..key_len], &accept);
         try w.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{&accept});
@@ -221,22 +222,31 @@ pub const Server = struct {
 
     fn run(s: *Server) void {
         var n: usize = 0;
-        while (n < s.max_conns and !s.stopping.load(.acquire)) : (n += 1) {
+        while (n < s.max_conns and !s.stopping.load(.acquire)) {
             const stream = s.listener.accept(s.io) catch |err| {
                 if (!s.stopping.load(.acquire)) s.result = err;
                 return;
             };
-            _ = s.accepted.fetchAdd(1, .acq_rel);
-            s.serveOne(stream) catch |err| {
+            const upgraded = s.serveOne(stream) catch |err| {
                 if (!s.stopping.load(.acquire)) {
+                    std.debug.print("test server script failed: {t}\n", .{err});
                     s.result = err;
                     return;
                 }
+                continue;
             };
+            // Another process on this machine may dial a loopback port this
+            // server just took (a reconnect loop aimed at a closed port).
+            // A connection that never upgrades isn't one of ours.
+            if (upgraded) {
+                n += 1;
+                _ = s.accepted.fetchAdd(1, .acq_rel);
+            }
         }
     }
 
-    fn serveOne(s: *Server, stream: net.Stream) !void {
+    /// False when the connection never sent a WebSocket upgrade.
+    fn serveOne(s: *Server, stream: net.Stream) !bool {
         const peer = try s.gpa.create(Peer);
         defer s.gpa.destroy(peer);
         peer.* = .{ .gpa = s.gpa, .io = s.io, .stream = stream, .rd = undefined, .wr = undefined };
@@ -248,8 +258,12 @@ pub const Server = struct {
             peer.deinit();
         }
         s.current.store(peer, .release);
-        try peer.handshake(s.reject_status);
+        peer.handshake(s.reject_status) catch |err| switch (err) {
+            error.BadRequest, error.MissingWebSocketKey, error.EndOfStream, error.ReadFailed, error.StreamTooLong => return false,
+            else => |e| return e,
+        };
         if (s.script) |script| try script(peer);
+        return true;
     }
 
     /// Waits for the script(s) to finish and returns the first failure.
