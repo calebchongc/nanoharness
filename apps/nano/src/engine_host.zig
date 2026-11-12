@@ -60,6 +60,8 @@ pub const WatchKind = enum {
     auth_status,
     sidebar_prefs,
     harness_updates,
+    /// `UpdateStatus` subscribers: this engine's own update state.
+    update_status,
 };
 
 /// Process-wide sync admission budget & `ACTIVE_SYNC_CAP` scheduler rules
@@ -2932,7 +2934,7 @@ pub const EngineHost = struct {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
                 const u = try upd.forEngine(EngineHost, self);
-                if (call_id != 0) try self.registerWatch(call_id, .doc_messages, upd.watch_target);
+                if (call_id != 0) try self.registerWatch(call_id, .update_status, null);
                 return self.oneStreamItem(false, try u.statusJson(self.gpa));
             },
             .CheckForUpdates => {

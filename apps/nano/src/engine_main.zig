@@ -27,6 +27,7 @@ const ws = @import("ws.zig");
 const ws_server = @import("ws_server.zig");
 const engine_cli = @import("engine_cli.zig");
 const engine_daemon = @import("engine_daemon.zig");
+const updates_host = @import("updates_host.zig");
 
 /// The folder a terminal started the engine in, if it names one to show as a
 /// project: not the filesystem root a service or Finder launch reports.
@@ -51,6 +52,28 @@ pub fn graffCandidates(arena: Allocator, home: ?[]const u8, exe_dir: ?[]const u8
         try out.append(arena, try std.fs.path.join(arena, &.{ d, name }));
     }
     return out.toOwnedSlice(arena);
+}
+
+/// Set up this engine's updater at start-up, as the Rust engine spawns its
+/// `Updater` with the engine: managed and app installs start their release
+/// check now, not on the first update call. Call once auth (the edge URL)
+/// is configured.
+pub fn startUpdateChecks(host: *engine_host.EngineHost) void {
+    _ = updates_host.forEngine(engine_host.EngineHost, host) catch |err| {
+        std.log.warn("harness-engine: update checks not started: {t}", .{err});
+    };
+}
+
+test "the updater is set up when the engine starts, before any update call" {
+    updates_host.resetForTests();
+    defer updates_host.resetForTests();
+    var host = try engine_host.EngineHost.init(std.testing.allocator, "dev-start", "Synthetic");
+    defer host.deinit();
+    host.io = std.testing.io;
+    try std.testing.expect(!updates_host.configured());
+    startUpdateChecks(&host);
+    try std.testing.expect(updates_host.configured());
+    try std.testing.expectEqual(@as(?*anyopaque, &host), updates_host.configuredHost());
 }
 
 test "no default project without a real starting folder; never a hard-coded one" {
@@ -317,6 +340,8 @@ pub fn main(init: std.process.Init) !void {
             .git_detected = true,
         });
     }
+
+    startUpdateChecks(&host);
 
     const listen_addr = try net.IpAddress.parseIp4("127.0.0.1", port);
     var server = try listen_addr.listen(io, .{ .reuse_address = true });

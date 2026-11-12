@@ -98,3 +98,36 @@ test "rpc devices: update methods answer through the engine host" {
     defer freeOutcome(&apply);
     try testing.expectEqualStrings("this install is not update-managed — the desktop app updates from its UI; source builds update via git", apply.err.exec_error);
 }
+
+test "rpc devices: UpdateStatus subscribers get their own watch kind, apart from chat messages" {
+    const upd = @import("updates_host.zig");
+    upd.resetForTests();
+    defer upd.resetForTests();
+    var host = try engine_host.EngineHost.init(testing.allocator, "dev-test", "Test Mac");
+    defer host.deinit();
+    host.io = testing.io;
+
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, "{}", .{});
+    defer parsed.deinit();
+    var first = try host.handleWithId(77, "UpdateStatus", parsed.value);
+    defer freeOutcome(&first);
+    try host.registerWatch(78, .doc_messages, "chat-synthetic");
+
+    var update_watches: usize = 0;
+    for (host.watches.items) |w| if (w.sub_id == 77) {
+        try testing.expectEqual(engine_host.WatchKind.update_status, w.kind);
+        try testing.expect(w.target_id == null);
+        update_watches += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), update_watches);
+
+    // A status push reaches the UpdateStatus subscriber and no chat watch.
+    upd.publishStatus(engine_host.EngineHost, &host);
+    try testing.expectEqual(@as(usize, 1), host.pushed_frames.items.len);
+    try testing.expectEqual(@as(u64, 77), host.pushed_frames.items[0].sub_id);
+    try testing.expect(std.mem.indexOf(u8, host.pushed_frames.items[0].item_json, "\"currentVersion\"") != null);
+    // ... and a chat-message push never reaches it.
+    try host.broadcastWatch(.doc_messages, "chat-synthetic", "{}");
+    try testing.expectEqual(@as(usize, 2), host.pushed_frames.items.len);
+    try testing.expectEqual(@as(u64, 78), host.pushed_frames.items[1].sub_id);
+}

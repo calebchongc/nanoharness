@@ -530,12 +530,6 @@ pub fn handle(u: *Updater, reply_gpa: Allocator, method: Method) !Reply {
 
 // ---------------------------------------------------------------- the engine's wiring
 
-/// The engine's watch target for `UpdateStatus` subscribers. The host has no
-/// dedicated watch kind for it, so pushes ride the per-client
-/// `doc_messages` delivery under a target no chat id can take (chat ids are
-/// `[A-Za-z0-9_-]`); cancel and disconnect remove it like any watch.
-pub const watch_target = "\x00update-status";
-
 const Engine = struct {
     updater: Updater,
     sys_runner: proc.SystemRunner,
@@ -616,6 +610,33 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
     return &e.updater;
 }
 
+/// Whether the engine's updater is set up (the engine does it at start-up).
+pub fn configured() bool {
+    return engine_state != null;
+}
+
+/// The host the engine's updater reports to, if set up.
+pub fn configuredHost() ?*anyopaque {
+    return if (engine_state) |e| e.host else null;
+}
+
+/// Push the current `UpdateStatus` item to every subscriber of `host`.
+pub fn publishStatus(comptime Host: type, host: *Host) void {
+    Wiring(Host).publish(host);
+}
+
+/// Tests: forget the engine's updater (only when no check thread runs).
+pub fn resetForTests() void {
+    if (engine_state) |*e| {
+        if (e.started) return;
+        e.updater.deinit();
+        if (e.updater.install.path.len > 0) std.heap.smp_allocator.free(e.updater.install.path);
+        std.heap.smp_allocator.free(e.updater.edge_url);
+        if (e.updater.releases_override) |o| std.heap.smp_allocator.free(o);
+    }
+    engine_state = null;
+}
+
 fn noSpawn(_: ?*anyopaque, gpa: Allocator, _: proc.Request) Allocator.Error!proc.Output {
     return .{ .term = .spawn_failed, .stdout = try gpa.dupe(u8, ""), .stderr = try gpa.dupe(u8, "") };
 }
@@ -658,7 +679,7 @@ fn Wiring(comptime Host: type) type {
             const io = host.io.?;
             host.mutex.lockUncancelable(io);
             defer host.mutex.unlock(io);
-            host.broadcastWatch(.doc_messages, watch_target, body) catch {};
+            host.broadcastWatch(.update_status, null, body) catch {};
         }
 
         const Sleeper = struct {
