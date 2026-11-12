@@ -436,11 +436,9 @@ fn startAppDownload(a: *App, relaunch_when_ready: bool) void {
 }
 
 fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.Environ.Map) ?[]u8 {
-    const app_bin = "/Applications/Harness.app/Contents/MacOS/harness";
-    if (std.Io.Dir.cwd().access(io, app_bin, .{})) |_| {
-        return gpa.dupe(u8, app_bin) catch null;
-    } else |_| {}
-    if (env) |e| return @import("engine_start.zig").find(gpa, e);
+    // The Zig engine executable, found as the app finds its engine; never
+    // the Rust `harness` binary.
+    if (env) |e| return @import("engine_start.zig").find(gpa, io, e);
     return null;
 }
 

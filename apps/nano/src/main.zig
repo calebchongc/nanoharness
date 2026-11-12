@@ -1,7 +1,9 @@
 //! harness-nano: Harness's desktop app on nanoui. A window of its own,
-//! drawn in Zig, over the same engine the GPUI app runs: the daemon (or
-//! `harness headless`) on `HARNESS_IPC_PORT`. Nothing here holds workspace
-//! state; the engine does, so both apps can be open on one engine at once.
+//! drawn in Zig, over the Zig engine (`harness-engine headless`, or its
+//! daemon) on `HARNESS_IPC_PORT`; engine_start.zig starts one when none
+//! answers. Nothing here holds workspace state; the engine does, so several
+//! windows and agents can share one engine. Only iOS and the mobile demo
+//! embed an engine in-process (ios_host.zig), as they have no other.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const App = @import("app.zig").App;

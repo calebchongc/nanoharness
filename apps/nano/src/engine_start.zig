@@ -1,14 +1,16 @@
-//! An engine when none answers: `harness headless`, started as a person
-//! would start it from a terminal, with this app's environment (so its
-//! `HARNESS_IPC_PORT` and `HARNESS_DATA_DIR`), its output in Harness's logs
-//! folder (`harness-nano-engine.log`).
+//! An engine when none answers: the Zig engine, `harness-engine headless`,
+//! started as a person would start it from a terminal, with this app's
+//! environment (so its `HARNESS_IPC_PORT` and `HARNESS_DATA_DIR`), its output
+//! in Harness's logs folder (`harness-nano-engine.log`).
 //!
+//! The engine is a separate executable shipped beside this one, not a host
+//! inside the app: it holds the chats' runs, so it has to outlive a window
+//! that quits or restarts into an update, and a daemon runs the same binary.
 //! No engine is ever stopped from here, the one started here included: it
-//! is the machine's engine from then on. Harness.app and every other chat
+//! is the machine's engine from then on. Harness and every other chat
 //! attach to whatever engine answers on the port, so stopping this one at
-//! quit stopped all of their runs too, and Harness.app restarted. It runs
-//! in its own process group, so a signal meant for this app's group
-//! doesn't reach it either.
+//! quit stopped all of their runs too. It runs in its own process group, so
+//! a signal meant for this app's group doesn't reach it either.
 //!
 //! `HARNESS_NANO_NO_ENGINE_START` keeps the old behaviour: wait for one.
 const std = @import("std");
@@ -21,9 +23,9 @@ const Map = std.process.Environ.Map;
 pub const Status = enum {
     /// Nothing started from here: connected, or not yet needed.
     idle,
-    /// `harness headless` is running and hasn't answered yet.
+    /// `harness-engine headless` is running and hasn't answered yet.
     starting,
-    /// No `harness` to start.
+    /// No `harness-engine` to start.
     missing,
     /// It stopped before answering, `max_failed` times in a row.
     failed,
@@ -76,28 +78,45 @@ pub fn next(f: Facts) Step {
     return .start;
 }
 
-/// Where `harness` may be, in order: `HARNESS_NANO_ENGINE_BIN`, the app in
-/// /Applications and ~/Applications, then each directory on `PATH`.
-pub fn candidates(gpa: Allocator, env: *const Map) ![][]u8 {
+/// The engine executable's name. Only the Zig engine: never the Rust
+/// `harness` binary, wherever one is still installed.
+pub const engine_exe = if (builtin.os.tag == .windows) "harness-engine.exe" else "harness-engine";
+
+/// Where the engine may be, in order: `HARNESS_NANO_ENGINE_BIN`, beside this
+/// app's executable (the one it shipped with, so the versions match), the
+/// app in /Applications and ~/Applications (macOS), then each directory on
+/// `PATH`.
+pub fn candidatesFor(gpa: Allocator, env: *const Map, self_dir: ?[]const u8, os: std.Target.Os.Tag) ![][]u8 {
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         for (out.items) |p| gpa.free(p);
         out.deinit(gpa);
     }
     if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0) try out.append(gpa, try gpa.dupe(u8, p));
-    const in_app = "Applications/Harness.app/Contents/MacOS/harness";
-    try out.append(gpa, try gpa.dupe(u8, "/" ++ in_app));
-    if (env.get("HOME")) |home| if (home.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ home, in_app }));
+    const exe = if (os == .windows) "harness-engine.exe" else "harness-engine";
+    if (self_dir) |dir| if (dir.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, exe }));
+    if (os == .macos) {
+        const in_app = "Applications/Harness.app/Contents/MacOS/" ++ "harness-engine";
+        try out.append(gpa, try gpa.dupe(u8, "/" ++ in_app));
+        if (env.get("HOME")) |home| if (home.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ home, in_app }));
+    }
     if (env.get("PATH")) |path| {
-        var dirs = std.mem.tokenizeScalar(u8, path, ':');
-        while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, "harness" }));
+        var dirs = std.mem.tokenizeScalar(u8, path, if (os == .windows) ';' else ':');
+        while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, exe }));
     }
     return out.toOwnedSlice(gpa);
 }
 
+/// `candidatesFor` this app, on this OS.
+pub fn candidates(gpa: Allocator, io: std.Io, env: *const Map) ![][]u8 {
+    const self_dir: ?[]u8 = if (builtin.is_test) null else std.process.executableDirPathAlloc(io, gpa) catch null;
+    defer if (self_dir) |d| gpa.free(d);
+    return candidatesFor(gpa, env, self_dir, builtin.os.tag);
+}
+
 /// The first candidate this user can run (owned), or null.
-pub fn find(gpa: Allocator, env: *const Map) ?[]u8 {
-    const list = candidates(gpa, env) catch return null;
+pub fn find(gpa: Allocator, io: std.Io, env: *const Map) ?[]u8 {
+    const list = candidates(gpa, io, env) catch return null;
     defer gpa.free(list);
     var found: ?[]u8 = null;
     for (list) |p| {
@@ -152,7 +171,7 @@ pub fn parseLockPid(raw: []const u8, self_pid: i64) ?i64 {
     return pid;
 }
 
-/// Kills the background `harness headless` process recorded in
+/// Kills the background engine process recorded in
 /// `{data_dir}/engine.lock` (or `engine.lock.pid` on Windows) so a newly
 /// updated app can immediately start its bundled engine in place.
 pub fn killLockedEngine(a: *App) bool {
@@ -205,7 +224,7 @@ pub fn stopForUpdate(a: *App) void {
     _ = killLockedEngine(a);
 }
 
-/// Kills an older background `harness headless` process discovered on
+/// Kills an older background engine process discovered on
 /// `EngineInfo` and immediately boots the current app's engine in its place.
 pub fn replaceOlderEngine(a: *App) void {
     const s = &a.engine_start;
@@ -252,7 +271,7 @@ fn tick(a: *App) void {
     reap(s);
     const now = nowMs(a.io);
     const env = a.env orelse return;
-    const path = find(a.gpa, env);
+    const path = find(a.gpa, a.io, env);
     defer if (path) |p| a.gpa.free(p);
     switch (next(.{
         .connected = a.engine.state == .connected,
@@ -330,7 +349,7 @@ fn setStatus(a: *App, status: Status) void {
     const text = switch (status) {
         .idle => "",
         .starting => "Starting the engine…",
-        .missing => "Harness isn't installed: install it, or start an engine with `harness headless`",
+        .missing => "The Harness engine isn't installed: reinstall Harness, or start one with `harness-engine headless`",
         .failed => std.fmt.bufPrint(&s.message, "The engine didn't start: see {s} in {s}/logs", .{ log_name, a.settings.dataDir() orelse "Harness's data folder" }) catch "The engine didn't start",
     };
     if (text.ptr != @as([*]const u8, &s.message)) @memcpy(s.message[0..text.len], text);
@@ -373,26 +392,53 @@ test "start when nothing answers and nothing of ours runs; never twice at once" 
     try testing.expectEqual(Step.start, next(f));
 }
 
-test "harness is looked for in the override, the app, ~/Applications, then PATH" {
+test "the Zig engine is looked for in the override, beside the app, the app bundles, then PATH; never `harness`" {
     var env = Map.init(testing.allocator);
     defer env.deinit();
     try env.put("HOME", "/Users/synthetic");
     try env.put("PATH", "/opt/a::/usr/local/bin");
-    try env.put("HARNESS_NANO_ENGINE_BIN", "/tmp/fake-harness");
-    const got = try candidates(testing.allocator, &env);
+    try env.put("HARNESS_NANO_ENGINE_BIN", "/tmp/fake-engine");
+    const got = try candidatesFor(testing.allocator, &env, "/Applications/Harness.app/Contents/MacOS", .macos);
     defer {
         for (got) |p| testing.allocator.free(p);
         testing.allocator.free(got);
     }
+    const sep = std.fs.path.sep_str;
     const want = [_][]const u8{
-        "/tmp/fake-harness",
-        "/Applications/Harness.app/Contents/MacOS/harness",
-        "/Users/synthetic" ++ std.fs.path.sep_str ++ "Applications/Harness.app/Contents/MacOS/harness",
-        "/opt/a" ++ std.fs.path.sep_str ++ "harness",
-        "/usr/local/bin" ++ std.fs.path.sep_str ++ "harness",
+        "/tmp/fake-engine",
+        "/Applications/Harness.app/Contents/MacOS" ++ sep ++ "harness-engine",
+        "/Applications/Harness.app/Contents/MacOS/harness-engine",
+        "/Users/synthetic" ++ sep ++ "Applications/Harness.app/Contents/MacOS/harness-engine",
+        "/opt/a" ++ sep ++ "harness-engine",
+        "/usr/local/bin" ++ sep ++ "harness-engine",
     };
     try testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+
+    // Linux and Windows: beside the app, then PATH; no macOS bundle paths.
+    const linux = try candidatesFor(testing.allocator, &env, "/opt/harness", .linux);
+    defer {
+        for (linux) |p| testing.allocator.free(p);
+        testing.allocator.free(linux);
+    }
+    try testing.expectEqual(@as(usize, 4), linux.len);
+    try testing.expectEqualStrings("/opt/harness" ++ sep ++ "harness-engine", linux[1]);
+    var win_env = Map.init(testing.allocator);
+    defer win_env.deinit();
+    try win_env.put("PATH", "C:\\Tools;C:\\Bin");
+    const win = try candidatesFor(testing.allocator, &win_env, "C:\\Harness", .windows);
+    defer {
+        for (win) |p| testing.allocator.free(p);
+        testing.allocator.free(win);
+    }
+    try testing.expectEqual(@as(usize, 3), win.len);
+    for (win) |p| try testing.expect(std.mem.endsWith(u8, p, "harness-engine.exe"));
+
+    // No candidate is the Rust `harness` binary.
+    for ([_][]const []u8{ got, linux, win }) |list| for (list) |p| {
+        const base = std.fs.path.basename(p);
+        try testing.expect(!std.mem.eql(u8, base, "harness") and !std.mem.eql(u8, base, "harness.exe"));
+    };
 }
 
 test "parseLockPid extracts valid engine lock pid and rejects invalid or self pids" {
@@ -421,7 +467,7 @@ fn waitForFile(path: []const u8) ![]u8 {
     return error.Timeout;
 }
 
-test "starts `harness headless` with this app's environment, and quitting leaves it running for everyone else" {
+test "starts `harness-engine headless` with this app's environment, and quitting leaves it running for everyone else" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var name_buf: [128]u8 = undefined;
     const script = try std.fmt.bufPrint(&name_buf, "/tmp/nano-engine-start-{d}.sh", .{std.c.getpid()});
@@ -429,7 +475,7 @@ test "starts `harness headless` with this app's environment, and quitting leaves
     const args_path = try std.fmt.bufPrint(&path_buf, "{s}.args", .{script});
     var term_buf: [160]u8 = undefined;
     const term_path = try std.fmt.bufPrint(&term_buf, "{s}.term", .{script});
-    // A stand-in for `harness`: says how it was started, and whether SIGTERM
+    // A stand-in for `harness-engine`: says how it was started, and whether SIGTERM
     // stopped it.
     try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = script, .data =
         \\#!/bin/sh
