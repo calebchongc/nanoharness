@@ -48,17 +48,26 @@ pub fn failed(comptime fmt: []const u8, args: anytype) RpcOutcome {
     return .{ .err = .{ .exec_error = errText(fmt, args) } };
 }
 
+/// `RpcError::Failed(msg)` for a static string or one `errText` already made.
+pub fn failedMsg(msg: []const u8) RpcOutcome {
+    return .{ .err = .{ .exec_error = msg } };
+}
+
 /// `RpcError::BadParams(..)`.
 pub fn badParams(comptime fmt: []const u8, args: anytype) RpcOutcome {
     return .{ .err = .{ .bad_params = errText(fmt, args) } };
 }
 
 pub fn errText(comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.bufPrint(&err_buf, fmt, args) catch blk: {
+    // Arguments may themselves live in `err_buf`: format aside, then copy.
+    var tmp: [err_buf.len]u8 = undefined;
+    const text = std.fmt.bufPrint(&tmp, fmt, args) catch blk: {
         const tail = "…";
-        @memcpy(err_buf[err_buf.len - tail.len ..], tail);
-        break :blk err_buf[0..];
+        @memcpy(tmp[tmp.len - tail.len ..], tail);
+        break :blk tmp[0..];
     };
+    @memcpy(err_buf[0..text.len], text);
+    return err_buf[0..text.len];
 }
 
 pub fn obj(params: json.Value) ?json.ObjectMap {
