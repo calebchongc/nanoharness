@@ -923,6 +923,44 @@ test "mcp respond_to_input: the current pending question is found in the transcr
     try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q\",\"labels\":[\"a\"]}]}"), "chat chat-alp has no pending question");
 }
 
+// ---- publishing -------------------------------------------------------------------------
+
+test "mcp show_image and show_visual: origin chat only, bounded, minted ids, engine errors surface" {
+    const f = try HostFixture.create(.{});
+    defer f.destroy();
+    try expectErr(try f.call("show_image", "{\"path\":\"shot.png\"}"), "show_image needs a chat context: this server is not running inside a chat");
+    try expectErr(try f.call("show_visual", "{\"title\":\"t\",\"script\":\"return function() end\"}"), "show_visual needs a chat context: this server is not running inside a chat");
+    // Args are checked first, and unknown fields cannot pick another chat.
+    try expectErr(try f.call("show_image", "{\"path\":\"a.png\",\"chat\":\"Alpha\"}"), "invalid arguments: unknown field `chat`, expected `path` or `caption`");
+    try expectErr(try f.call("show_visual", "{\"title\":\"t\",\"script\":\"s\",\"id\":\"x\"}"), "invalid arguments: unknown field `id`, expected `title` or `script`");
+
+    f.t.origin = .{ .chat_id = "chat-alpha-1" };
+    const img = try ok(try f.call("show_image", "{\"path\":\"shots/after.png\",\"caption\":\"After\"}"));
+    try testing.expect(u.boolean(img, "attached").?);
+    const sent = f.rec.last("ShowImage").?;
+    try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
+    try testing.expectEqual(@as(usize, 36), u.str(sent, "id").?.len);
+    try testing.expectEqualStrings(u.str(sent, "id").?, u.str(img, "id").?);
+    try testing.expectEqualStrings("After", u.str(sent, "caption").?);
+    try expectErr(try f.call("show_image", "{\"path\":\"   \"}"), "show_image path must be 1-4096 characters");
+    const x201 = try repeat(f.arena.allocator(), "x", 201);
+    const long_caption = try std.fmt.allocPrint(f.arena.allocator(), "{{\"path\":\"a.png\",\"caption\":\"{s}\"}}", .{x201});
+    try expectErr(try f.call("show_image", long_caption), "show_image caption is limited to 200 characters");
+
+    const vis = try ok(try f.call("show_visual", "{\"title\":\"Overview\",\"script\":\"return function() return ui.text('hi') end\"}"));
+    try testing.expect(u.boolean(vis, "attached").?);
+    try testing.expectEqualStrings("return function() return ui.text('hi') end", u.str(f.rec.last("ShowVisual").?, "script").?);
+    try expectErr(try f.call("show_visual", "{\"title\":\" \",\"script\":\"x\"}"), "visual title must be nonblank and at most 200 characters");
+    try expectErr(try f.call("show_visual", "{\"title\":\"t\",\"script\":\"\\n\\t\"}"), "visual script must be nonblank and at most 64 KiB of UTF-8");
+    try testing.expect(tools.validateVisual(try repeat(f.arena.allocator(), "界", 200), try repeat(f.arena.allocator(), "é", 32768)) == null);
+    try testing.expect(tools.validateVisual(try repeat(f.arena.allocator(), "界", 201), "x") != null);
+    try testing.expect(tools.validateVisual("title", try repeat(f.arena.allocator(), "é", 32769)) != null);
+
+    const w = try WorldFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer w.destroy();
+    try expectErr(try w.call("show_image", "{\"path\":\"bad.png\"}"), "ShowImage: no active run accepts images");
+}
+
 // ---- rooms -------------------------------------------------------------------------------
 
 test "mcp post_room: queues framed peer mail for mentioned chats and reports redactions" {

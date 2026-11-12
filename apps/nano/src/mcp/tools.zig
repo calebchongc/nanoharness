@@ -131,9 +131,10 @@ fn dispatch(c: *Ctx, name: []const u8, args: Value) !Value {
     if (eq(u8, name, "dismiss_input")) return dismissInput(c, args);
     if (eq(u8, name, "rename_chat")) return renameChat(c, args);
     if (eq(u8, name, "archive_chat")) return archiveChat(c, args);
+    if (eq(u8, name, "show_image")) return showImage(c, args);
+    if (eq(u8, name, "show_visual")) return showVisual(c, args);
     if (rooms.handles(name)) return rooms.call(c, name, args);
     if (bots.handles(name)) return bots.call(c, name, args);
-    if (Tools.has(name)) return c.fail("{s} is not available in this build", .{name});
     return c.fail("unknown tool: {s}", .{name});
 }
 
@@ -1526,4 +1527,55 @@ pub fn awaitTurn(c: *Ctx, chat: Value, baseline: ?Value, expect_turn: bool, time
     }
     if (timed_out and c.t.fromChat()) try turn.put("note", u.s(chat_wait_note));
     return turn.value();
+}
+
+// ---- publishing into the origin chat ------------------------------------------------------------
+
+fn showImage(c: *Ctx, args: Value) !Value {
+    // Unknown fields (chat, id, targetDeviceId) are refused: the destination
+    // is always the injected origin chat, never caller-chosen.
+    try decode(c, args, "ShowImageArgs", &.{
+        .{ .name = "path", .kind = .string, .required = true },
+        .{ .name = "caption", .kind = .opt_string },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("show_image needs a chat context: this server is not running inside a chat");
+    const path = argStr(args, "path").?;
+    // Whitespace is legal in filenames; only a fully blank path fails.
+    if (u.isBlank(path) or u.charCount(path) > 4096) return c.failMsg("show_image path must be 1-4096 characters");
+    const caption = argStr(args, "caption");
+    if (caption) |cap| if (u.charCount(cap) > 200) return c.failMsg("show_image caption is limited to 200 characters");
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    // Minted per invocation, so the client's one reconnect retry dedupes.
+    try p.put("id", u.s(try newId(c)));
+    try p.put("path", u.s(path));
+    try p.put("caption", u.optS(caption));
+    return c.call("ShowImage", p.value());
+}
+
+pub const visual_title_max_chars: usize = 200;
+pub const visual_script_max_bytes: usize = 64 * 1024;
+
+/// `harness_proto::visual::validate_visual`.
+pub fn validateVisual(title: []const u8, script: []const u8) ?[]const u8 {
+    if (u.isBlank(title) or u.charCount(title) > visual_title_max_chars) return "visual title must be nonblank and at most 200 characters";
+    if (u.isBlank(script) or script.len > visual_script_max_bytes) return "visual script must be nonblank and at most 64 KiB of UTF-8";
+    return null;
+}
+
+fn showVisual(c: *Ctx, args: Value) !Value {
+    try decode(c, args, "ShowVisualArgs", &.{
+        .{ .name = "title", .kind = .string, .required = true },
+        .{ .name = "script", .kind = .string, .required = true },
+    }, true);
+    const chat_id = c.t.origin.chat_id orelse return c.failMsg("show_visual needs a chat context: this server is not running inside a chat");
+    const title = argStr(args, "title").?;
+    const script = argStr(args, "script").?;
+    if (validateVisual(title, script)) |why| return c.failMsg(why);
+    var p = u.obj(c.a);
+    try p.put("chatId", u.s(chat_id));
+    try p.put("id", u.s(try newId(c)));
+    try p.put("title", u.s(title));
+    try p.put("script", u.s(script));
+    return c.call("ShowVisual", p.value());
 }
