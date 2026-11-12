@@ -1,4 +1,5 @@
 //! Test roots for the device relay (one import line in `tests.zig`).
 test {
     _ = @import("device_frame.zig");
+    _ = @import("wss.zig");
 }
