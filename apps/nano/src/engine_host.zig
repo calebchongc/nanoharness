@@ -2514,14 +2514,7 @@ pub const EngineHost = struct {
                 return @import("show_media_host.zig").showImage(self, params);
             },
             .ShowVisual => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "vis-1";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"attached\":true,\"id\":{f}}}",
-                    .{json.fmt(id, .{})},
-                ) };
+                return @import("show_visual_host.zig").showVisual(self, params);
             },
             .QueueCommand => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };

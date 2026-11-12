@@ -6,4 +6,6 @@ test {
     _ = @import("preview_proxy.zig");
     _ = @import("previews_host.zig");
     _ = @import("show_media_host.zig");
+    _ = @import("visual_sandbox.zig");
+    _ = @import("show_visual_host.zig");
 }
