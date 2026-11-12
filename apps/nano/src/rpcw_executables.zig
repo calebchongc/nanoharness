@@ -214,9 +214,9 @@ fn appendPathDirs(gpa: Allocator, path: []const u8, exe: []const u8, out: *std.A
 }
 
 /// `find_on_paths(exe, extra)`: PATH, the login shell's PATH, `extra` file
-/// paths, then node version manager bins; the first runnable candidate.
-/// (Rust then prefers the newest version among several; for presence any
-/// runnable candidate answers the same.)
+/// paths, then node version manager bins; among the runnable candidates,
+/// the PATH-preferred one unless a later one reports a newer version
+/// (`newest_candidate`, harness_version.zig).
 pub fn findOnPaths(gpa: Allocator, io: std.Io, exe: []const u8, extra: []const []const u8) !?[]u8 {
     var candidates: std.ArrayList([]u8) = .empty;
     defer {
@@ -236,10 +236,10 @@ pub fn findOnPaths(gpa: Allocator, io: std.Io, exe: []const u8, extra: []const [
     }
     try appendNodeManagerBins(gpa, io, &bins);
     for (bins.items) |b| try candidates.append(gpa, try std.fs.path.join(gpa, &.{ b, exe }));
-    for (candidates.items) |c| {
-        if (common.isRunnable(io, c)) return try gpa.dupe(u8, c);
-    }
-    return null;
+    var runnable: std.ArrayList([]const u8) = .empty;
+    defer runnable.deinit(gpa);
+    for (candidates.items) |c| if (common.isRunnable(io, c)) try runnable.append(gpa, c);
+    return @import("harness_version.zig").newestCandidate(gpa, io, exe, runnable.items);
 }
 
 pub fn hasExe(gpa: Allocator, io: std.Io, exe: []const u8) bool {
@@ -299,6 +299,18 @@ fn extraPaths(gpa: Allocator, p: Probe, home: ?[]const u8) !std.ArrayList([]u8) 
     return out;
 }
 
+/// `graff_install_paths()`: the managed copy (when a file), the bundled
+/// copy, `~/.local/bin`, then the system install dirs.
+fn graffExtras(gpa: Allocator, io: std.Io) !std.ArrayList([]u8) {
+    const hv = @import("harness_version.zig");
+    const home = common.homeDir();
+    const managed = if (home) |h| try std.fs.path.join(gpa, &.{ h, ".harness", "bin", "graff" }) else null;
+    defer if (managed) |m| gpa.free(m);
+    const bundled = hv.bundledGraff(gpa, io);
+    defer if (bundled) |b| gpa.free(b);
+    return hv.graffInstallPaths(gpa, home, if (managed) |m| common.isFile(io, m) else false, bundled, system_prefix);
+}
+
 fn findWithExtras(gpa: Allocator, io: std.Io, exe: []const u8, p: Probe, home: ?[]const u8) !bool {
     var extra = try extraPaths(gpa, p, home);
     defer {
@@ -322,7 +334,9 @@ pub fn resolveCli(gpa: Allocator, io: std.Io, id: HarnessId) !?[]u8 {
         const value = if (id == .pi) common.getenv(var_name) else common.getenvNonEmpty(var_name);
         if (value) |v| return if (common.isFile(io, v)) try gpa.dupe(u8, v) else null;
     }
-    var extra = try extraPaths(gpa, p, common.homeDir());
+    // graff also lives in the app-managed and bundled copies
+    // (`graff_install_paths`).
+    var extra = if (id == .graff) try graffExtras(gpa, io) else try extraPaths(gpa, p, common.homeDir());
     defer {
         for (extra.items) |x| gpa.free(x);
         extra.deinit(gpa);
@@ -579,4 +593,33 @@ test "rpcw_executables installer availability follows install.rs prerequisites" 
     try testing.expect(available(methods(.codex)[0], Fake{ .missing = "bash" }, true));
     try testing.expect(!available(methods(.codex)[1], Fake{ .missing = "npm" }, true));
     if (builtin.os.tag == .macos) try testing.expect(methods(.devin)[0] == .brew);
+}
+
+test "rpcw_executables resolveCli launches the newest graff: a newer managed copy beats an older one on PATH" {
+    if (comptime !std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try common.tmpPath(gpa, io, &tmp);
+    defer gpa.free(base);
+    const home = try std.fs.path.join(gpa, &.{ base, "home" });
+    defer gpa.free(home);
+    const bin = try std.fs.path.join(gpa, &.{ base, "bin" });
+    defer gpa.free(bin);
+    try tmp.dir.createDirPath(io, "home/.harness/bin");
+    try tmp.dir.createDirPath(io, "bin");
+    var env = try common.TestEnv.init(gpa, home);
+    defer env.deinit();
+    try env.map.put("PATH", bin);
+    try env.map.put("HARNESS_NO_LOGIN_SHELL", "1");
+    env.install();
+    system_prefix = base;
+    defer system_prefix = "";
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin/graff", .data = "#!/bin/sh\necho 'graff 0.0.302.4'\n", .flags = .{ .permissions = .executable_file } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.harness/bin/graff", .data = "#!/bin/sh\necho 'graff 0.0.302.25'\n", .flags = .{ .permissions = .executable_file } });
+    @import("harness_version.zig").invalidateVersions(io, &.{"graff"});
+    const got = (try resolveCli(gpa, io, .graff)).?;
+    defer gpa.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "/home/.harness/bin/graff"));
 }

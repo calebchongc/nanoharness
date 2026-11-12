@@ -217,19 +217,30 @@ fn isRunnable(io: Io, path: []const u8) bool {
     return (@as(u32, @intCast(st.permissions.toMode())) & 0o111) != 0;
 }
 
-/// The first runnable candidate, or null. nvm's `versions/node/*/bin` dirs are
-/// appended newest-first after the fixed candidates.
+/// The runnable candidates (nvm's `versions/node/*/bin` dirs appended
+/// newest-first after the fixed ones), of which the PATH-preferred one wins
+/// unless a later one reports a newer version (`newest_candidate`).
 pub fn findExecutable(gpa: Allocator, io: Io, s: Search) !?[]u8 {
     var list = try candidatePaths(gpa, s);
     defer {
         for (list.items) |p| gpa.free(p);
         list.deinit(gpa);
     }
-    for (list.items) |p| if (isRunnable(io, p)) return try gpa.dupe(u8, p);
+    var runnable: std.ArrayList([]u8) = .empty;
+    defer {
+        for (runnable.items) |p| gpa.free(p);
+        runnable.deinit(gpa);
+    }
+    for (list.items) |p| if (isRunnable(io, p)) try runnable.append(gpa, try gpa.dupe(u8, p));
+    try appendNvmBins(gpa, io, s, &runnable);
+    return @import("harness_version.zig").newestCandidate(gpa, io, s.name, @ptrCast(runnable.items));
+}
+
+fn appendNvmBins(gpa: Allocator, io: Io, s: Search, runnable: *std.ArrayList([]u8)) !void {
     if (s.home) |home| {
         const nvm = try std.fs.path.join(gpa, &.{ home, ".nvm/versions/node" });
         defer gpa.free(nvm);
-        var dir = Io.Dir.cwd().openDir(io, nvm, .{ .iterate = true }) catch return null;
+        var dir = Io.Dir.cwd().openDir(io, nvm, .{ .iterate = true }) catch return;
         defer dir.close(io);
         var names: std.ArrayList([]u8) = .empty;
         defer {
@@ -245,11 +256,9 @@ pub fn findExecutable(gpa: Allocator, io: Io, s: Search) !?[]u8 {
         }.gt);
         for (names.items) |n| {
             const p = try std.fs.path.join(gpa, &.{ nvm, n, "bin", s.name });
-            if (isRunnable(io, p)) return p;
-            gpa.free(p);
+            if (isRunnable(io, p)) try runnable.append(gpa, p) else gpa.free(p);
         }
     }
-    return null;
 }
 
 fn semverGreater(a: []const u8, b: []const u8) bool {
@@ -893,4 +902,36 @@ test "agent_proc: reaping kills the leader's group, so a straggler holding stder
     if (!ok) posix.kill(-pid, .KILL) catch {};
     th.join();
     try testing.expect(ok);
+}
+
+test "agent_proc: findExecutable launches the newest of several installs, the PATH one on a tie" {
+    if (comptime !std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    try tmp.dir.createDirPath(io, "path-bin");
+    try tmp.dir.createDirPath(io, "extra-bin");
+    const old = "#!/bin/sh\necho 'synthetic-cli 1.2.0'\n";
+    const new = "#!/bin/sh\necho 'synthetic-cli 1.10.0'\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "path-bin/synthetic-cli", .data = old, .flags = .{ .permissions = .executable_file } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "extra-bin/synthetic-cli", .data = new, .flags = .{ .permissions = .executable_file } });
+    const path_dir = try std.fs.path.join(gpa, &.{ base, "path-bin" });
+    defer gpa.free(path_dir);
+    const extra = try std.fs.path.join(gpa, &.{ base, "extra-bin", "synthetic-cli" });
+    defer gpa.free(extra);
+    @import("harness_version.zig").invalidateVersions(io, &.{"synthetic-cli"});
+
+    const got = (try findExecutable(gpa, io, .{ .name = "synthetic-cli", .path_env = path_dir, .home = null, .extra = &.{extra} })).?;
+    defer gpa.free(got);
+    try testing.expectEqualStrings(extra, got);
+
+    // Same version: the PATH-preferred copy stays.
+    try tmp.dir.writeFile(io, .{ .sub_path = "extra-bin/synthetic-cli", .data = old, .flags = .{ .permissions = .executable_file } });
+    @import("harness_version.zig").invalidateVersions(io, &.{"synthetic-cli"});
+    const tie = (try findExecutable(gpa, io, .{ .name = "synthetic-cli", .path_env = path_dir, .home = null, .extra = &.{extra} })).?;
+    defer gpa.free(tie);
+    try testing.expect(std.mem.startsWith(u8, tie, path_dir));
 }
