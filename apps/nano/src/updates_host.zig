@@ -49,6 +49,19 @@ fn parts(v: []const u8, out: *[16]u64) ?[]const u64 {
     return if (n == 0) null else out[0..n];
 }
 
+/// A release version this engine will put in a URL, a folder name and the
+/// `current` link: `[0-9A-Za-z.+-]+`, not only dots, at most 64 bytes.
+/// Stricter than the Rust updater, which takes the feed's text as it is.
+pub fn validVersion(v: []const u8) bool {
+    if (v.len == 0 or v.len > 64) return false;
+    var dots_only = true;
+    for (v) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '+' or c == '-')) return false;
+        if (c != '.') dots_only = false;
+    }
+    return !dots_only;
+}
+
 pub fn platformKey() struct { os: []const u8, arch: []const u8 } {
     const os: []const u8 = @tagName(builtin.os.tag);
     const arch: []const u8 = switch (builtin.cpu.arch) {
@@ -293,9 +306,11 @@ pub const Updater = struct {
                     return .{ .err = "parsing manifest.json: invalid JSON" };
                 const ver = if (v == .object) v.object.get("version") else null;
                 if (ver == null or ver.? != .string) return .{ .err = "parsing manifest.json: missing field `version`" };
-                if (std.mem.trim(u8, ver.?.string, " \t\r\n").len == 0) return .{ .err = "manifest.json has an empty version" };
+                const version = std.mem.trim(u8, ver.?.string, " \t\r\n");
+                if (version.len == 0) return .{ .err = "manifest.json has an empty version" };
+                if (!validVersion(version)) return .{ .err = try std.fmt.allocPrint(arena, "manifest.json names an invalid version: {f}", .{json.fmt(version, .{})}) };
                 const files = v.object.get("files");
-                return .{ .ok = .{ .version = ver.?.string, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
+                return .{ .ok = .{ .version = version, .files = if (files) |f| (if (f == .object) f.object else null) else null } };
             }
         } else |_| {}
         const lurl = try std.fmt.allocPrint(arena, "{s}/latest.txt", .{base});
@@ -305,6 +320,7 @@ pub const Updater = struct {
             return .{ .err = try std.fmt.allocPrint(arena, "fetching latest.txt: HTTP status {d}", .{r.status}) };
         const ver = std.mem.trim(u8, r.body, " \t\r\n");
         if (ver.len == 0) return .{ .err = "latest.txt is empty" };
+        if (!validVersion(ver)) return .{ .err = try std.fmt.allocPrint(arena, "latest.txt names an invalid version: {f}", .{json.fmt(ver, .{})}) };
         return .{ .ok = .{ .version = ver } };
     }
 
@@ -334,19 +350,24 @@ pub const Updater = struct {
         }
     }
 
-    /// Download `file` into `dest`, verifying the manifest's SHA-256 when it has one.
+    /// Download `file` into `dest`, verified against the manifest's SHA-256.
+    /// A file the manifest gives no SHA-256 for is never installed (the Rust
+    /// updater installs a managed release unverified then).
     fn download(self: *Updater, arena: Allocator, io: std.Io, m: Manifest, file: []const u8, dest: []const u8) !?[]const u8 {
+        const expected_raw = m.sha256For(file) orelse
+            return try std.fmt.allocPrint(arena, "the release has no SHA-256 for {s}; refusing to install it unverified", .{file});
         const base = try self.releaseBase(arena);
         const url = try std.fmt.allocPrint(arena, "{s}/{s}", .{ base, file });
         const r = self.http.get(arena, url) catch |e|
             return try std.fmt.allocPrint(arena, "downloading {s}: {s}", .{ url, @errorName(e) });
         if (r.status < 200 or r.status >= 300)
             return try std.fmt.allocPrint(arena, "downloading {s}: HTTP status {d}", .{ url, r.status });
-        if (m.sha256For(file)) |expected| {
+        {
+            const expected = std.mem.trim(u8, expected_raw, " \t\r\n");
             var digest: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(r.body, &digest, .{});
             const actual = std.fmt.bytesToHex(digest, .lower);
-            if (!std.ascii.eqlIgnoreCase(&actual, std.mem.trim(u8, expected, " \t\r\n")))
+            if (!std.ascii.eqlIgnoreCase(&actual, expected))
                 return try std.fmt.allocPrint(arena, "checksum mismatch for {s}: expected {s}, got {s}", .{ file, expected, &actual });
         }
         const partial = try std.fmt.allocPrint(arena, "{s}.partial", .{dest});
@@ -1088,8 +1109,14 @@ test "updates: a queued update waits for idle, then applies and restarts" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
+    const artifact = try headlessArtifactAlloc(testing.allocator, "0.2.102");
+    defer testing.allocator.free(artifact);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("bytes", &digest, .{});
+    const manifest = try std.fmt.allocPrint(testing.allocator, "{{\"version\":\"0.2.102\",\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    defer testing.allocator.free(manifest);
     var fh: FakeHttp = .{ .routes = &.{
-        .{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"0.2.102\"}" },
+        .{ .suffix = "/manifest.json", .status = 200, .body = manifest },
         .{ .suffix = ".tar.gz", .status = 200, .body = "bytes" },
     } };
     var fr: FakeRestart = .{};
@@ -1120,4 +1147,46 @@ test "updates: a target device this engine can't reach is refused" {
     try testing.expectEqualStrings("target device not connected", targetProblem(p.value, "dev-local").?);
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(p.value, "other"));
     try testing.expectEqual(@as(?[]const u8, null), targetProblem(.{ .object = .empty }, "dev-local"));
+}
+
+test "fix-sec 6: a release version must be a plain version before it names a path" {
+    try testing.expect(validVersion("0.2.101"));
+    try testing.expect(validVersion("1.0.0-rc.1+build.5"));
+    for ([_][]const u8{ "", ".", "..", "../../etc", "0.2/../../x", "0.2 1", "a;b", "0.2.1\x00" }) |v| try testing.expect(!validVersion(v));
+
+    var noop = proc.FakeRunner.init(testing.allocator, &.{});
+    defer noop.deinit();
+    var fr: FakeRestart = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var bad_manifest: FakeHttp = .{ .routes = &.{.{ .suffix = "/manifest.json", .status = 200, .body = "{\"version\":\"../../../tmp/x\"}" }} };
+    var u = testUpdater(.managed, "/nowhere", bad_manifest.http(), noop.runner(), fr.restarter(), null);
+    defer u.deinit();
+    try testing.expect(std.mem.startsWith(u8, (try u.fetchLatest(arena.allocator())).err, "manifest.json names an invalid version"));
+    var bad_latest: FakeHttp = .{ .routes = &.{.{ .suffix = "/latest.txt", .status = 200, .body = "9.9.9/../../x\n" }} };
+    u.http = bad_latest.http();
+    try testing.expect(std.mem.startsWith(u8, (try u.fetchLatest(arena.allocator())).err, "latest.txt names an invalid version"));
+}
+
+test "fix-sec 6: a managed install never installs a tarball without a SHA-256" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    // The latest.txt fallback never has checksums.
+    var fh: FakeHttp = .{ .routes = &.{
+        .{ .suffix = "/latest.txt", .status = 200, .body = "0.2.101\n" },
+        .{ .suffix = ".tar.gz", .status = 200, .body = "unverified bytes" },
+    } };
+    var fr: FakeRestart = .{};
+    var tar = proc.FakeRunner.init(testing.allocator, &.{.{ .prefix = "tar -xzf", .effect = TarEffect.unpack }});
+    defer tar.deinit();
+    var u = testUpdater(.managed, root, fh.http(), tar.runner(), fr.restarter(), testing.io);
+    defer u.deinit();
+    const msg = (try handle(&u, testing.allocator, .apply)).failed;
+    try testing.expect(std.mem.indexOf(u8, msg, "refusing to install it unverified") != null);
+    try testing.expectEqual(@as(usize, 0), tar.calls.items.len);
+    try testing.expectEqual(@as(usize, 0), fr.count);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "current", .{}));
 }
