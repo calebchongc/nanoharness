@@ -140,9 +140,9 @@ test "rpcw_tool_blob FetchToolBlob fetches the sidecar with the bearer and answe
     const f = try rooms.Fx.init(true);
     defer f.deinit();
     f.edge.body = "line 1\nline \"2\"\n";
-    const ok = try f.callMethod("FetchToolBlob", "{\"blobRef\":\"chat-syn/part#7.diff\"}");
-    defer testing.allocator.free(ok.unary_json);
-    try testing.expectEqualStrings("{\"text\":\"line 1\\nline \\\"2\\\"\\n\"}", ok.unary_json);
+    const ok = try rooms.okJson(try f.callMethod("FetchToolBlob", "{\"blobRef\":\"chat-syn/part#7.diff\"}"));
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("{\"text\":\"line 1\\nline \\\"2\\\"\\n\"}", ok);
     const last = f.edge.lastRequest();
     try testing.expect(std.mem.startsWith(u8, last, "GET /blob/chat-syn/part%237.diff HTTP/1.1\n"));
     try testing.expect(std.mem.indexOf(u8, last, "Bearer synthetic-access-token") != null);

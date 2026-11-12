@@ -316,18 +316,18 @@ test "rpcw_github_runners CodegraffGithubRunners lists with the key and reads 40
     const f = try gatewayFx();
     defer f.deinit();
     f.edge.body = "{\"enabled\":false}";
-    const ok = try f.callMethod("CodegraffGithubRunners", "null");
-    defer testing.allocator.free(ok.unary_json);
-    try testing.expectEqualStrings("{\"available\":true,\"enabled\":false,\"installUrl\":null,\"installations\":[],\"recentJobs\":[],\"sizes\":[]}", ok.unary_json);
+    const ok = try rooms.okJson(try f.callMethod("CodegraffGithubRunners", "null"));
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("{\"available\":true,\"enabled\":false,\"installUrl\":null,\"installations\":[],\"recentJobs\":[],\"sizes\":[]}", ok);
     const last = f.edge.lastRequest();
     try testing.expect(std.mem.startsWith(u8, last, "GET /v1/github/runners HTTP/1.1\n"));
     try testing.expect(std.mem.indexOf(u8, last, "Bearer cg-synthetic-key") != null);
 
     f.edge.status = 404;
     f.edge.body = "{\"error\":{\"message\":\"Not found\"}}";
-    const missing = try f.callMethod("CodegraffGithubRunners", "null");
-    defer testing.allocator.free(missing.unary_json);
-    try testing.expectEqualStrings(unavailable, missing.unary_json);
+    const missing = try rooms.okJson(try f.callMethod("CodegraffGithubRunners", "null"));
+    defer testing.allocator.free(missing);
+    try testing.expectEqualStrings(unavailable, missing);
 }
 
 test "rpcw_github_runners CodegraffGithubRunners errors and signed-out" {
@@ -347,8 +347,8 @@ test "rpcw_github_runners CodegraffGithubRunners errors and signed-out" {
     const hits = f.edge.hits.load(.acquire);
     testing.allocator.free(f.host.auth.codegraff_api_key.?);
     f.host.auth.codegraff_api_key = null;
-    const out = try f.callMethod("CodegraffGithubRunners", "null");
-    defer testing.allocator.free(out.unary_json);
-    try testing.expectEqualStrings("null", out.unary_json);
+    const out = try rooms.okJson(try f.callMethod("CodegraffGithubRunners", "null"));
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("null", out);
     try testing.expectEqual(hits, f.edge.hits.load(.acquire));
 }

@@ -297,6 +297,19 @@ pub const Fx = struct {
     }
 };
 
+/// The reply of a call expected to succeed; an error fails the test (it does
+/// not panic on the wrong union field).
+pub fn okJson(outcome: RpcOutcome) ![]u8 {
+    return switch (outcome) {
+        .unary_json => |b| b,
+        .err => |e| {
+            std.debug.print("unexpected error: {any}\n", .{e});
+            return error.TestUnexpectedResult;
+        },
+        else => error.TestUnexpectedResult,
+    };
+}
+
 pub fn expectErr(outcome: RpcOutcome, comptime kind: std.meta.Tag(engine_host.RpcError), expected: []const u8) !void {
     switch (outcome) {
         .err => |e| {
@@ -318,9 +331,9 @@ test "rpcw_rooms RoomRequest forwards GET with the bearer and query, answering t
     const f = try Fx.init(true);
     defer f.deinit();
     f.edge.body = "{\"rooms\":[{\"id\":\"room_synthetic\",\"name\":\"build\"}]}";
-    const ok = try f.call("{\"method\":\"GET\",\"path\":\"rooms\",\"query\":[[\"limit\",\"10\"],[\"q\",\"a b\"]],\"body\":null}");
-    defer testing.allocator.free(ok.unary_json);
-    try testing.expectEqualStrings("{\"status\":200,\"body\":{\"rooms\":[{\"id\":\"room_synthetic\",\"name\":\"build\"}]}}", ok.unary_json);
+    const ok = try okJson(try f.call("{\"method\":\"GET\",\"path\":\"rooms\",\"query\":[[\"limit\",\"10\"],[\"q\",\"a b\"]],\"body\":null}"));
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("{\"status\":200,\"body\":{\"rooms\":[{\"id\":\"room_synthetic\",\"name\":\"build\"}]}}", ok);
     const last = f.edge.lastRequest();
     try testing.expect(std.mem.startsWith(u8, last, "GET /rooms?limit=10&q=a+b HTTP/1.1\n"));
     try testing.expect(std.mem.indexOf(u8, last, "Bearer synthetic-access-token") != null);
@@ -331,25 +344,25 @@ test "rpcw_rooms RoomRequest POSTs the body (or {}) and hands back the edge's re
     defer f.deinit();
     f.edge.status = 422;
     f.edge.body = "{\"error\":\"secret_detected\",\"message\":\"the post looks like it holds a key\"}";
-    const refused = try f.call("{\"method\":\"POST\",\"path\":\"room/room_synthetic/post\",\"body\":{\"body\":\"hello\",\"claimKey\":\"task-1\"}}");
-    defer testing.allocator.free(refused.unary_json);
-    try testing.expectEqualStrings("{\"status\":422,\"body\":{\"error\":\"secret_detected\",\"message\":\"the post looks like it holds a key\"}}", refused.unary_json);
+    const refused = try okJson(try f.call("{\"method\":\"POST\",\"path\":\"room/room_synthetic/post\",\"body\":{\"body\":\"hello\",\"claimKey\":\"task-1\"}}"));
+    defer testing.allocator.free(refused);
+    try testing.expectEqualStrings("{\"status\":422,\"body\":{\"error\":\"secret_detected\",\"message\":\"the post looks like it holds a key\"}}", refused);
     const last = f.edge.lastRequest();
     try testing.expect(std.mem.startsWith(u8, last, "POST /room/room_synthetic/post HTTP/1.1\n"));
     try testing.expect(std.mem.endsWith(u8, last, "{\"body\":\"hello\",\"claimKey\":\"task-1\"}"));
 
     f.edge.status = 409;
     f.edge.body = "{\"error\":\"claim_held\"}";
-    const held = try f.call("{\"method\":\"POST\",\"path\":\"rooms/wakes/ack\"}");
-    defer testing.allocator.free(held.unary_json);
-    try testing.expectEqualStrings("{\"status\":409,\"body\":{\"error\":\"claim_held\"}}", held.unary_json);
+    const held = try okJson(try f.call("{\"method\":\"POST\",\"path\":\"rooms/wakes/ack\"}"));
+    defer testing.allocator.free(held);
+    try testing.expectEqualStrings("{\"status\":409,\"body\":{\"error\":\"claim_held\"}}", held);
     try testing.expect(std.mem.endsWith(u8, f.edge.lastRequest(), "\n{}"));
 
     f.edge.status = 500;
     f.edge.body = "upstream exploded";
-    const not_json = try f.call("{\"method\":\"GET\",\"path\":\"rooms/inbox\"}");
-    defer testing.allocator.free(not_json.unary_json);
-    try testing.expectEqualStrings("{\"status\":500,\"body\":null}", not_json.unary_json);
+    const not_json = try okJson(try f.call("{\"method\":\"GET\",\"path\":\"rooms/inbox\"}"));
+    defer testing.allocator.free(not_json);
+    try testing.expectEqualStrings("{\"status\":500,\"body\":null}", not_json);
 }
 
 test "rpcw_rooms RoomRequest refuses bad params, non-room paths, other methods and signed-out engines" {
