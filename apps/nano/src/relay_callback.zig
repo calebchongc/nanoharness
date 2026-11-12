@@ -219,7 +219,7 @@ pub fn start(gpa: Allocator, io: std.Io, port: u16, path: []const u8, landed: La
         server.deinit(io);
         return null;
     };
-    c.* = .{ .gpa = gpa, .io = io, .server = server, .port = port, .path = gpa.dupe(u8, path) catch {
+    c.* = .{ .gpa = gpa, .io = io, .server = server, .port = server.socket.address.getPort(), .path = gpa.dupe(u8, path) catch {
         server.deinit(io);
         gpa.destroy(c);
         return null;

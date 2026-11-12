@@ -7068,13 +7068,10 @@ test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectO
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Reserve a free loopback callback port for headed SignIn.
+    // The callback listener binds an ephemeral port (0) and the authorize
+    // URL names it: probing a free port and binding it later raced any other
+    // process on the machine taking it in between.
     const any_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
-    const cb_port = blk: {
-        var probe = try any_addr.listen(io, .{ .reuse_address = true });
-        defer probe.deinit(io);
-        break :blk probe.socket.address.getPort();
-    };
 
     // Mock Edge + Gateway HTTP server handling:
     // 1. POST /auth/exchange (returns user + graffKey + org-less JWT)
@@ -7173,7 +7170,7 @@ test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectO
     const mock_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{mock_port});
     try host.auth.configureCodegraff(mock_url, "cg_client_synth", "https://codegraff.example", sess_dir);
     try host.auth.setCodegraffGateway(mock_url);
-    host.auth.callback_port = cb_port;
+    host.auth.callback_port = 0;
 
     const empty_p = json.Value{ .object = .empty };
     var watch_auth = try host.handleWithId(42, "AuthStatus", empty_p);
@@ -7189,6 +7186,14 @@ test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectO
     try testing.expect(std.mem.indexOf(u8, auth_url, "scope=openid%20email%20offline_access") != null);
     const state_param = (try auth_host.extractQueryParamAlloc(gpa, auth_url, "state")).?;
     defer gpa.free(state_param);
+    const cb_port = blk: {
+        const marker = "redirect_uri=http%3A%2F%2F127.0.0.1%3A";
+        const at = (std.mem.indexOf(u8, auth_url, marker) orelse return error.TestUnexpectedResult) + marker.len;
+        var end = at;
+        while (end < auth_url.len and std.ascii.isDigit(auth_url[end])) end += 1;
+        break :blk try std.fmt.parseInt(u16, auth_url[at..end], 10);
+    };
+    try testing.expect(cb_port != 0);
 
     // 2. Simulate user's browser hitting `http://127.0.0.1:{cb_port}/callback?code=c_ok&state={state_param}`.
     const cb_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/callback?code=c_ok&state={s}", .{ cb_port, state_param });
