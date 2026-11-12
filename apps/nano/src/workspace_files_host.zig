@@ -302,8 +302,19 @@ test "workspace_files_host rejects path traversal, lists real directories, and f
     defer gpa.free(json_out);
     try testing.expect(std.mem.indexOf(u8, json_out, "apps/nano/src/chat2_wire.zig") != null);
 
-    // Real directory listing on current working directory (`src`)
-    const dir_json = try listWorkspaceDirectoryJson(gpa, testing.io, ".", "src");
+    // A real directory listing, of a synthetic folder: the checkout's own
+    // `src` has more entries than the 256-entry cap, so which names come
+    // back from it depends on directory order.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src/nested");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/chat2_wire.zig", .data = "// synthetic\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.hidden", .data = "" });
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    const dir_json = try listWorkspaceDirectoryJson(gpa, testing.io, root, "src");
     defer gpa.free(dir_json);
-    try testing.expect(std.mem.indexOf(u8, dir_json, "chat2_wire.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, dir_json, "\"path\":\"src/chat2_wire.zig\",\"isDirectory\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, dir_json, "\"path\":\"src/nested\",\"isDirectory\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, dir_json, ".hidden") == null);
 }
