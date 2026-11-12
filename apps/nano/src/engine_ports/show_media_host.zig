@@ -13,8 +13,8 @@ const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const engine_host = @import("engine_host.zig");
-const session_doc = @import("session_doc.zig");
+const engine_host = @import("../engine_host.zig");
+const session_doc = @import("../session_doc.zig");
 
 const EngineHost = engine_host.EngineHost;
 const RpcOutcome = engine_host.RpcOutcome;

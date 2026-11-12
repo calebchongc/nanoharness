@@ -149,7 +149,7 @@ test {
     _ = @import("run_journal.zig");
     _ = @import("mcp_server.zig");
     _ = @import("engine_host.zig");
-    _ = @import("preview_visual_sim_tests.zig");
+    _ = @import("engine_ports/tests.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");

@@ -2180,7 +2180,6 @@ pub const EngineHost = struct {
             .SetUpSimulators,
             .BootSimulator,
             .ShutdownSimulator,
-            .SimulatorInput,
             .LocalhostPageInput,
             .ApplyUpdate,
             => {
@@ -2393,7 +2392,7 @@ pub const EngineHost = struct {
                 const op = requireStr(obj, "op") orelse return .{ .err = .{ .bad_params = "missing op" } };
                 return self.handleMutate(op, obj);
             },
-            .WatchPreviews => return @import("previews_host.zig").watch(self, call_id, params),
+            .WatchPreviews => return @import("engine_ports/previews_host.zig").watch(self, call_id, params),
             .WatchTransfers => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "[]"));
             },
@@ -2511,10 +2510,10 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"retried\":true}") };
             },
             .ShowImage => {
-                return @import("show_media_host.zig").showImage(self, params);
+                return @import("engine_ports/show_media_host.zig").showImage(self, params);
             },
             .ShowVisual => {
-                return @import("show_visual_host.zig").showVisual(self, params);
+                return @import("engine_ports/show_visual_host.zig").showVisual(self, params);
             },
             .QueueCommand => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -3241,7 +3240,9 @@ pub const EngineHost = struct {
             .ListSimulators => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"simulators\":[]}") };
             },
-            .WatchSimulatorScreen, .WatchLocalhostPage => {
+            .WatchSimulatorScreen => return @import("engine_ports/simulators_stream.zig").watchScreen(self, call_id, params),
+            .SimulatorInput => return @import("engine_ports/simulators_stream.zig").input(self, params),
+            .WatchLocalhostPage => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"frame\":null}"));
             },
             .ListLocalhostServers => {

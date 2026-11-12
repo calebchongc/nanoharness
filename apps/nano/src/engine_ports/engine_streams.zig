@@ -10,8 +10,8 @@
 //! entry is still there. `broadcastWatch(.queue, ...)` is only ever called
 //! with a chat id, so the token entry never receives another stream's items.
 const std = @import("std");
-const engine_host = @import("engine_host.zig");
-const ws_server = @import("ws_server.zig");
+const engine_host = @import("../engine_host.zig");
+const ws_server = @import("../ws_server.zig");
 
 const EngineHost = engine_host.EngineHost;
 

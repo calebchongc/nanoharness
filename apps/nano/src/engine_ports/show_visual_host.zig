@@ -8,7 +8,7 @@
 //! part (`MessagePart::Visual {id, title, script}`) on the run's message.
 const std = @import("std");
 const json = std.json;
-const engine_host = @import("engine_host.zig");
+const engine_host = @import("../engine_host.zig");
 const media = @import("show_media_host.zig");
 const sandbox = @import("visual_sandbox.zig");
 
@@ -101,7 +101,7 @@ test "ShowVisual validates the script and attaches it to the live run" {
     const doc = try t.host.getOrCreateDoc("chat-1");
     const snap = try doc.exportSnapshot(testing.allocator);
     defer testing.allocator.free(snap);
-    var copy = try @import("session_doc.zig").SessionDoc.init(testing.allocator, "chat-1", "dev-a");
+    var copy = try @import("../session_doc.zig").SessionDoc.init(testing.allocator, "chat-1", "dev-a");
     defer copy.deinit();
     try copy.importSnapshot(snap);
     const frame2 = try copy.toResetFrameJson(testing.allocator);

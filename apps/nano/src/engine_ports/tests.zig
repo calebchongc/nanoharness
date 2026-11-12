@@ -8,4 +8,6 @@ test {
     _ = @import("show_media_host.zig");
     _ = @import("visual_sandbox.zig");
     _ = @import("show_visual_host.zig");
+    _ = @import("simulator_input.zig");
+    _ = @import("simulators_stream.zig");
 }
