@@ -2347,9 +2347,7 @@ pub const EngineHost = struct {
             .ListRefs => return @import("rpcg_rpc.zig").listRefs(self, params),
             .ListGitHistory => return @import("rpcg_rpc.zig").listGitHistory(self, params),
             .SearchGitHistory => return @import("rpcg_rpc.zig").searchGitHistory(self, params),
-            .ResolveGitAvatars => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"avatars\":{}}") };
-            },
+            .ResolveGitAvatars => return @import("rpcg_avatars.zig").resolveGitAvatars(self, params),
             .FetchAll => return @import("rpcg_rpc.zig").fetchAll(self, params),
             .SwitchRef => return @import("rpcg_rpc.zig").switchRef(self, params),
             .GetCheckoutFileDiffText => return @import("rpcg_rpc.zig").getCheckoutFileDiffText(self, params),

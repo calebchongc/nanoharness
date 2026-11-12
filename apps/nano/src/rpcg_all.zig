@@ -10,4 +10,5 @@ test {
     _ = @import("rpcg_terminals_tests.zig");
     _ = @import("rpcg_change_requests.zig");
     _ = @import("rpcg_change_requests_tests.zig");
+    _ = @import("rpcg_avatars.zig");
 }
