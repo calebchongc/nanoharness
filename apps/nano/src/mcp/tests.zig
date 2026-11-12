@@ -120,6 +120,8 @@ const World = struct {
         \\ "unreadFrom":{"alpha":1},"redacted":{"email":1},"stripped":0}
     ,
     room_post_status: i64 = 200,
+    /// The transcript `WatchDocMessages` resets to; null: a greeting.
+    doc_reset: ?[]const u8 = null,
     /// Replies the edge gives, by HTTP method and path suffix; checked
     /// before the defaults below.
     room_replies: []const RoomReply = &.{},
@@ -230,6 +232,7 @@ const World = struct {
         if (eq(u8, method, "WatchQueue")) return std.fmt.allocPrint(a, "{{\"items\":{s}}}", .{self.queue_items});
         if (eq(u8, method, "WatchDocMessages")) {
             _ = params;
+            if (self.doc_reset) |reset| return std.fmt.allocPrint(a, "{{\"reset\":{s}}}", .{reset});
             return
             \\{"reset":[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"hi"}]},
             \\          {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"complete","parts":[{"kind":"text","id":"t","text":"hello back"}]}]}
@@ -985,8 +988,16 @@ test "mcp create_chat: writes the row, records the parent, validates harness, mo
     try testing.expectEqualStrings("feat", u.str(cp, "branch").?);
     try testing.expectEqualStrings("workspace-write", sval(cp, &.{ "config", "sandbox" }).?);
     try testing.expectEqualStrings("Spawned", u.str(f.rec.last("Mutate").?, "title").?);
-    // The engine has the row now.
-    try testing.expectEqualStrings("Spawned", sval(try ok(try f.call("get_chat", try std.fmt.allocPrint(f.arena.allocator(), "{{\"chat\":\"{s}\"}}", .{new_id}))), &.{"title"}).?);
+    // The engine has the row now, with its parent and host device.
+    const stored = try ok(try f.call("get_chat", try std.fmt.allocPrint(f.arena.allocator(), "{{\"chat\":\"{s}\"}}", .{new_id})));
+    try testing.expectEqualStrings("Spawned", u.str(stored, "title").?);
+    try testing.expectEqualStrings("chat-beta-2", u.str(stored, "parentChatId").?);
+    try testing.expectEqualStrings("dev-local", u.str(stored, "deviceId").?);
+    try testing.expectEqualStrings("chat-beta-2", f.chat(new_id).parent_chat_id.?);
+    // Listed among the parent's children.
+    const kids = u.array(try ok(try f.call("list_chats", "{\"parent\":\"Beta\"}")), "chats").?;
+    try testing.expectEqual(@as(usize, 1), kids.len);
+    try testing.expectEqualStrings(new_id, u.str(kids[0], "id").?);
 
     // A first prompt runs right away; from a chat, the wait is a snapshot.
     const run = try ok(try f.call("create_chat", "{\"device\":\"Laptop\",\"harness\":\"graff\",\"prompt\":\"say hi\",\"wait\":true}"));
@@ -1243,8 +1254,32 @@ test "mcp commands: interrupt, respond, dismiss, rename and archive reach the en
 test "mcp respond_to_input: the current pending question is found in the transcript" {
     const w = try WorldFixture.create(.{});
     defer w.destroy();
-    // The World transcript has no question; inject one through a send's view.
-    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q\",\"labels\":[\"a\"]}]}"), "chat chat-alp has no pending question");
+    // An older answered question, then the one still open.
+    w.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"ship it"}]},
+        \\ {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"streaming","parts":[
+        \\   {"kind":"input","id":"i1","requestId":"req-old","questions":[{"id":"q0","prompt":"Start?"}],"resolved":true},
+        \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":false}]}]
+    ;
+    try testing.expectEqualStrings("req-7", sval(try ok(try w.call("get_chat", "{\"chat\":\"Alpha\"}")), &.{ "pendingInput", "requestId" }).?);
+    const answered = try ok(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"));
+    try testing.expectEqualStrings("req-7", u.str(answered, "requestId").?);
+    const sent = w.lastWrite("QueueCommand").?;
+    try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
+    try testing.expectEqualStrings("respondInput", sval(sent, &.{ "command", "kind" }).?);
+    try testing.expectEqualStrings("req-7", sval(sent, &.{ "command", "requestId" }).?);
+    const ans = u.array(u.get(sent, "command").?, "answers").?;
+    try testing.expectEqualStrings("q1", u.str(ans[0], "questionId").?);
+    try testing.expectEqualStrings("Yes", u.array(ans[0], "labels").?[0].string);
+    const dismissed = try ok(try w.call("dismiss_input", "{\"chat\":\"Alpha\"}"));
+    try testing.expectEqualStrings("req-7", u.str(dismissed, "requestId").?);
+    try testing.expectEqualStrings("req-7", sval(w.lastWrite("QueueCommand").?, &.{ "command", "requestId" }).?);
+    // Once answered, nothing is pending.
+    w.world.doc_reset =
+        \\[{"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"complete","parts":[
+        \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":true}]}]
+    ;
+    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "chat chat-alp has no pending question");
 }
 
 // ---- publishing -------------------------------------------------------------------------
