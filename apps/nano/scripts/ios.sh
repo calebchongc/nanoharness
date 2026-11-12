@@ -117,6 +117,10 @@ if [ ! -f "$zig_lib_sh" ]; then
     exit 1
 fi
 lib_flag=$(sh "$zig_lib_sh")
+# Installing copies over what's there and removes nothing: a file an earlier
+# build put in the bundle (an embedded extension, say) would break the
+# signature of this one.
+rm -rf zig-out/ios/Harness.app
 if [ "$mode" != install-sim ]; then
     # shellcheck disable=SC2086 # lib_flag is one flag or nothing
     exec zig build $lib_flag "$@"
