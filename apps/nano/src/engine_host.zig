@@ -2343,35 +2343,16 @@ pub const EngineHost = struct {
                     .{json.fmt(path, .{})},
                 ) };
             },
-            .ListBranches => {
-                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return .{ .unary_json = try git_host.listBranchesJson(self.gpa, self.io, cwd) };
-            },
-            .ListRefs => {
-                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return .{ .unary_json = try git_host.listRefsJson(self.gpa, self.io, cwd) };
-            },
-            .ListGitHistory, .SearchGitHistory => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"commits\":[]}") };
-            },
+            .ListBranches => return @import("rpcg_rpc.zig").listBranches(self, params),
+            .ListRefs => return @import("rpcg_rpc.zig").listRefs(self, params),
+            .ListGitHistory => return @import("rpcg_rpc.zig").listGitHistory(self, params),
+            .SearchGitHistory => return @import("rpcg_rpc.zig").searchGitHistory(self, params),
             .ResolveGitAvatars => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"avatars\":{}}") };
             },
-            .FetchAll => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"fetched\":true}") };
-            },
-            .SwitchRef => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"switched\":true}") };
-            },
-            .GetCheckoutFileDiffText => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const path = requireStr(obj, "path") orelse "";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"path\":{f},\"diff\":\"\"}}",
-                    .{json.fmt(path, .{})},
-                ) };
-            },
+            .FetchAll => return @import("rpcg_rpc.zig").fetchAll(self, params),
+            .SwitchRef => return @import("rpcg_rpc.zig").switchRef(self, params),
+            .GetCheckoutFileDiffText => return @import("rpcg_rpc.zig").getCheckoutFileDiffText(self, params),
             .ListDrives => {
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
@@ -2803,22 +2784,9 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.queue, chat_id, q_frame);
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"finished\":{}}}", .{finished}) };
             },
-            .WatchCheckoutDiffs => {
-                return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"checkouts\":[]}"));
-            },
-            .GetCheckoutDiff => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const cwd = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
-                _ = requireStr(obj, "mode") orelse return .{ .err = .{ .bad_params = "missing mode" } };
-                return .{ .unary_json = try git_host.runGitDiffJson(self.gpa, self.io, cwd) };
-            },
-            .DiscardWorkingTree => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "checkoutId") orelse return .{ .err = .{ .bad_params = "missing checkoutId" } };
-                _ = requireStr(obj, "expectedChecksum") orelse return .{ .err = .{ .bad_params = "missing expectedChecksum" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"discarded\":false}") };
-            },
+            .WatchCheckoutDiffs => return @import("rpcg_rpc.zig").watchCheckoutDiffs(self, call_id, params),
+            .GetCheckoutDiff => return @import("rpcg_rpc.zig").getCheckoutDiff(self, params),
+            .DiscardWorkingTree => return @import("rpcg_rpc.zig").discardWorkingTree(self, params),
             .ListWorkspaceDirectory => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
@@ -2910,12 +2878,7 @@ pub const EngineHost = struct {
             .WatchWorkspaceFiles => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"changed\":[]}"));
             },
-            .WatchWorkspaceGitStatus => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const checkout_path = requireStr(obj, "checkoutPath") orelse return .{ .err = .{ .bad_params = "missing checkoutPath" } };
-                return self.oneStreamItem(false, try git_host.runGitStatusJson(self.gpa, self.io, checkout_path));
-            },
+            .WatchWorkspaceGitStatus => return @import("rpcg_rpc.zig").watchWorkspaceGitStatus(self, call_id, params),
             .ListProjectActions => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
