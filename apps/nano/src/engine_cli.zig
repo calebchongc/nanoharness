@@ -767,7 +767,7 @@ pub fn login(c: Context) !u8 {
                 if (auth.refresh_token != null) break;
                 try c.out.writeAll("Sign-in failed: the edge returned no session\n");
             } else |err| {
-                try c.out.print("Sign-in failed: {t}\n", .{err});
+                try c.out.print("Sign-in failed: {s}\n", .{auth.errorText(err)});
             }
             // A code is single-use: offer a fresh sign-in after a failure.
             if (auth.pending_state == null) try startSignIn(c, &auth, cfg);
@@ -1041,11 +1041,14 @@ test "login: the pasted code is exchanged, a workspace joined, and the session s
     defer gpa.free(jwt);
     const exchange = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-1\",\"user\":{{\"id\":\"u-1\",\"email\":\"ada@example.com\"}}}}", .{jwt});
     defer gpa.free(exchange);
-    const refreshed = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-2\"}}", .{jwt});
+    const jwt_b = try syntheticJwt(gpa, "{\"sub\":\"u-1\",\"iat\":1000,\"exp\":4000,\"org_id\":\"org-b\"}");
+    defer gpa.free(jwt_b);
+    const refreshed = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-2\"}}", .{jwt_b});
     defer gpa.free(refreshed);
+
     const routes = [_][2][]const u8{
         .{ "/auth/exchange", exchange },
-        .{ "/auth/orgs", "{\"orgs\":[{\"organizationId\":\"org-a\",\"name\":\"Alpha\"},{\"organizationId\":\"org-b\",\"name\":\"Beta\"}]}" },
+        .{ "/auth/orgs", "{\"orgs\":[{\"id\":\"om-a\",\"organizationId\":\"org-a\",\"name\":\"Alpha\"},{\"id\":\"om-b\",\"organizationId\":\"org-b\",\"name\":\"Beta\"}]}" },
         .{ "/auth/refresh", refreshed },
     };
     const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -1066,7 +1069,7 @@ test "login: the pasted code is exchanged, a workspace joined, and the session s
     var first: Captured = .init("wrong.code\n");
     defer first.deinit();
     try testing.expectEqual(@as(u8, 1), try login(first.ctx(&env, 1, true)));
-    try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in failed: InvalidOAuthState") != null);
+    try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in failed: invalid or expired sign-in code") != null);
     try testing.expect(std.mem.indexOf(u8, first.text(), "Sign-in did not complete") != null);
     try testing.expect(std.mem.indexOf(u8, first.text(), "redirect_uri=http%3A%2F%2F127.0.0.1") != null);
 

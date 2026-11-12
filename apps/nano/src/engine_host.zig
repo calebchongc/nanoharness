@@ -1832,19 +1832,9 @@ pub const EngineHost = struct {
                 ) };
             },
             .CompleteSignIn => {
-                if (requireObj(params)) |obj| {
-                    if (requireStr(obj, "code")) |code| {
-                        self.auth.completeSignIn(self.io, code) catch |err| switch (err) {
-                            error.InvalidOAuthState => return .{ .err = .{ .bad_params = "invalid OAuth state" } },
-                            error.SignInCanceled => return .{ .err = .{ .exec_error = "sign-in canceled" } },
-                            else => return .{ .err = .{ .exec_error = "OAuth exchange failed" } },
-                        };
-                    } else {
-                        try self.auth.completeSignIn(self.io, "state-zig-1.dev");
-                    }
-                } else {
-                    try self.auth.completeSignIn(self.io, "state-zig-1.dev");
-                }
+                const code = (if (requireObj(params)) |obj| requireStr(obj, "code") else null) orelse
+                    return .{ .err = .{ .bad_params = "missing field `code`" } };
+                self.auth.completeSignIn(self.io, code) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
                 self.workspace_scope = "synced";
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
@@ -2293,14 +2283,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
             },
             .ListOrgs => {
-                return .{ .unary_json = try self.auth.listOrgsJson(self.io) };
+                return .{ .unary_json = self.auth.listOrgsJson(self.io) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } } };
             },
             .CreateOrg, .SelectOrg => {
-                const org_id = if (requireObj(params)) |obj|
-                    (requireStr(obj, "organizationId") orelse requireStr(obj, "id") orelse requireStr(obj, "name") orelse "org-personal")
-                else
-                    "org-personal";
-                try self.auth.selectOrg(self.io, org_id);
+                const field = if (rpc_method == .CreateOrg) "name" else "organizationId";
+                const arg = (if (requireObj(params)) |obj| requireStr(obj, field) else null) orelse
+                    return .{ .err = .{ .bad_params = if (rpc_method == .CreateOrg) "missing field `name`" else "missing field `organizationId`" } };
+                var created: ?[]u8 = null;
+                defer if (created) |c| self.gpa.free(c);
+                if (rpc_method == .CreateOrg) {
+                    created = self.auth.createOrg(self.io, arg) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
+                } else {
+                    self.auth.selectOrg(self.io, arg) catch |err| return .{ .err = .{ .exec_error = self.auth.errorText(err) } };
+                }
+                const org_id = created orelse arg;
                 self.workspace_scope = "synced";
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);

@@ -431,6 +431,10 @@ pub const AuthManager = struct {
     lost_session_marker: bool = false,
     sandboxes: std.ArrayList(CloudSandbox) = .empty,
     h2_pool: H2SessionPool = .{},
+    /// The message of the last `error.AuthFailed`, in the Rust engine's words.
+    err_buf: [320]u8 = undefined,
+    err_len: usize = 0,
+
 
     pub fn init(gpa: Allocator) !AuthManager {
         const uid = try gpa.dupe(u8, "user-local");
@@ -481,6 +485,22 @@ pub const AuthManager = struct {
         for (self.sandboxes.items) |*sb| sb.deinit(self.gpa);
         self.sandboxes.deinit(self.gpa);
         self.h2_pool.deinit();
+    }
+
+    /// The message behind the last `error.AuthFailed`.
+    pub fn lastError(self: *const AuthManager) []const u8 {
+        return self.err_buf[0..self.err_len];
+    }
+
+    /// An RPC error text for `err`: the recorded message for `error.AuthFailed`.
+    pub fn errorText(self: *const AuthManager, err: anyerror) []const u8 {
+        return if (err == error.AuthFailed) self.lastError() else @errorName(err);
+    }
+
+    fn fail(self: *AuthManager, comptime fmt: []const u8, args: anytype) error{AuthFailed} {
+        const msg = std.fmt.bufPrint(&self.err_buf, fmt, args) catch self.err_buf[0..];
+        self.err_len = msg.len;
+        return error.AuthFailed;
     }
 
     fn replaceOptStr(self: *AuthManager, slot: *?[]u8, val: ?[]const u8) !void {
@@ -1115,123 +1135,129 @@ pub const AuthManager = struct {
         if (io) |rio| self.persistCodegraffKeyFile(rio);
     }
 
-    /// Complete paste-code or callback sign-in (`CompleteSignIn { code: "state.code" }`).
-    /// Verifies CSRF `state`, fences against `self.generation`, exchanges the code with
-    /// `/auth/exchange` when `edge_url` is configured, and persists `session.json` (`0600`).
-    pub fn completeSignIn(self: *AuthManager, io: ?std.Io, state_dot_code: []const u8) !void {
-        if (self.pending_state) |expected_state| {
-            const dot = std.mem.indexOfScalar(u8, state_dot_code, '.') orelse return error.InvalidOAuthState;
-            const submitted_state = state_dot_code[0..dot];
-            const raw_code = state_dot_code[dot + 1 ..];
-            if (!std.mem.eql(u8, expected_state, submitted_state) or raw_code.len == 0) {
-                return error.InvalidOAuthState;
-            }
-            if (self.pending_generation != self.generation) {
-                return error.SignInCanceled;
-            }
-            const gen_at_start = self.generation;
-            const verifier = try self.gpa.dupe(u8, self.pending_verifier orelse "");
-            defer self.gpa.free(verifier);
-            const nonce = try self.gpa.dupe(u8, self.pending_nonce orelse "");
-            defer self.gpa.free(nonce);
-            const fallback_cb = if (self.edge_url) |eu|
-                try std.fmt.allocPrint(self.gpa, "{s}/auth/cli/callback", .{std.mem.trimEnd(u8, eu, "/")})
-            else
-                try self.gpa.dupe(u8, "https://edge.codegraff.com/auth/cli/callback");
-            defer self.gpa.free(fallback_cb);
-            const redirect_uri = try self.gpa.dupe(u8, self.pending_redirect_uri orelse fallback_cb);
-            defer self.gpa.free(redirect_uri);
-            try self.replaceOptStr(&self.pending_state, null);
-            try self.replaceOptStr(&self.pending_redirect_uri, null);
+    /// Complete paste-code or callback sign-in (`CompleteSignIn { code: "state.code" }`,
+    /// `complete_sign_in`). Verifies the CSRF `state`, fences against `self.generation`,
+    /// exchanges the code with `/auth/exchange` and persists `session.json` (`0600`).
+    /// Without a CodeGraff client (development mode) there is nothing to do.
+    pub fn completeSignIn(self: *AuthManager, io: ?std.Io, pasted: []const u8) !void {
+        if (self.codegraff_client_id == null) return;
+        const invalid = "invalid or expired sign-in code \u{2014} start sign-in again and paste the full code";
+        const trimmed = std.mem.trim(u8, pasted, " \t\r\n");
+        const dot = std.mem.indexOfScalar(u8, trimmed, '.') orelse return self.fail(invalid, .{});
+        const submitted_state = trimmed[0..dot];
+        const raw_code = trimmed[dot + 1 ..];
+        if (submitted_state.len == 0 or raw_code.len == 0) return self.fail(invalid, .{});
+        const expected_state = self.pending_state orelse return self.fail(invalid, .{});
+        if (!std.mem.eql(u8, expected_state, submitted_state)) return self.fail(invalid, .{});
+        if (self.pending_generation != self.generation) {
+            return self.fail("sign-in was canceled \u{2014} start again from Harness", .{});
+        }
+        const gen_at_start = self.generation;
+        const verifier = try self.gpa.dupe(u8, self.pending_verifier orelse "");
+        defer self.gpa.free(verifier);
+        const nonce = try self.gpa.dupe(u8, self.pending_nonce orelse submitted_state);
+        defer self.gpa.free(nonce);
+        const edge = std.mem.trimEnd(u8, self.edge_url orelse default_edge_url, "/");
+        const fallback_cb = try std.fmt.allocPrint(self.gpa, "{s}/auth/cli/callback", .{edge});
+        defer self.gpa.free(fallback_cb);
+        const redirect_uri = try self.gpa.dupe(u8, self.pending_redirect_uri orelse fallback_cb);
+        defer self.gpa.free(redirect_uri);
+        try self.replaceOptStr(&self.pending_state, null);
+        try self.replaceOptStr(&self.pending_redirect_uri, null);
 
-            if (io != null and self.edge_url != null) {
-                const rio = io.?;
-                const base = std.mem.trimEnd(u8, self.edge_url.?, "/");
-                const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/exchange", .{base});
-                defer self.gpa.free(url);
-                const want_graff_key = (self.codegraff_api_key == null);
-                const req_body = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"code\":{f},\"codeVerifier\":{f},\"redirectUri\":{f},\"nonce\":{f},\"graffKey\":{},\"deviceLabel\":\"Harness Nano\"}}",
-                    .{ json.fmt(raw_code, .{}), json.fmt(verifier, .{}), json.fmt(redirect_uri, .{}), json.fmt(nonce, .{}), want_graff_key },
-                );
-                defer self.gpa.free(req_body);
+        const rio = io orelse return self.fail("the edge is unreachable: the engine has no network I/O", .{});
+        const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/exchange", .{edge});
+        defer self.gpa.free(url);
+        const want_graff_key = (self.codegraff_api_key == null);
+        const req_body = try std.fmt.allocPrint(
+            self.gpa,
+            "{{\"code\":{f},\"codeVerifier\":{f},\"redirectUri\":{f},\"nonce\":{f},\"graffKey\":{},\"deviceLabel\":\"Harness Nano\"}}",
+            .{ json.fmt(raw_code, .{}), json.fmt(verifier, .{}), json.fmt(redirect_uri, .{}), json.fmt(nonce, .{}), want_graff_key },
+        );
+        defer self.gpa.free(req_body);
 
-                var resp = try edgeRequestPooled(&self.h2_pool, self.gpa, rio, "POST", url, null, &.{}, req_body);
-                defer resp.deinit(self.gpa);
-                if (resp.status != 200) return error.ExchangeFailed;
+        var resp = edgeRequestPooled(&self.h2_pool, self.gpa, rio, "POST", url, null, &.{}, req_body) catch |err|
+            return self.fail("the edge is unreachable: {t}", .{err});
+        defer resp.deinit(self.gpa);
+        if (resp.status < 200 or resp.status >= 300) {
+            return self.fail("sign-in failed during token exchange ({d}) \u{2014} the code may have expired; start again", .{resp.status});
+        }
 
-                // Generation fence: if SignOut occurred while exchange was in flight, abort!
-                if (self.generation != gen_at_start) return error.SignInCanceled;
+        // Generation fence: if SignOut occurred while exchange was in flight, abort.
+        if (self.generation != gen_at_start) {
+            return self.fail("sign-in was canceled \u{2014} start again from Harness", .{});
+        }
 
-                var parsed = try json.parseFromSlice(json.Value, self.gpa, resp.body, .{});
-                defer parsed.deinit();
-                if (parsed.value != .object) return error.ExchangeFailed;
-                const obj = parsed.value.object;
+        const malformed = "malformed exchange response: {s}";
+        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch
+            return self.fail(malformed, .{"not JSON"});
+        defer parsed.deinit();
+        if (parsed.value != .object) return self.fail(malformed, .{"not an object"});
+        const obj = parsed.value.object;
 
-                const access_tok = if (obj.get("accessToken")) |v| (if (v == .string) v.string else "") else "";
-                const refresh_tok = if (obj.get("refreshToken")) |v| (if (v == .string) v.string else "") else "";
-                if (access_tok.len == 0 or refresh_tok.len == 0) return error.ExchangeFailed;
+        const access_tok = if (obj.get("accessToken")) |v| (if (v == .string) v.string else "") else "";
+        const refresh_tok = if (obj.get("refreshToken")) |v| (if (v == .string) v.string else "") else "";
+        if (access_tok.len == 0 or refresh_tok.len == 0) return self.fail(malformed, .{"missing tokens"});
+        const uv = obj.get("user") orelse return self.fail(malformed, .{"missing user"});
+        if (uv != .object) return self.fail(malformed, .{"missing user"});
+        const idv = uv.object.get("id") orelse return self.fail(malformed, .{"missing user id"});
+        const ev = uv.object.get("email") orelse return self.fail(malformed, .{"missing user email"});
+        if (idv != .string or ev != .string) return self.fail(malformed, .{"missing user id"});
 
-                if (obj.get("user")) |uv| if (uv == .object) {
-                    if (uv.object.get("id")) |idv| if (idv == .string) try self.replaceStr(&self.user_id, idv.string);
-                    if (uv.object.get("email")) |ev| if (ev == .string) try self.replaceStr(&self.email, ev.string);
-                    if (uv.object.get("name")) |nv| {
-                        if (nv == .string and nv.string.len > 0) try self.replaceOptStr(&self.user_name, nv.string);
-                    } else {
-                        const first = if (uv.object.get("firstName")) |fv| (if (fv == .string) fv.string else "") else "";
-                        const last = if (uv.object.get("lastName")) |lv| (if (lv == .string) lv.string else "") else "";
-                        if (first.len > 0 and last.len > 0) {
-                            const full = try std.fmt.allocPrint(self.gpa, "{s} {s}", .{ first, last });
-                            defer self.gpa.free(full);
-                            try self.replaceOptStr(&self.user_name, full);
-                        } else if (first.len > 0) {
-                            try self.replaceOptStr(&self.user_name, first);
-                        } else if (last.len > 0) {
-                            try self.replaceOptStr(&self.user_name, last);
-                        }
-                    }
-                };
-
-                if (obj.get("graffKey")) |gkv| if (gkv == .object) {
-                    const gk_api = if (gkv.object.get("apiKey")) |kv| (if (kv == .string) kv.string else "") else "";
-                    const gk_email: ?[]const u8 = if (gkv.object.get("email")) |ev| (if (ev == .string and ev.string.len > 0) ev.string else null) else null;
-                    if (std.mem.startsWith(u8, gk_api, "cg_sk_") and self.codegraff_api_key == null) {
-                        self.adoptCodegraffKey(rio, gk_api, gk_email) catch {};
-                    }
-                };
-
-                try self.replaceOptStr(&self.access_token, access_tok);
-                try self.replaceOptStr(&self.refresh_token, refresh_tok);
-
-                var claims = try parseJwtClaims(self.gpa, access_tok);
-                defer claims.deinit(self.gpa);
-                try self.replaceOptStr(&self.org_id, claims.org_id);
-                const now_ms: i64 = @intCast(std.Io.Clock.real.now(rio).toMilliseconds());
-                self.access_expires_at_ms = if (claims.exp_secs > 1_000_000_000)
-                    claims.exp_secs * 1000
-                else
-                    now_ms + claims.ttl_secs * 1000;
-
-                self.last_unanswered = false;
-                self.rejection_spared = false;
-                self.lost_session_marker = false;
-                if (self.org_id != null) {
-                    self.phase = .signed_in;
-                    self.signed_in = true;
-                } else {
-                    self.phase = .needs_organization;
-                    self.signed_in = false;
-                }
-                self.persistSessionFile(rio);
-                return;
+        try self.replaceStr(&self.user_id, idv.string);
+        try self.replaceStr(&self.email, ev.string);
+        if (uv.object.get("name")) |nv| {
+            if (nv == .string and nv.string.len > 0) try self.replaceOptStr(&self.user_name, nv.string);
+        } else {
+            const first = if (uv.object.get("firstName")) |fv| (if (fv == .string) fv.string else "") else "";
+            const last = if (uv.object.get("lastName")) |lv| (if (lv == .string) lv.string else "") else "";
+            if (first.len > 0 and last.len > 0) {
+                const full = try std.fmt.allocPrint(self.gpa, "{s} {s}", .{ first, last });
+                defer self.gpa.free(full);
+                try self.replaceOptStr(&self.user_name, full);
+            } else if (first.len > 0) {
+                try self.replaceOptStr(&self.user_name, first);
+            } else if (last.len > 0) {
+                try self.replaceOptStr(&self.user_name, last);
+            } else {
+                try self.replaceOptStr(&self.user_name, null);
             }
         }
-        // Dev / local fallback
-        self.phase = .signed_in;
-        self.signed_in = true;
-        if (self.org_id == null) {
-            try self.replaceOptStr(&self.org_id, "org-personal");
+
+        if (obj.get("graffKey")) |gkv| if (gkv == .object) {
+            const gk_api = if (gkv.object.get("apiKey")) |kv| (if (kv == .string) kv.string else "") else "";
+            const gk_email: ?[]const u8 = if (gkv.object.get("email")) |gev| (if (gev == .string and gev.string.len > 0) gev.string else null) else null;
+            if (std.mem.startsWith(u8, gk_api, "cg_sk_") and self.codegraff_api_key == null) {
+                self.adoptCodegraffKey(rio, gk_api, gk_email) catch {};
+            }
+        };
+
+        try self.storeTokens(rio, access_tok, refresh_tok);
+        self.last_unanswered = false;
+        self.rejection_spared = false;
+        self.lost_session_marker = false;
+        self.persistSessionFile(rio);
+    }
+
+    /// Adopt a fresh access/refresh pair; the org and the phase follow the
+    /// access token's `org_id` claim (`state_for`).
+    fn storeTokens(self: *AuthManager, io: std.Io, access_tok: []const u8, refresh_tok: []const u8) !void {
+        try self.replaceOptStr(&self.access_token, access_tok);
+        try self.replaceOptStr(&self.refresh_token, refresh_tok);
+        var claims = try parseJwtClaims(self.gpa, access_tok);
+        defer claims.deinit(self.gpa);
+        try self.replaceOptStr(&self.org_id, claims.org_id);
+        const now_ms: i64 = @intCast(std.Io.Clock.real.now(io).toMilliseconds());
+        self.access_expires_at_ms = if (claims.exp_secs > 1_000_000_000)
+            claims.exp_secs * 1000
+        else
+            now_ms + claims.ttl_secs * 1000;
+        if (self.org_id != null) {
+            self.phase = .signed_in;
+            self.signed_in = true;
+        } else {
+            self.phase = .needs_organization;
+            self.signed_in = false;
         }
     }
 
@@ -1441,71 +1467,110 @@ pub const AuthManager = struct {
         self.removeCodegraffKeyFile(io);
     }
 
-    /// List organizations (`ListOrgs` / `GET /auth/orgs`).
+    /// List organizations (`ListOrgs` / `GET /auth/orgs`, `list_orgs`) as
+    /// `{"orgs":[{id, organizationId, name}]}`. Development mode has none.
     pub fn listOrgsJson(self: *AuthManager, io: ?std.Io) ![]u8 {
-        if (io != null and self.edge_url != null) {
-            const rio = io.?;
-            const base = std.mem.trimEnd(u8, self.edge_url.?, "/");
-            const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/orgs", .{base});
-            defer self.gpa.free(url);
-            if (edgeRequestPooled(&self.h2_pool, self.gpa, rio, "GET", url, self.access_token, &.{}, null)) |resp_val| {
-                var resp = resp_val;
-                defer resp.deinit(self.gpa);
-                if (resp.status == 200) {
-                    return try self.gpa.dupe(u8, resp.body);
-                }
-            } else |_| {}
+        if (self.codegraff_client_id == null) return self.gpa.dupe(u8, "{\"orgs\":[]}");
+        var parsed = try self.authedJson(io, "GET", "/auth/orgs", null);
+        defer parsed.deinit();
+        if (parsed.value != .object) return self.fail("malformed response: {s}", .{"not an object"});
+        const orgs: []const json.Value = if (parsed.value.object.get("orgs")) |ov| switch (ov) {
+            .array => |arr| arr.items,
+            .null => &.{},
+            else => return self.fail("malformed response: {s}", .{"orgs is not a list"}),
+        } else &.{};
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll("{\"orgs\":[");
+        for (orgs, 0..) |org, i| {
+            if (org != .object) return self.fail("malformed response: {s}", .{"an org is not an object"});
+            const id = strField(org.object, "id") orelse return self.fail("malformed response: {s}", .{"missing field `id`"});
+            const oid = strField(org.object, "organizationId") orelse return self.fail("malformed response: {s}", .{"missing field `organizationId`"});
+            const name = strField(org.object, "name") orelse return self.fail("malformed response: {s}", .{"missing field `name`"});
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"id\":{f},\"organizationId\":{f},\"name\":{f}}}", .{ json.fmt(id, .{}), json.fmt(oid, .{}), json.fmt(name, .{}) });
         }
-        return self.gpa.dupe(
-            u8,
-            "{\"orgs\":[{\"id\":\"om_personal\",\"organizationId\":\"org-personal\",\"name\":\"Personal\",\"personal\":true}]}",
-        );
+        try w.writeAll("]}");
+        return aw.toOwnedSlice();
     }
 
-    /// Select an organization (`SelectOrg` / `POST /auth/refresh` with `organizationId`),
-    /// rotating `refreshToken` and transitioning `NeedsOrganization` -> `SignedIn`.
+    fn strField(obj: json.ObjectMap, name: []const u8) ?[]const u8 {
+        const v = obj.get(name) orelse return null;
+        return if (v == .string) v.string else null;
+    }
+
+    /// Create an organization (`CreateOrg` / `POST /auth/orgs`, `create_org`): the
+    /// edge makes this account its first admin; the session then scopes to it.
+    /// Returns the new organization's id (caller frees).
+    pub fn createOrg(self: *AuthManager, io: ?std.Io, name: []const u8) ![]u8 {
+        if (self.codegraff_client_id == null) return self.gpa.dupe(u8, "");
+        const body = try std.fmt.allocPrint(self.gpa, "{{\"name\":{f}}}", .{json.fmt(name, .{})});
+        defer self.gpa.free(body);
+        var parsed = try self.authedJson(io, "POST", "/auth/orgs", body);
+        defer parsed.deinit();
+        const oid = (if (parsed.value == .object) strField(parsed.value.object, "organizationId") else null) orelse
+            return self.fail("malformed response: {s}", .{"missing field `organizationId`"});
+        const owned = try self.gpa.dupe(u8, oid);
+        errdefer self.gpa.free(owned);
+        try self.selectOrg(io, owned);
+        return owned;
+    }
+
+    /// An authenticated edge call answering JSON (`authed_json`).
+    fn authedJson(self: *AuthManager, io: ?std.Io, method: []const u8, path: []const u8, body: ?[]const u8) !json.Parsed(json.Value) {
+        const rio = io orelse return self.fail("signed out", .{});
+        if (self.phase == .signed_out or self.refresh_token == null) return self.fail("signed out", .{});
+        const token = self.ensureAccessToken(rio, false) orelse return self.fail("signed out", .{});
+        const edge = std.mem.trimEnd(u8, self.edge_url orelse default_edge_url, "/");
+        const url = try std.fmt.allocPrint(self.gpa, "{s}{s}", .{ edge, path });
+        defer self.gpa.free(url);
+        var resp = edgeRequestPooled(&self.h2_pool, self.gpa, rio, method, url, token, &.{}, body) catch |err|
+            return self.fail("the edge is unreachable: {t}", .{err});
+        defer resp.deinit(self.gpa);
+        if (resp.status < 200 or resp.status >= 300) return self.fail("workspace request failed ({d})", .{resp.status});
+        return json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch
+            return self.fail("malformed response: {s}", .{"not JSON"});
+    }
+
+    /// Select an organization (`SelectOrg`, `select_org`): one refresh with
+    /// `organizationId`; the state follows the returned token's `org_id` claim, and
+    /// the switch fails unless that claim is the organization asked for.
     pub fn selectOrg(self: *AuthManager, io: ?std.Io, organization_id: []const u8) !void {
+        if (self.codegraff_client_id == null) return;
+        const not_member = "could not switch to that workspace \u{2014} you may no longer be a member";
+        const rio = io orelse return self.fail("could not reach the edge during refresh: {s}", .{"the engine has no network I/O"});
+        const rt_now = self.refresh_token orelse return self.fail(not_member, .{});
+        const rt = try self.gpa.dupe(u8, rt_now);
+        defer self.gpa.free(rt);
         const gen_at_start = self.generation;
-        if (io != null and self.edge_url != null and self.refresh_token != null) {
-            const rio = io.?;
-            const base = std.mem.trimEnd(u8, self.edge_url.?, "/");
-            const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/refresh", .{base});
-            defer self.gpa.free(url);
-            const req_body = try std.fmt.allocPrint(
-                self.gpa,
-                "{{\"refreshToken\":{f},\"organizationId\":{f}}}",
-                .{ json.fmt(self.refresh_token.?, .{}), json.fmt(organization_id, .{}) },
-            );
-            defer self.gpa.free(req_body);
-            var resp = try edgeRequestPooled(&self.h2_pool, self.gpa, rio, "POST", url, null, &.{}, req_body);
-            defer resp.deinit(self.gpa);
-            if (self.generation != gen_at_start) return error.SignInCanceled;
-            if (resp.status == 200) {
-                var parsed = try json.parseFromSlice(json.Value, self.gpa, resp.body, .{});
-                defer parsed.deinit();
-                if (parsed.value == .object) {
-                    if (parsed.value.object.get("accessToken")) |av| if (av == .string) {
-                        try self.replaceOptStr(&self.access_token, av.string);
-                        if (parseJwtClaims(self.gpa, av.string)) |claims_val| {
-                            var claims = claims_val;
-                            defer claims.deinit(self.gpa);
-                            const now_ms: i64 = @intCast(std.Io.Clock.real.now(rio).toMilliseconds());
-                            self.access_expires_at_ms = if (claims.exp_secs > 1_000_000_000)
-                                claims.exp_secs * 1000
-                            else
-                                now_ms + claims.ttl_secs * 1000;
-                        } else |_| {}
-                    };
-                    if (parsed.value.object.get("refreshToken")) |rv| if (rv == .string) {
-                        try self.replaceOptStr(&self.refresh_token, rv.string);
-                    };
-                }
-            }
+        const edge = std.mem.trimEnd(u8, self.edge_url orelse default_edge_url, "/");
+        const url = try std.fmt.allocPrint(self.gpa, "{s}/auth/refresh", .{edge});
+        defer self.gpa.free(url);
+        const req_body = try std.fmt.allocPrint(
+            self.gpa,
+            "{{\"refreshToken\":{f},\"organizationId\":{f}}}",
+            .{ json.fmt(rt, .{}), json.fmt(organization_id, .{}) },
+        );
+        defer self.gpa.free(req_body);
+        var resp = edgeRequestPooled(&self.h2_pool, self.gpa, rio, "POST", url, null, &.{}, req_body) catch |err|
+            return self.fail("could not reach the edge during refresh: {t}", .{err});
+        defer resp.deinit(self.gpa);
+        if (resp.status < 200 or resp.status >= 300) return self.fail("refresh failed ({d})", .{resp.status});
+        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch
+            return self.fail("malformed refresh response: {s}", .{"not JSON"});
+        defer parsed.deinit();
+        const obj = if (parsed.value == .object) parsed.value.object else return self.fail("malformed refresh response: {s}", .{"not an object"});
+        const access_tok = strField(obj, "accessToken") orelse return self.fail("malformed refresh response: {s}", .{"missing field `accessToken`"});
+        const refresh_tok = strField(obj, "refreshToken") orelse return self.fail("malformed refresh response: {s}", .{"missing field `refreshToken`"});
+        // Signed out (or signed in again) while the refresh was in flight.
+        if (self.generation != gen_at_start or self.refresh_token == null or !std.mem.eql(u8, self.refresh_token.?, rt)) {
+            return self.fail(not_member, .{});
         }
-        try self.replaceOptStr(&self.org_id, organization_id);
-        self.phase = .signed_in;
-        self.signed_in = true;
-        if (io) |rio| self.persistSessionFile(rio);
+        try self.storeTokens(rio, access_tok, refresh_tok);
+        self.persistSessionFile(rio);
+        const scoped = if (self.org_id) |org| std.mem.eql(u8, org, organization_id) else false;
+        if (!scoped) return self.fail(not_member, .{});
     }
 
     /// Return a valid `access_token`, rotating via `POST {edge_url}/auth/refresh` when missing
