@@ -507,7 +507,7 @@ const STEP_FNS = {
       return r.status === 200 && Array.isArray(r.json?.messages) && assistantDone(r.json.messages, prompt1) ? r.json : null;
     });
     const stats = await http("GET", `${edgeUrl(run)}/chat2/${chatId}/stats`, { bearer });
-    ctx.notes.push(`chat2 log for the chat: headSeq ${stats.json?.headSeq} (the Zig engine writes no Loro rows; history is the host-published tail)`);
+    ctx.notes.push(`chat2 log observed headSeq ${stats.json?.headSeq}; this tail/relay check alone does not prove Loro compatibility (use scripts/local-loro.sh check)`);
     return {
       reason: `chats row (title "${row.fields?.title ?? ""}", host A), spaces row ${space ? "present" : "MISSING"}; ` +
         `/chat2/:id/tail ${tail.messages.length} messages with the turn; chat2 log headSeq ${stats.json?.headSeq}`,
