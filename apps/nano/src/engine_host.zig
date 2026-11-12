@@ -2271,9 +2271,7 @@ pub const EngineHost = struct {
                         "]}]",
                 ) };
             },
-            .ExternalHistoryList => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "[]") };
-            },
+            .ExternalHistoryList => return @import("rpcw_history.zig").externalHistoryList(self, params),
             .ExternalHistoryImport => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"imported\":[]}") };
             },
