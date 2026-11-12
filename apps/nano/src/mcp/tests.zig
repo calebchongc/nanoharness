@@ -1117,6 +1117,48 @@ test "mcp wait rules: a send in flight waits for the turn past its baseline" {
     try testing.expectEqual(@as(?tools.TurnOutcome, .awaitingInput), w4.observe(asking));
 }
 
+test "mcp wait rules: a completion marker counts as a string or a number, and a coalesced watch that never shows working completes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = struct {
+        fn row(al: Allocator, marker: []const u8, at: []const u8) !Value {
+            return json.parseFromSliceLeaky(Value, al, try std.fmt.allocPrint(al, "{{\"status\":\"idle\",\"updatedAt\":\"2026-11-10T00:00:{s}Z\",\"lastCompletedTurn\":{s}}}", .{ at, marker }), .{});
+        }
+    }.row;
+    // Each encoding: the baseline, the same marker again, and the next turn's
+    // marker arriving straight away (the working rows coalesced away).
+    const cases = [_][3][]const u8{
+        .{ "\"asst-1\"", "\"asst-1\"", "\"asst-2\"" },
+        .{ "7", "7", "8" },
+    };
+    for (cases) |c| {
+        const base = try p(a, c[0], "00");
+        const same = try p(a, c[1], "00");
+        const next = try p(a, c[2], "09");
+        // The stream.
+        var w: tools.TurnWatch = .{ .baseline = base, .expect_turn = true };
+        try testing.expectEqual(@as(?tools.TurnOutcome, null), w.observe(same));
+        try testing.expectEqual(@as(?tools.TurnOutcome, .completed), w.observe(next));
+        try testing.expect(!w.saw_working);
+        // A first send (no baseline row): a marker at all is a finished turn.
+        var first: tools.TurnWatch = .{ .baseline = null, .expect_turn = true };
+        try testing.expectEqual(@as(?tools.TurnOutcome, .completed), first.observe(next));
+        // The zero-timeout snapshot.
+        try testing.expectEqual(tools.TurnOutcome.completed, tools.snapshotOutcome(next, base, true));
+        try testing.expectEqual(tools.TurnOutcome.timedOut, tools.snapshotOutcome(same, base, true));
+        if (@hasDecl(tools, "turnMarker")) try testing.expect(tools.turnMarker(next) != null);
+    }
+    // Raw values: a string never equals the number it spells, and null is
+    // the same as no marker.
+    var mixed: tools.TurnWatch = .{ .baseline = try p(a, "\"7\"", "00"), .expect_turn = true };
+    try testing.expectEqual(@as(?tools.TurnOutcome, .completed), mixed.observe(try p(a, "7", "00")));
+    const none = try json.parseFromSliceLeaky(Value, a, "{\"status\":\"idle\",\"updatedAt\":\"2026-11-10T00:00:00Z\"}", .{});
+    var nulls: tools.TurnWatch = .{ .baseline = none, .expect_turn = true };
+    try testing.expectEqual(@as(?tools.TurnOutcome, null), nulls.observe(try p(a, "null", "00")));
+    if (@hasDecl(tools, "turnMarker")) try testing.expect(tools.turnMarker(try p(a, "null", "00")) == null);
+}
+
 test "mcp commands: interrupt, respond, dismiss, rename and archive reach the engine" {
     const f = try HostFixture.create(.{});
     defer f.destroy();

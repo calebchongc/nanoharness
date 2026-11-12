@@ -1394,12 +1394,44 @@ pub const TurnOutcome = enum {
     timedOut,
 };
 
+/// A session row's completion marker, as the engine sent it: the Zig
+/// engine writes the turn's entry id (a string), an edge op or an older
+/// engine a counter (a number). Absent and `null` are both "none".
+pub fn turnMarker(row: Value) ?Value {
+    const v = u.get(row, "lastCompletedTurn") orelse return null;
+    return if (v == .null) null else v;
+}
+
+/// Raw JSON equality of two markers: same type and value, so a string and
+/// a number never match.
+fn sameMarker(x: Value, y: Value) bool {
+    if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
+    return switch (x) {
+        .string => |t| std.mem.eql(u8, t, y.string),
+        .number_string => |t| std.mem.eql(u8, t, y.number_string),
+        .integer => |n| n == y.integer,
+        .float => |f| f == y.float,
+        .bool => |v| v == y.bool,
+        .null => true,
+        // Not a marker any engine sends; compare the compact text.
+        .array, .object => {
+            var bx: [512]u8 = undefined;
+            var by: [512]u8 = undefined;
+            var wx: std.Io.Writer = .fixed(&bx);
+            var wy: std.Io.Writer = .fixed(&by);
+            json.Stringify.value(x, .{}, &wx) catch return false;
+            json.Stringify.value(y, .{}, &wy) catch return false;
+            return std.mem.eql(u8, wx.buffered(), wy.buffered());
+        },
+    };
+}
+
 fn sameTurn(x: ?Value, y: ?Value) bool {
-    const xs = if (x) |v| u.str(v, "lastCompletedTurn") else null;
-    const ys = if (y) |v| u.str(v, "lastCompletedTurn") else null;
-    if (xs == null and ys == null) return true;
-    if (xs == null or ys == null) return false;
-    return std.mem.eql(u8, xs.?, ys.?);
+    const xm = if (x) |v| turnMarker(v) else null;
+    const ym = if (y) |v| turnMarker(v) else null;
+    if (xm == null and ym == null) return true;
+    if (xm == null or ym == null) return false;
+    return sameMarker(xm.?, ym.?);
 }
 
 fn advancedPast(row: Value, baseline: ?Value) bool {
@@ -1415,7 +1447,7 @@ pub fn snapshotOutcome(row: ?Value, baseline: ?Value, expect_turn: bool) TurnOut
     if (std.mem.eql(u8, st, "awaitingInput")) return .awaitingInput;
     if (std.mem.eql(u8, st, "errored")) return .errored;
     if (std.mem.eql(u8, st, "idle")) {
-        const has_turn = u.str(r, "lastCompletedTurn") != null;
+        const has_turn = turnMarker(r) != null;
         if (!expect_turn or (has_turn and (baseline == null or !sameTurn(baseline, r)))) return .completed;
     }
     return .timedOut;
@@ -1453,7 +1485,7 @@ pub const TurnWatch = struct {
             const turn_changed = if (w.baseline) |b|
                 !sameTurn(b, session)
             else if (w.expect_turn)
-                u.str(session, "lastCompletedTurn") != null
+                turnMarker(session) != null
             else
                 true;
             w.last = session;
