@@ -21,7 +21,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)",[[:space:]]*$/\1/p' "$ROOT/apps/nano/build.zig.zon" | head -n 1)"
+[[ -n "$VERSION" ]] || { echo "error: no .version in apps/nano/build.zig.zon" >&2; exit 1; }
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Harness.app"
@@ -48,11 +49,11 @@ if [[ -e "$APP/Contents/MacOS/harness" ]]; then
   echo "error: a Rust harness binary is in the bundle" >&2
   exit 1
 fi
-# ADR 0008: Verify both binaries inside the bundle carry the exact Cargo.toml
+# ADR 0008: Verify both binaries inside the bundle carry the exact build.zig.zon
 # release version so a stale build cache can never trigger an update loop.
 ENGINE_VER="$("$APP/Contents/MacOS/harness-engine" --version | awk '{print $2}')"
 if [[ "$ENGINE_VER" != "$VERSION" ]]; then
-  echo "error: harness-engine version ($ENGINE_VER) != Cargo.toml version ($VERSION)" >&2
+  echo "error: harness-engine version ($ENGINE_VER) != build.zig.zon version ($VERSION)" >&2
   exit 1
 fi
 if [[ "$(strings "$APP/Contents/MacOS/harness-nano" | grep -Fc "version = \"$VERSION\"" || true)" -lt 1 ]]; then

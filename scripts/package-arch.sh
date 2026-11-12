@@ -16,7 +16,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-dist}"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)",[[:space:]]*$/\1/p' "$ROOT/apps/nano/build.zig.zon" | head -n 1)"
+[[ -n "$VERSION" ]] || { echo "error: no .version in apps/nano/build.zig.zon" >&2; exit 1; }
 OUT_DIR="$ROOT/target/package"
 PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"
 

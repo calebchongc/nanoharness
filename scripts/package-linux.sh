@@ -15,7 +15,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-dist}"
 ARCH="$(uname -m)"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)",[[:space:]]*$/\1/p' "$ROOT/apps/nano/build.zig.zon" | head -n 1)"
+[[ -n "$VERSION" ]] || { echo "error: no .version in apps/nano/build.zig.zon" >&2; exit 1; }
 OUT_DIR="$ROOT/target/package"
 STAGE="$OUT_DIR/harness-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
@@ -34,7 +35,7 @@ install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$STAGE/harness-nano"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-engine" "$STAGE/harness-engine"
 ENGINE_VER="$("$STAGE/harness-engine" --version | awk '{print $2}')"
 if [[ "$ENGINE_VER" != "$VERSION" ]]; then
-  echo "error: harness-engine version ($ENGINE_VER) != Cargo.toml version ($VERSION)" >&2
+  echo "error: harness-engine version ($ENGINE_VER) != build.zig.zon version ($VERSION)" >&2
   exit 1
 fi
 # The desktop entry opens the Zig app (the template still names the old binary).
