@@ -25,6 +25,58 @@ pub fn setTcpNoDelay(stream: std.Io.net.Stream) void {
     );
 }
 
+/// The deadline for one edge request, connect excluded (the Rust edge
+/// client's total `timeout(30s)`, `doc_host.rs`).
+pub const edge_request_timeout_ms: u32 = 30_000;
+
+/// The HTTP/1.1 method for an edge request's method name, or null when it
+/// isn't one (never a silent GET).
+pub fn h1Method(method: []const u8) ?std.http.Method {
+    return std.meta.stringToEnum(std.http.Method, method);
+}
+
+/// Ends a request that outlives its deadline: a helper thread waits on an
+/// event and, if it isn't set in time, shuts the socket down, which fails
+/// the blocked read or write. The socket must not be reused afterwards.
+pub const SocketWatchdog = struct {
+    io: std.Io,
+    handle: std.Io.net.Socket.Handle,
+    ms: u32,
+    done: std.Io.Event = .unset,
+    fired: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    pub fn arm(self: *SocketWatchdog) void {
+        self.thread = std.Thread.spawn(.{}, run, .{self}) catch null;
+    }
+
+    fn run(self: *SocketWatchdog) void {
+        self.done.waitTimeout(self.io, .{ .duration = .{ .raw = .fromMilliseconds(self.ms), .clock = .awake } }) catch {
+            self.fired.store(true, .release);
+            shutdownSocket(self.handle);
+        };
+    }
+
+    /// Stop watching; true when the deadline had already passed.
+    pub fn disarm(self: *SocketWatchdog) bool {
+        self.done.set(self.io);
+        if (self.thread) |t| t.join();
+        self.thread = null;
+        return self.fired.load(.acquire);
+    }
+};
+
+fn shutdownSocket(handle: std.Io.net.Socket.Handle) void {
+    if (comptime builtin.os.tag == .windows) {
+        const W = struct {
+            extern "ws2_32" fn shutdown(s: std.Io.net.Socket.Handle, how: c_int) callconv(.winapi) c_int;
+        };
+        _ = W.shutdown(handle, 2); // SD_BOTH
+    } else {
+        _ = std.c.shutdown(handle, std.posix.SHUT.RDWR);
+    }
+}
+
 /// Thread-safe pool of warm `http_zig.Session` (TLS 1.3 + ALPN `h2` + cached Root CA bundle)
 /// connections across origins. Eliminates per-request macOS CA bundle rescans, DNS lookups,
 /// TCP 3-way handshakes, TLS 1.3 handshakes, and HTTP/2 SETTINGS prefaces, while allowing
@@ -747,6 +799,22 @@ pub const AuthManager = struct {
         extra_headers: []const http_zig.Header,
         req_body: ?[]const u8,
     ) !EdgeReply {
+        return edgeRequestTimed(pool, gpa, io, method, url, bearer_token, extra_headers, req_body, edge_request_timeout_ms);
+    }
+
+    /// `edgeRequestPooled` with a deadline: past `timeout_ms` the request
+    /// fails with `error.Timeout` and its connection is dropped.
+    pub fn edgeRequestTimed(
+        pool: ?*H2SessionPool,
+        gpa: Allocator,
+        io: std.Io,
+        method: []const u8,
+        url: []const u8,
+        bearer_token: ?[]const u8,
+        extra_headers: []const http_zig.Header,
+        req_body: ?[]const u8,
+        timeout_ms: u32,
+    ) !EdgeReply {
         if (comptime builtin.os.tag == .ios) {
             if (std.mem.startsWith(u8, url, "https://")) {
                 const nanoui = @import("nanoui");
@@ -797,9 +865,10 @@ pub const AuthManager = struct {
                 if (!s.h1_only and s.h2_live) setTcpNoDelay(s.stream);
                 break :blk s;
             };
+            var timed_out = false;
             defer {
-                if (pool) |p| {
-                    p.checkin(io, sess);
+                if (pool != null and !timed_out) {
+                    pool.?.checkin(io, sess);
                 } else {
                     sess.close();
                 }
@@ -835,16 +904,10 @@ pub const AuthManager = struct {
                     extra_h1[h1_len] = .{ .name = eh.name, .value = eh.value };
                     h1_len += 1;
                 }
-                const h1_method: std.http.Method = if (std.mem.eql(u8, method, "POST")) .POST else .GET;
-                const result = try client.fetch(.{
-                    .location = .{ .url = url },
-                    .method = h1_method,
-                    .extra_headers = extra_h1[0..h1_len],
-                    .payload = req_body,
-                    .response_writer = &aw.writer,
-                });
+                const h1_method = h1Method(method) orelse return error.UnsupportedHttpMethod;
+                const status = try h1Fetch(&client, io, h1_method, url, extra_h1[0..h1_len], req_body, &aw.writer, timeout_ms);
                 return .{
-                    .status = @backingInt(result.status),
+                    .status = status,
                     .body = try aw.toOwnedSlice(),
                 };
             }
@@ -872,7 +935,9 @@ pub const AuthManager = struct {
                 hdr_buf[hdr_len] = eh;
                 hdr_len += 1;
             }
-            var resp = try sess.request(.{
+            var dog: SocketWatchdog = .{ .io = io, .handle = sess.stream.socket.handle, .ms = timeout_ms };
+            dog.arm();
+            const sent = sess.request(.{
                 .method = method,
                 .scheme = "https",
                 .authority = u.host,
@@ -880,6 +945,15 @@ pub const AuthManager = struct {
                 .extra = hdr_buf[0..hdr_len],
                 .body = req_body orelse "",
             });
+            if (dog.disarm()) {
+                timed_out = true;
+                if (sent) |r| {
+                    var late = r;
+                    late.deinit();
+                } else |_| {}
+                return error.Timeout;
+            }
+            var resp = try sent;
             // Zero-copy transfer of `resp.body` when allocated by `gpa`.
             if (resp.allocator.ptr == gpa.ptr and resp.allocator.vtable == gpa.vtable) {
                 const owned_body = resp.body;
@@ -911,6 +985,30 @@ pub const AuthManager = struct {
         var stream = try ip_addr.connect(io, .{ .mode = .stream });
         setTcpNoDelay(stream);
         defer stream.close(io);
+        var dog: SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
+        dog.arm();
+        const result = loopbackExchange(gpa, io, stream, method, path, hostport, bearer_token, extra_headers, req_body);
+        if (dog.disarm()) {
+            if (result) |r| {
+                var late = r;
+                late.deinit(gpa);
+            } else |_| {}
+            return error.Timeout;
+        }
+        return result;
+    }
+
+    fn loopbackExchange(
+        gpa: Allocator,
+        io: std.Io,
+        stream: std.Io.net.Stream,
+        method: []const u8,
+        path: []const u8,
+        hostport: []const u8,
+        bearer_token: ?[]const u8,
+        extra_headers: []const http_zig.Header,
+        req_body: ?[]const u8,
+    ) !EdgeReply {
 
         var rbuf: [8192]u8 = undefined;
         var wbuf: [4096]u8 = undefined;
@@ -959,6 +1057,60 @@ pub const AuthManager = struct {
             try reader.interface.readSliceAll(out_body);
         }
         return .{ .status = status, .body = out_body };
+    }
+
+    /// `std.http.Client.fetch` for an HTTP/1.1 edge, with the request's
+    /// deadline on its connection; returns the status.
+    fn h1Fetch(
+        client: *std.http.Client,
+        io: std.Io,
+        method: std.http.Method,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+        payload: ?[]const u8,
+        response_writer: *std.Io.Writer,
+        timeout_ms: u32,
+    ) !u16 {
+        const uri = try std.Uri.parse(url);
+        var req = try client.request(method, uri, .{
+            .redirect_behavior = .unhandled,
+            .extra_headers = extra_headers,
+            .keep_alive = false,
+        });
+        defer req.deinit();
+        var dog: SocketWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .ms = timeout_ms };
+        dog.arm();
+        const status = h1Exchange(client, &req, payload, response_writer);
+        if (dog.disarm()) return error.Timeout;
+        return status;
+    }
+
+    fn h1Exchange(client: *std.http.Client, req: *std.http.Client.Request, payload: ?[]const u8, response_writer: *std.Io.Writer) !u16 {
+        if (payload) |body_bytes| {
+            req.transfer_encoding = .{ .content_length = body_bytes.len };
+            var body = try req.sendBodyUnflushed(&.{});
+            try body.writer.writeAll(body_bytes);
+            try body.end();
+            try req.connection.?.flush();
+        } else {
+            try req.sendBodiless();
+        }
+        var response = try req.receiveHead(&.{});
+        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try client.allocator.alloc(u8, std.compress.zstd.default_window_len),
+            .deflate, .gzip => try client.allocator.alloc(u8, std.compress.flate.max_window_len),
+            .compress => return error.UnsupportedCompressionMethod,
+        };
+        defer client.allocator.free(decompress_buffer);
+        var transfer_buffer: [64]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        _ = reader.streamRemaining(response_writer) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr().?,
+            else => |e| return e,
+        };
+        return @backingInt(response.head.status);
     }
 
     pub fn adoptCodegraffKey(self: *AuthManager, io: ?std.Io, key: []const u8, email_opt: ?[]const u8) !void {
@@ -1640,4 +1792,84 @@ test "AuthManager sign-in/out, PKCE S256, dual-clock expiry, unanswered refresh 
     auth.signOut();
     try testing.expect(!auth.signed_in);
     try testing.expect(!auth.lost_session_marker);
+}
+
+test "edge requests: every method name maps to its own HTTP/1.1 method, never a silent GET" {
+    try testing.expectEqual(std.http.Method.PATCH, h1Method("PATCH").?);
+    try testing.expectEqual(std.http.Method.DELETE, h1Method("DELETE").?);
+    try testing.expectEqual(std.http.Method.PUT, h1Method("PUT").?);
+    try testing.expectEqual(std.http.Method.POST, h1Method("POST").?);
+    try testing.expectEqual(std.http.Method.GET, h1Method("GET").?);
+    try testing.expect(h1Method("BREW") == null);
+    try testing.expect(h1Method("patch") == null);
+}
+
+/// A loopback server that takes one connection and answers only when told
+/// (or never), and records the request line.
+const SilentServer = struct {
+    server: std.Io.net.Server,
+    release: std.Io.Event = .unset,
+    answer: bool = false,
+    line: [64]u8 = undefined,
+    line_len: usize = 0,
+    thread: ?std.Thread = null,
+
+    fn run(self: *SilentServer) void {
+        var stream = self.server.accept(testing.io) catch return;
+        defer stream.close(testing.io);
+        var rbuf: [4096]u8 = undefined;
+        var rd = std.Io.net.Stream.Reader.init(stream, testing.io, &rbuf);
+        const first = rd.interface.takeDelimiterInclusive('\n') catch return;
+        self.line_len = @min(first.len, self.line.len);
+        @memcpy(self.line[0..self.line_len], first[0..self.line_len]);
+        if (self.answer) {
+            while (true) {
+                const l = rd.interface.takeDelimiterInclusive('\n') catch return;
+                if (std.mem.trim(u8, l, "\r\n").len == 0) break;
+            }
+            var wbuf: [256]u8 = undefined;
+            var wr = std.Io.net.Stream.Writer.init(stream, testing.io, &wbuf);
+            wr.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}") catch return;
+            wr.interface.flush() catch return;
+        }
+        // Hold the connection open (unanswered) until the test lets go.
+        self.release.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } }) catch {};
+    }
+
+    fn url(self: *SilentServer, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}/v1/synthetic", .{self.server.socket.address.getPort()});
+    }
+
+    fn stop(self: *SilentServer) void {
+        self.release.set(testing.io);
+        if (self.thread) |t| t.join();
+        self.server.deinit(testing.io);
+    }
+};
+
+test "edge requests: an unanswered request fails at its deadline instead of hanging" {
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv: SilentServer = .{ .server = try addr.listen(testing.io, .{ .reuse_address = true }) };
+    srv.thread = try std.Thread.spawn(.{}, SilentServer.run, .{&srv});
+    defer srv.stop();
+    var ubuf: [96]u8 = undefined;
+    const started = std.Io.Clock.awake.now(testing.io);
+    const got = AuthManager.edgeRequestTimed(null, testing.allocator, testing.io, "GET", try srv.url(&ubuf), null, &.{}, null, 300);
+    const elapsed_ms = started.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds();
+    try testing.expectError(error.Timeout, got);
+    try testing.expect(elapsed_ms >= 250);
+    try testing.expect(elapsed_ms < 5_000);
+}
+
+test "edge requests: an answered request returns before its deadline with its own method" {
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv: SilentServer = .{ .server = try addr.listen(testing.io, .{ .reuse_address = true }), .answer = true };
+    srv.thread = try std.Thread.spawn(.{}, SilentServer.run, .{&srv});
+    defer srv.stop();
+    var ubuf: [96]u8 = undefined;
+    var reply = try AuthManager.edgeRequestTimed(null, testing.allocator, testing.io, "PATCH", try srv.url(&ubuf), null, &.{}, "{}", 5_000);
+    defer reply.deinit(testing.allocator);
+    try testing.expectEqual(@as(u16, 200), reply.status);
+    try testing.expectEqualStrings("{}", reply.body);
+    try testing.expect(std.mem.startsWith(u8, srv.line[0..srv.line_len], "PATCH /v1/synthetic HTTP/1.1"));
 }
