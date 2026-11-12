@@ -1106,7 +1106,7 @@ pub fn runCapture(gpa: Allocator, arena: Allocator, io: Io, exe: []const u8, arg
     const deadline = nowNs(io) + @as(i96, timeout_ms) * std.time.ns_per_ms;
     proc.armDeadline(clampMs(timeout_ms));
     var out: std.ArrayList(u8) = .empty;
-    if (proc.child.stdout) |f| {
+    if (proc.stdout_file) |f| {
         var chunk: [16 * 1024]u8 = undefined;
         while (out.items.len < 64 * 1024 * 1024) {
             const n = f.readStreaming(io, &.{&chunk}) catch break;

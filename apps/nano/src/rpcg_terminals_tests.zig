@@ -179,7 +179,12 @@ test "rpcg_terminals RunProjectAction checks ownership and runs the Action in a 
     _ = try f.addChat("chat-other", "dev-synthetic", "space-2", repo);
     _ = try f.addChat("chat-nocwd", "dev-synthetic", "space-1", null);
     _ = try f.addChat("chat-outside", "dev-synthetic", "space-1", f.t.base);
-    try addAction(f, "space-1", "show", "printf 'ROOT=%s WT=%s\\n' \"$HARNESS_PROJECT_ROOT\" \"$HARNESS_WORKTREE_PATH\"; exit 4", false);
+    // Actions are saved in the engine's persisted store (rpcw_actions.zig).
+    try f.host.setDataDir(try f.path("data"));
+    {
+        const cmd = "printf 'ROOT=%s WT=%s\\n' \"$HARNESS_PROJECT_ROOT\" \"$HARNESS_WORKTREE_PATH\"; exit 4";
+        _ = try f.ok("UpsertProjectAction", try f.params("{{\"spaceId\":\"space-1\",\"action\":{{\"name\":\"show\",\"command\":{f},\"icon\":\"play\"}}}}", .{std.json.fmt(cmd, .{})}));
+    }
 
     const P = "{{\"spaceId\":\"{s}\",\"chatId\":\"{s}\",\"actionId\":\"{s}\",\"cols\":80,\"rows\":24}}";
     try testing.expectEqualStrings("Project space not found", try f.err("RunProjectAction", try f.params(P, .{ "nope", "chat-wt", "show" })));
@@ -194,7 +199,7 @@ test "rpcg_terminals RunProjectAction checks ownership and runs the Action in a 
 
     const run = try f.ok("RunProjectAction", try f.params(P, .{ "space-1", "chat-wt", "show" }));
     try testing.expectEqualStrings("show", run.object.get("actionId").?.string);
-    try testing.expectEqualStrings("Synthetic action", run.object.get("actionName").?.string);
+    try testing.expectEqualStrings("show", run.object.get("actionName").?.string);
     const term = run.object.get("terminal").?.object;
     const real_wt = common.canonicalize(f.arena.allocator(), testing.io, wt).?;
     const real_repo = common.canonicalize(f.arena.allocator(), testing.io, repo).?;

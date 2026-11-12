@@ -399,18 +399,18 @@ test "git_host: a folder git can't read answers git's own error, never a made-up
     defer no_io.deinit(gpa);
     try testing.expect(no_io == .err);
 
-    // Through the engine: RpcError::Failed with that text.
+    // Through the engine (rpcg_rpc.zig): RpcError::Failed with git's text.
     const engine_host = @import("engine_host.zig");
     var host = try engine_host.EngineHost.init(gpa, "dev-git", "Synthetic");
     defer host.deinit();
     host.io = io;
-    const params_text = try std.fmt.allocPrint(gpa, "{{\"cwd\":{f}}}", .{json.fmt(dir, .{})});
+    const params_text = try std.fmt.allocPrint(gpa, "{{\"repoPath\":{f}}}", .{json.fmt(dir, .{})});
     defer gpa.free(params_text);
     const params = try json.parseFromSlice(json.Value, gpa, params_text, .{});
     defer params.deinit();
     const out = try host.handle("ListBranches", params.value);
-    try testing.expect(out == .err);
-    try testing.expect(std.mem.startsWith(u8, out.err.exec_error, "git: fatal: not a git repository"));
+    try testing.expect(out == .err and out.err == .exec_error);
+    try testing.expect(std.mem.indexOf(u8, out.err.exec_error, "not a git repository") != null);
 }
 
 test "git_host: branches and refs of a real repository" {
