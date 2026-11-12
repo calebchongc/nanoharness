@@ -153,6 +153,14 @@ test {
     _ = @import("run_journal.zig");
     _ = @import("mcp_server.zig");
     _ = @import("engine_host.zig");
+    _ = @import("rpcw_common.zig");
+    _ = @import("rpcw_worktrees.zig");
+    _ = @import("rpcw_executables.zig");
+    _ = @import("rpcw_harnesses.zig");
+    _ = @import("rpcw_mcp.zig");
+    _ = @import("rpcw_codegraff.zig");
+    _ = @import("rpcw_graff_logins.zig");
+    _ = @import("rpcw_history.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");
