@@ -2296,7 +2296,7 @@ pub const EngineHost = struct {
                 ) };
             },
             .RoomRequest => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
+                return @import("rpcw_rooms.zig").roomRequest(self, params);
             },
             .ListOrgs => {
                 return .{ .unary_json = try self.auth.listOrgsJson(self.io) };

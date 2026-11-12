@@ -161,6 +161,7 @@ test {
     _ = @import("rpcw_codegraff.zig");
     _ = @import("rpcw_graff_logins.zig");
     _ = @import("rpcw_history.zig");
+    _ = @import("rpcw_rooms.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");
