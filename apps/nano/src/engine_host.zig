@@ -2176,7 +2176,6 @@ pub const EngineHost = struct {
             .DeleteWorktree,
             .SimulatorInput,
             .LocalhostPageInput,
-            .ApplyUpdate,
             => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
@@ -3068,18 +3067,26 @@ pub const EngineHost = struct {
                 return .{ .err = .{ .exec_error = "project action not found" } };
             },
             .UpdateStatus => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "targetDeviceId") orelse return .{ .err = .{ .bad_params = "missing targetDeviceId" } };
-                return self.oneStreamItem(false, try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"currentVersion\":{f},\"latestVersion\":{f},\"updateAvailable\":false,\"state\":\"upToDate\",\"host\":{{\"mode\":\"desktop\",\"automatic\":true,\"phase\":\"idle\"}}}}",
-                    .{ json.fmt(build_info.version, .{}), json.fmt(build_info.version, .{}) },
-                ));
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                const u = try upd.forEngine(EngineHost, self);
+                if (call_id != 0) try self.registerWatch(call_id, .doc_messages, upd.watch_target);
+                return self.oneStreamItem(false, try u.statusJson(self.gpa));
             },
-            .CheckForUpdates, .QueueUpdate => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "targetDeviceId") orelse return .{ .err = .{ .bad_params = "missing targetDeviceId" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
+            .CheckForUpdates => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .check));
+            },
+            .QueueUpdate => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .queue));
+            },
+            .ApplyUpdate => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .apply));
             },
             .WatchHarnessUpdates => {
                 if (params == .object) {

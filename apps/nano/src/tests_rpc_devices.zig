@@ -71,3 +71,30 @@ test "rpc devices: sandbox methods answer through the engine host" {
         try testing.expectEqualStrings("Sign in with Codegraff first.", create.err.exec_error);
     }
 }
+
+test "rpc devices: update methods answer through the engine host" {
+    var host = try engine_host.EngineHost.init(testing.allocator, "dev-test", "Test Mac");
+    defer host.deinit();
+    const version = @import("build_info").version;
+
+    var status = try call(&host, "UpdateStatus", "{\"targetDeviceId\":\"dev-test\"}");
+    defer freeOutcome(&status);
+    const want = "{\"currentVersion\":\"" ++ version ++ "\",\"updateAvailable\":false,\"host\":{\"mode\":\"manual\",\"automatic\":";
+    try testing.expect(std.mem.startsWith(u8, status.stream_items_json.items[0], want));
+
+    var elsewhere = try call(&host, "CheckForUpdates", "{\"targetDeviceId\":\"another-device\"}");
+    defer freeOutcome(&elsewhere);
+    try testing.expectEqualStrings("target device not connected", elsewhere.err.exec_error);
+
+    var check = try call(&host, "CheckForUpdates", "{}");
+    defer freeOutcome(&check);
+    try testing.expectEqualStrings("{\"ok\":true}", check.unary_json);
+
+    // The test binary is not a managed install: both refuse, with the Rust engine's words.
+    var queue = try call(&host, "QueueUpdate", "{}");
+    defer freeOutcome(&queue);
+    try testing.expectEqualStrings("this device cannot queue a remote update; update its desktop app or package locally", queue.err.exec_error);
+    var apply = try call(&host, "ApplyUpdate", "{}");
+    defer freeOutcome(&apply);
+    try testing.expectEqualStrings("this install is not update-managed — the desktop app updates from its UI; source builds update via git", apply.err.exec_error);
+}
