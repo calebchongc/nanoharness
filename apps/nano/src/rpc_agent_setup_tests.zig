@@ -12,4 +12,6 @@ test {
     _ = @import("catalog_graff.zig");
     _ = @import("catalog_devin.zig");
     _ = @import("rpc_models.zig");
+    _ = @import("agent_logins.zig");
+    _ = @import("rpc_logins.zig");
 }

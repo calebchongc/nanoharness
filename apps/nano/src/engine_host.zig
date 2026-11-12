@@ -124,7 +124,7 @@ pub const SyncBudget = struct {
 pub const max_committed_uploads_cache: usize = 8;
 
 /// Exhaustive 1:1 RPC method table matching `crates/rpc/src/lib.rs` (`pub mod methods`,
-/// 158 canonical methods) plus 5 compatibility aliases (163 total), dispatched in O(1)
+/// 158 canonical methods) plus 3 compatibility aliases (161 total), dispatched in O(1)
 /// via `rpc_method_map`.
 pub const RpcMethod = enum {
     // 158 canonical methods from crates/rpc/src/lib.rs:
@@ -286,12 +286,10 @@ pub const RpcMethod = enum {
     BotDetail,
     BotAction,
     RunBot,
-    // 5 compatibility aliases:
+    // 3 compatibility aliases:
     GetAuthStatus,
     GetCodegraffStatus,
-    RemoveAgentAccount,
     SignInWithKey,
-    SwitchAgentAccount,
 };
 
 pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
@@ -453,12 +451,10 @@ pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
     .{ "BotDetail", .BotDetail },
     .{ "BotAction", .BotAction },
     .{ "RunBot", .RunBot },
-    // 5 compatibility aliases:
+    // 3 compatibility aliases:
     .{ "GetAuthStatus", .GetAuthStatus },
     .{ "GetCodegraffStatus", .GetCodegraffStatus },
-    .{ "RemoveAgentAccount", .RemoveAgentAccount },
     .{ "SignInWithKey", .SignInWithKey },
-    .{ "SwitchAgentAccount", .SwitchAgentAccount },
 });
 
 /// All 17 `MutateParams` `op` variants from `crates/engine/src/rpc.rs`,
@@ -2157,28 +2153,20 @@ pub const EngineHost = struct {
             .SignOutGraffLogin => return @import("rpcw_graff_logins.zig").signOutGraffLogin(self, params),
             .CreateWorktree => return @import("rpcw_worktrees.zig").createWorktree(self, params),
             .DeleteWorktree => return @import("rpcw_worktrees.zig").deleteWorktree(self, params),
+            .ActivateAgentAccount,
+            .ForgetAgentAccount,
+            .StartAgentLogin,
+            .CompleteAgentLogin,
+            .PollAgentLogin,
+            .CancelAgentLogin,
+            => return @import("rpc_logins.zig").handle(self, method, params),
             .BrowseLinkPair,
             .BrowseLinkDisconnect,
-            .SwitchAgentAccount,
-            .ActivateAgentAccount,
-            .RemoveAgentAccount,
-            .ForgetAgentAccount,
             .InstallHarness,
-            .CompleteAgentLogin,
-            .CancelAgentLogin,
             .SimulatorInput,
             .LocalhostPageInput,
             => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
-            },
-            .StartAgentLogin => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"loginId\":\"login-zig-1\",\"url\":\"https://codegraff.com/login\",\"mode\":\"browser\"}",
-                ) };
-            },
-            .PollAgentLogin => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":\"done\"}") };
             },
             .GetAutonomy => {
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -6396,8 +6384,8 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Verify O(1) static map contains all 158 canonical Rust RPC methods + 5 compatibility aliases = 163.
-    try testing.expectEqual(@as(usize, 163), rpc_method_map.kvs.len);
+    // 1. Verify O(1) static map contains all 158 canonical Rust RPC methods + 3 compatibility aliases = 161.
+    try testing.expectEqual(@as(usize, 161), rpc_method_map.kvs.len);
 
     var host = try EngineHost.init(gpa, "dev-parity", "ParityHost");
     defer host.deinit();
