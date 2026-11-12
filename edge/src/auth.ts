@@ -121,6 +121,12 @@ export const bearerFromRequest = (request: Request): string | undefined => {
 };
 
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
+  if (env.AUTH_MODE === "local") {
+    const session = env.HARNESS_LOCAL_SESSION_TOKEN;
+    const user = env.HARNESS_LOCAL_SESSION_USER;
+    if (!session || session.length < 32 || !user || !/^[a-zA-Z0-9_-]+$/.test(user) || token !== session) return undefined;
+    return { userId: user, orgId: personalOrgId(user) };
+  }
   if (env.AUTH_MODE === "dev") {
     if (!token) return undefined;
     const at = token.indexOf("@");
@@ -145,7 +151,34 @@ export const verifyToken = async (env: Env, token: string): Promise<Verified | u
   }
 };
 
+// Run before public auth routes: local mode cannot exchange/refresh real
+// credentials or use a local session on a non-loopback origin.
+export const localAuthRoute = async (env: Env, request: Request): Promise<Response | undefined> => {
+  if (env.AUTH_MODE !== "local") return undefined;
+  const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+  if (!localRequest(request)) return json({ error: "local auth requires loopback" }, 403);
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/auth/")) return undefined;
+  const caller = await authenticate(env, request);
+  if (!caller) return json({ error: "unauthenticated" }, 401);
+  if (url.pathname === "/auth/local-session" && request.method === "GET") {
+    return json({ mode: "local", userId: caller.userId, orgId: caller.orgId });
+  }
+  if (url.pathname === "/auth/orgs") {
+    return request.method === "GET"
+      ? json({ orgs: [{ id: caller.orgId, organizationId: caller.orgId, name: "Personal workspace" }] })
+      : json({ error: "organization creation is not available" }, 405);
+  }
+  return json({ error: "route unavailable in local auth" }, 404);
+};
+
+export const localRequest = (request: Request): boolean => {
+  const url = new URL(request.url);
+  return url.protocol === "http:" && url.hostname === "127.0.0.1" && !url.username && !url.password;
+};
+
 export const authenticate = async (env: Env, request: Request): Promise<Verified | undefined> => {
+  if (env.AUTH_MODE === "local" && !localRequest(request)) return undefined;
   const token = bearerFromRequest(request);
   return token ? verifyToken(env, token) : undefined;
 };

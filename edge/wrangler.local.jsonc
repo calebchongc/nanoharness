@@ -42,11 +42,10 @@
   // No Hyperdrive: with dev auth, agent rooms use the Worker's in-memory
   // store (room-actor.ts `devStore`), which a restart empties.
   "vars": {
-    // Dev auth (auth.ts `verifyToken`): the bearer is `user` or `user@org`.
-    "AUTH_MODE": "dev",
-    // Made-up values so /auth/orgs answers; nothing is signed with them.
-    "CODEGRAFF_OAUTH_CLIENT_ID": "cg_client_local_synthetic",
-    "HARNESS_AUTH_SIGNING_KEY": "local-synthetic-signing-key-not-a-secret-0000",
+    // Explicit local auth. The runner injects a fresh opaque session and
+    // synthetic user via --var; this file alone cannot authorize anyone.
+    "AUTH_MODE": "local",
+    "CODEGRAFF_OAUTH_CLIENT_ID": "",
     // A closed loopback port: a sandbox sign-in fails here instead of
     // reaching the real gateway.
     "CODEGRAFF_GATEWAY_URL": "http://127.0.0.1:9"

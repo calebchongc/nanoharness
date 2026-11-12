@@ -66,7 +66,7 @@ export const devStore = new MemoryRoomStore();
 
 export function roomStore(env: Env): RoomStore | undefined {
   if (env.HYPERDRIVE) return new PgRoomStore(env);
-  return env.AUTH_MODE === "dev" ? devStore : undefined;
+  return env.AUTH_MODE === "dev" || env.AUTH_MODE === "local" ? devStore : undefined;
 }
 
 /** Run `fn` inside a store session when the store has them (one database

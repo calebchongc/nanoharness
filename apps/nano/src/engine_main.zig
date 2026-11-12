@@ -247,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         // No CodeGraff (a development bearer, or auth turned off): the
         // development scope, as the Rust engine without a client id.
-        try @import("dev_edge_auth.zig").configure(&host.auth, auth_env, init.environ_map.get("HARNESS_ORG_ID"), resolved_data_dir);
+        try @import("dev_edge_auth.zig").configure(&host.auth, io, auth_env, init.environ_map.get("HARNESS_ORG_ID"), resolved_data_dir);
         host.workspace_scope = engine_cli.startScope(auth_env, false).name();
     }
 

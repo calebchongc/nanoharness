@@ -179,8 +179,12 @@ It needs Node 20 or newer and `edge/node_modules` (the script runs
 and builds with `zig build` through `scripts/heavy-build.sh` unless
 `LOCAL_EDGE_NO_BUILD=1`. Nothing leaves the machine: the Worker runs in
 Miniflare with `edge/wrangler.local.jsonc` (no account, no routes, made-up
-values, dev auth), its state lives in a temporary folder, and every user,
-repo and device is made up. Wrangler's telemetry, update check and
+values, explicit `AUTH_MODE=local`), its state lives in a temporary folder,
+and every user, repo and device is made up. The runner creates a fresh
+opaque session per run; the engine requires `HARNESS_LOCAL_EDGE_AUTH=1`
+and a literal `http://127.0.0.1:<port>` origin, then asks the Worker to
+verify that session before signing in. Missing, forged and stale sessions
+fail closed. Local mode cannot exchange or refresh production credentials. Wrangler's telemetry, update check and
 `request.cf` download are off, the app skips its release check, and `check`
 reports any non-loopback connection it sees from the processes it started.
 See `docs/proof/LOCAL-EDGE.md` for how sign-in works there and what the run

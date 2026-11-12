@@ -300,8 +300,9 @@ fn currentPid() i64 {
 pub const AuthEnv = struct {
     /// `HARNESS_AUTH_DISABLED=1`: no CodeGraff at all.
     disabled: bool,
-    /// `HARNESS_EDGE_TOKEN`: a development bearer, no CodeGraff.
+    /// `HARNESS_EDGE_TOKEN`: accepted only with explicit loopback local auth.
     edge_token: ?[]const u8,
+    local_edge_auth: bool = false,
     edge_url: []const u8,
     /// Empty `HARNESS_CODEGRAFF_CLIENT_ID` is development mode, as in Rust.
     client_id: []const u8,
@@ -317,6 +318,7 @@ pub const AuthEnv = struct {
         const edge = if (env.get("HARNESS_EDGE_URL")) |u| (if (std.mem.trim(u8, u, " ").len > 0) u else auth_host.default_edge_url) else auth_host.default_edge_url;
         return .{
             .disabled = disabled,
+            .local_edge_auth = std.mem.eql(u8, env.get("HARNESS_LOCAL_EDGE_AUTH") orelse "", "1"),
             .edge_token = token,
             .edge_url = edge,
             .client_id = std.mem.trim(u8, env.get("HARNESS_CODEGRAFF_CLIENT_ID") orelse auth_host.default_codegraff_client_id, " \t"),
@@ -327,7 +329,7 @@ pub const AuthEnv = struct {
 
     /// Real CodeGraff sign-in, rather than development or no auth.
     pub fn codegraffEnabled(c: AuthEnv) bool {
-        return !c.disabled and c.edge_token == null and c.client_id.len > 0;
+        return !c.disabled and !c.local_edge_auth and c.edge_token == null and c.client_id.len > 0;
     }
 };
 

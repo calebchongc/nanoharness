@@ -202,13 +202,15 @@ async function startEdge(run) {
     "dev", "--config", "wrangler.local.jsonc", "--local",
     "--ip", "127.0.0.1", "--port", String(ports.edge), "--inspector-port", String(ports.inspector),
     "--persist-to", run.p("edge-state"), "--show-interactive-dev-session=false",
+    "--var", `HARNESS_LOCAL_SESSION_TOKEN:${run.state.identity.bearer}`,
+    "--var", `HARNESS_LOCAL_SESSION_USER:${run.state.identity.user}`,
   ], { cwd: EDGE_DIR, env: edgeEnv(run) });
   const health = await until(`the local edge on 127.0.0.1:${ports.edge} to answer /health`, 120_000, async () => {
     if (!run.alive("edge")) throw new Error(`wrangler exited (see the edge log)`);
     const r = await http("GET", `${edgeUrl(run)}/health`, { timeoutMs: 3000 });
     return r.status === 200 && r.json?.ok ? r.json : null;
   });
-  if (health.auth !== "dev") throw new Error(`the local edge runs auth "${health.auth}", expected dev`);
+  if (health.auth !== "local") throw new Error(`the local edge runs auth "${health.auth}", expected local`);
   rememberListeners(run, "edge");
   return health;
 }
@@ -237,8 +239,10 @@ function engineEnv(run, dev) {
     HARNESS_DATA_DIR: run.p(dev, "data"),
     HARNESS_IPC_PORT: String(s.ports[dev]),
     HARNESS_EDGE_URL: edgeUrl(run),
-    // Development mode: no CodeGraff; the bearer is the Worker's dev auth `user@org`.
+    // Explicit local auth; the Worker verifies this run's opaque session.
     HARNESS_CODEGRAFF_CLIENT_ID: "",
+    HARNESS_LOCAL_EDGE_AUTH: "1",
+    HARNESS_NANO_NO_RELEASE_CHECK: "1",
     HARNESS_EDGE_TOKEN: s.identity.bearer,
     HARNESS_DEVICE_NAME: `synthetic-${dev}`,
   };
@@ -264,7 +268,7 @@ function newIdentity() {
   const user = `ada-${rand(6)}`;
   // The Worker's personal workspace for that user (auth.ts personalOrgId).
   const org = `user-${user}`;
-  return { user, org, bearer: `${user}@${org}` };
+  return { user, org, bearer: crypto.randomUUID() + crypto.randomUUID() };
 }
 
 // ── engine helpers ─────────────────────────────────────────────────────────
@@ -401,8 +405,28 @@ const fmtRow = (r) =>
 
 const STEP_FNS = {
   async 1(ctx) {
-    await startEdge(ctx.run);
-    return { reason: `wrangler dev --local, dev auth, ${Object.keys(ctx.run.state.ports).length} loopback ports` };
+    const { run } = ctx;
+    await startEdge(run);
+    // Exercise the real Worker, not just a fake accepting our chosen identity.
+    for (const bearer of [undefined, "arbitrary@org", crypto.randomUUID() + crypto.randomUUID()]) {
+      const r = await http("GET", `${edgeUrl(run)}/auth/local-session`, { bearer });
+      if (r.status !== 401) throw new Error(`invalid/missing local session answered ${r.status}, expected 401`);
+    }
+    const session = await http("GET", `${edgeUrl(run)}/auth/local-session`, { bearer: run.state.identity.bearer });
+    if (session.status !== 200 || session.json?.mode !== "local" || session.json?.userId !== run.state.identity.user) {
+      throw new Error("the configured local session was not verified by the Worker");
+    }
+    // A live local Worker must still reject an engine with a forged session.
+    for (const sub of ["home", "data"]) fs.mkdirSync(run.p("rejected", sub), { recursive: true });
+    run.state.ports.rejected = await freePort();
+    const rejected = spawnSync(path.join(BIN, "harness-engine"), ["headless"], {
+      cwd: run.p("rejected"), env: { ...engineEnv(run, "rejected"), HARNESS_EDGE_TOKEN: "not-a-valid-session" },
+      encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+    });
+    if (rejected.error || rejected.status === 0 || !rejected.stderr.includes("InvalidLocalSession")) {
+      throw new Error(`engine did not reject a forged local session (exit ${rejected.status})`);
+    }
+    return { reason: `wrangler dev --local; missing/forged/stale sessions rejected; forged-session engine refused startup; ${Object.keys(run.state.ports).length} loopback ports` };
   },
 
   async 2(ctx) {
@@ -587,7 +611,7 @@ const STEP_FNS = {
     await a.call("Mutate", { op: "renameChat", chatId, title });
     await until("the rename on the Worker", 30_000, async () => (await edgeRows(run)).some((r) => r.kind === "chats" && r.id === chatId && r.fields?.title === title));
     ctx.notes.push("agent rooms are in the Worker's in-memory dev store without Hyperdrive, so an edge restart empties them");
-    return { reason: "A signed in again (dev bearer), chat + both turns local, Worker tail + rows persisted, a rename synced" };
+    return { reason: "A signed in again (verified local session), chat + both turns local, Worker tail + rows persisted, a rename synced" };
   },
 
   async 9(ctx) {
@@ -718,7 +742,7 @@ function currentRun() {
 function printStatus(run) {
   const s = run.state;
   console.log(`local edge (${s.mode}), state in ${run.dir}`);
-  console.log(`  user ${s.identity.user}, workspace ${s.identity.org} (dev bearer ${s.identity.bearer})`);
+  console.log(`  user ${s.identity.user}, workspace ${s.identity.org} (verified local session)`);
   console.log(`  expires ${new Date(s.expiresAt).toLocaleTimeString()} (the watchdog stops it then)`);
   const where = {
     edge: `http://127.0.0.1:${s.ports.edge} (inspector ${s.ports.inspector})`,
@@ -733,7 +757,7 @@ function printStatus(run) {
   }
   if (s.chatId) console.log(`  seeded chat ${s.chatId} in the synthetic repo`);
   console.log(`  logs: ${run.p("logs")}`);
-  console.log(`  ask the Worker yourself: curl -H 'Authorization: Bearer ${s.identity.bearer}' http://127.0.0.1:${s.ports.edge}/registry/${s.identity.org}/rows`);
+  console.log("  the ephemeral local session is stored only in the temporary state folder");
   console.log("  stop: scripts/local-edge.sh down");
 }
 

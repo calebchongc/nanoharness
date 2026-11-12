@@ -1,6 +1,6 @@
 # The Zig engine against the local edge
 
-`scripts/local-edge.sh check` runs the edge Worker (`edge/`, unchanged) with
+`scripts/local-edge.sh check` runs the edge Worker (`edge/`) with
 `wrangler dev --local` (Miniflare/workerd, state in a temporary folder,
 `edge/wrangler.local.jsonc`) and two Zig `harness-engine headless` processes
 as two devices of one made-up user. It is the first run of the Zig engine
@@ -18,23 +18,31 @@ The Worker authenticates with `edge/src/auth.ts` `verifyToken`. Deployed
 (`AUTH_MODE=codegraff`) it takes only its own HS256 JWTs, which it issues
 after a CodeGraff OAuth code exchange (`/auth/exchange`, against
 `codegraff.com`, hard-coded in `edge/src/codegraff.ts`) or a cloud sandbox's
-lease token (`/auth/sandbox`, against the gateway). Neither identity provider
-can be pointed at a loopback stand-in without changing `edge/src`, which this
-work does not do.
+lease token (`/auth/sandbox`, against the gateway). Production authentication
+is unchanged by the local workflow.
 
-The local edge runs `AUTH_MODE=dev`, the mode `npm run dev` and the edge's own
-workerd tests use: the bearer is `user` or `user@org`. The check makes up
-`ada-xxxxxx` and uses the Worker's personal workspace for it,
-`user-ada-xxxxxx`, so `GET /auth/orgs` lists exactly the org the engine syncs.
-The engine takes that bearer as `HARNESS_EDGE_TOKEN` with no CodeGraff client
-(its development mode, as in Rust). `/auth/orgs` answers only because the
-local config sets a made-up client id and signing key; nothing is signed
-with them.
+The local edge instead requires explicit `AUTH_MODE=local`. The runner
+creates a fresh opaque random session and a made-up `ada-xxxxxx` identity
+per run, injecting them into the loopback-only Worker. The checked-in config
+contains neither an authorizing session nor a signing key. Unlike legacy
+`AUTH_MODE=dev`, arbitrary `user@org` strings are not credentials here.
 
-A deployed Worker never runs dev auth, so this check does not cover the
-OAuth exchange, refresh rotation or JWT expiry. It does cover everything
-after the bearer: the registry, the device room, chat tails, blobs and
-rooms.
+The engine requires `HARNESS_LOCAL_EDGE_AUTH=1`, `HARNESS_EDGE_TOKEN`, and
+an exact `http://127.0.0.1:<port>` origin (no DNS, credentials, path or query).
+It starts signed out and calls `GET /auth/local-session` with the opaque
+bearer under a five-second socket deadline. Only a successful, correctly
+shaped local response supplies the user and org and permits sign-in. A
+conflicting `HARNESS_ORG_ID` is rejected, not adopted. Absent, invalid, stale,
+malformed, unreachable and non-loopback sessions fail closed. The real
+Worker check also starts an engine with a forged session and requires its
+startup to fail. Local mode rejects production OAuth/refresh/sandbox routes
+before any external identity-provider call; production mode never accepts
+the local session.
+
+This is intentionally not an OAuth exchange, refresh rotation or JWT expiry
+test. It covers verified local bootstrap, the registry, the device room,
+chat tails, blobs and rooms. Sessions last only for their temporary local
+Worker run; `down` (or the watchdog) stops that run.
 
 ## Mismatches found
 
@@ -43,10 +51,13 @@ Fixed in Zig, each with a test that fails without it:
 1. **A development bearer never reached the edge.** `engine_main.zig` set
    `HARNESS_EDGE_TOKEN` as the key but never the edge URL in development
    mode, so the registry sync and the device relay returned before their
-   first request. `dev_edge_auth.zig` now sets the URL, and the user id and
-   org the Worker reads from `user@org` (its `/registry/:org/*` routes answer
-   403 unless the bearer's org is the URL's). Test: `dev edge auth: a
-   development bearer points the engine at the configured edge`.
+   first request. `dev_edge_auth.zig` now sets the URL and adopts only the
+   user and org verified by the local Worker. Follow-up security regressions
+   reproduced the arbitrary-bearer sign-in before fixing it: `dev edge auth:
+   a bearer alone cannot bypass production or unavailable local auth` and
+   `dev edge auth: explicitly local auth never signs in without a live
+   session` both failed on merged local-edge before the hardening. Tests
+   also check origin parsing, org mismatch and malformed responses.
 2. **A prompt for another device's chat ran on the wrong machine and erased
    the host's history on the Worker.** Device B ran the turn itself, then
    `PUT /chat2/:id/tail` with only its own turn, which the Worker serves as
@@ -73,8 +84,9 @@ Open:
    history reaches other devices only through the tail sidecar. A Rust or Swift
    client opening a Zig-hosted chat gets the tail (instant open) but no live
    doc, and a command it writes into the doc never reaches the Zig host (only
-   `RelayCommand` does). `chat2_client.zig` is only used in tests. This needs
-   a Loro codec in Zig, which is out of scope.
+   `RelayCommand` does). `chat2_client.zig` is only used in tests. Keep Loro:
+   integrate the existing implementation through a compatible bridge rather
+   than rewriting the codec in Zig (see the inventory below).
 5. **No tool-output sidecars.** The engine never uploads
    `PUT /blob/:chat/:part` for a long tool output or diff; `FetchToolBlob`
    reads a blob the Worker holds correctly. The upload belongs where the turn
@@ -101,9 +113,38 @@ Worker behaviour the engine follows, not mismatches:
 - Without Hyperdrive, dev auth keeps agent rooms in the Worker's in-memory
   store, so an edge restart empties them. Step 8 doesn't check rooms.
 
-## The Zig test suite
+## Committed reusable Loro support and remaining interoperability
 
-One full `zig build test` run on this branch: 1332 of 1339 passed, 2 skipped,
+Loro is retained, not replaced by a Zig rewrite. This merge removes none of
+its implementation or dependencies:
+
+- `crates/doc/src/schema.rs` and `crates/doc/Cargo.toml`: the real Rust Loro
+  session schema, LoroText streaming parts, commands and movable queue.
+- `crates/engine/src/chat2_host.rs` and `crates/sync/src/chat_client.rs`:
+  existing host/client wiring and snapshot/update transport for those docs.
+- `edge/src/session-room.ts`, `edge/src/session-doc/`, and `edge/package.json`:
+  the existing Loro materializer/legacy room and JS Loro dependencies;
+  chat2 remains a byte relay for compatible document updates.
+- `apps/ios/Harness/Sync/DocDisk.swift`, `ChatRoomClient.swift`,
+  `SessionStore.swift`, and `SessionQueue.swift`: committed Swift Loro
+  persistence, chat2 client, session store and queue integration.
+
+This is reusable implementation, **not functioning Loro sync in the Zig
+engine**. The committed nano build contains no Loro ABI bridge. Its
+`session_doc.zig` writes a private `HZD1` document format and explicitly
+returns `UnsupportedLegacyLoroBlob` for Loro input. Its chat2 state machine
+and shared wire vectors do not make that format Loro-compatible. Required
+follow-up: bridge the retained Loro session operations and snapshots,
+connect chat2 into the live Zig host, persist/import compatible frontiers
+and updates, execute document commands, and prove Rust/Swift/Zig bidirectional
+streaming, queue edits, offline merge and restart interoperability using
+synthetic data. No uncommitted bridge or other session's worktree was read
+or copied. Retaining `crates/` and `edge/` is distinct from whether legacy
+`tui/` is included in a future repository.
+
+## Historical branch test evidence (not integration validation)
+
+One pre-integration full `zig build test` run on the local-edge branch: 1332 of 1339 passed, 2 skipped,
 5 failed. The registry-cache round-trip failure came from fix 3 and is fixed
 (the replay rule above). The other four fail the same way with the base
 commit's sources: `catalog_graff an older graff without the extension uses

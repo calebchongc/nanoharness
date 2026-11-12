@@ -46,7 +46,7 @@
  *   GET  /room/:roomId/{state,messages,ws}
  *   POST /room/:roomId/{join,leave,post,archive,destroy,invite,accept,decline,remove,wakes,release}
  */
-import { authenticate } from "./auth";
+import { authenticate, localAuthRoute } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { SessionRoom } from "./session-room";
@@ -239,8 +239,11 @@ export default {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
 
+    const localAuth = await localAuthRoute(env, request);
+    if (localAuth) return localAuth;
+
     if (url.pathname === "/health") {
-      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "codegraff", source: SOURCE_ARCHIVE });
+      return json({ ok: true, auth: env.AUTH_MODE === "local" ? "local" : env.AUTH_MODE === "dev" ? "dev" : "codegraff", source: SOURCE_ARCHIVE });
     }
     if (url.pathname === "/source" && request.method === "GET") {
       return Response.redirect(new URL(SOURCE_ARCHIVE, url).toString(), 302);
