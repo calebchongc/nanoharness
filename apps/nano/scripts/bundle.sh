@@ -22,6 +22,13 @@ fi
 app="zig-out/Harness Nano.app/Contents"
 mkdir -p "$app/MacOS" "$app/Resources"
 cp zig-out/bin/harness-nano "$app/MacOS/"
+# The engine the app starts: the one beside its own executable, so the two
+# versions always match (src/engine_start.zig).
+if [ ! -x zig-out/bin/harness-engine ]; then
+    echo "Cannot package Harness Nano: the build did not produce harness-engine" >&2
+    exit 1
+fi
+cp zig-out/bin/harness-engine "$app/MacOS/"
 iconset_dir=$(mktemp -d)
 trap 'rm -rf "$iconset_dir"' EXIT
 iconset="$iconset_dir/AppIcon.iconset"
