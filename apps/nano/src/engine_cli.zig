@@ -264,6 +264,19 @@ pub fn fatalStart(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+/// Errors go to stderr, as the Rust CLI's do (`err` when a test captures it).
+pub fn printErr(c: Context, comptime fmt: []const u8, args: anytype) !void {
+    if (c.err) |w| {
+        try w.print(fmt, args);
+        try w.flush();
+        return;
+    }
+    var buf: [1024]u8 = undefined;
+    var ew = Io.File.stderr().writerStreaming(c.io, &buf);
+    try ew.interface.print(fmt, args);
+    try ew.interface.flush();
+}
+
 fn currentPid() i64 {
     if (comptime builtin.os.tag == .windows) {
         const w = struct {
@@ -421,7 +434,19 @@ pub const Reply = union(enum) {
 /// Calls `method` on the engine at `127.0.0.1:port` and waits at most
 /// `timeout_ms` for its reply. `error.NoEngine` when nothing answers.
 pub fn rpcCall(gpa: Allocator, io: Io, port: u16, method: []const u8, params_json: []const u8, timeout_ms: u32) !Reply {
-    const client = ws.Client.connect(gpa, io, port, "/") catch return error.NoEngine;
+    // A loopback connect is answered at once (accepted or refused); the
+    // handshake runs under the call's deadline, so an engine that accepts
+    // and never upgrades can't hang the command.
+    const addr = Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return error.NoEngine;
+    const stream = addr.connect(io, .{ .mode = .stream }) catch return error.NoEngine;
+    var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
+    hs_dog.arm();
+    const upgraded = ws.Client.upgrade(gpa, io, stream, port, "/");
+    if (hs_dog.disarm()) {
+        if (upgraded) |c| c.deinit(gpa) else |_| {}
+        return error.Timeout;
+    }
+    const client = upgraded catch return error.NoEngine;
     defer client.deinit(gpa);
     const Watchdog = struct {
         done: std.atomic.Value(bool) = .init(false),
@@ -489,7 +514,18 @@ pub const Context = struct {
     /// Lines typed at the terminal, for `login`.
     in: *Io.Reader,
     interactive: bool,
+    /// Where errors go; null: this process's stderr.
+    err: ?*Io.Writer = null,
 };
+
+/// Whether `path` is a git checkout (`.git` is a folder, or a file for a
+/// linked worktree), for the engine's default project.
+pub fn gitDetected(io: Io, path: []const u8) bool {
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    defer dir.close(io);
+    _ = dir.statFile(io, ".git", .{}) catch return false;
+    return true;
+}
 
 /// `harness-engine status`; the exit code (1 when the account needs attention).
 pub fn status(c: Context) !u8 {
@@ -634,12 +670,13 @@ fn lockForChange(c: Context, data_dir: []const u8, verb: []const u8) !?InstanceL
     return InstanceLock.acquire(c.gpa, c.io, data_dir) catch |err| switch (err) {
         error.AlreadyRunning => {
             var buf: [1024]u8 = undefined;
-            try c.out.print(
+            try c.out.flush();
+            try printErr(
+                c,
                 "harness-engine: {s}\n" ++
                     "Cannot {s} while an engine is running — stop it first (`harness-engine daemon stop`, or quit the Harness app), or use the running app instead.\n",
                 .{ alreadyRunningText(&buf, data_dir, lockHolder(c.gpa, c.io, data_dir)), verb },
             );
-            try c.out.flush();
             return null;
         },
         else => |e| return e,
@@ -916,22 +953,28 @@ fn syntheticEnv(data_dir: []const u8) !Map {
 
 const Captured = struct {
     out: Io.Writer.Allocating,
+    err: Io.Writer.Allocating,
     in: Io.Reader,
 
     fn init(input: []const u8) Captured {
-        return .{ .out = .init(testing.allocator), .in = .fixed(input) };
+        return .{ .out = .init(testing.allocator), .err = .init(testing.allocator), .in = .fixed(input) };
     }
 
     fn ctx(self: *Captured, env: *const Map, port: u16, interactive: bool) Context {
-        return .{ .gpa = testing.allocator, .io = testing.io, .env = env, .port = port, .out = &self.out.writer, .in = &self.in, .interactive = interactive };
+        return .{ .gpa = testing.allocator, .io = testing.io, .env = env, .port = port, .out = &self.out.writer, .in = &self.in, .interactive = interactive, .err = &self.err.writer };
     }
 
     fn text(self: *Captured) []const u8 {
         return self.out.written();
     }
 
+    fn errText(self: *Captured) []const u8 {
+        return self.err.written();
+    }
+
     fn deinit(self: *Captured) void {
         self.out.deinit();
+        self.err.deinit();
     }
 };
 
@@ -963,8 +1006,8 @@ test "login and logout refuse while an engine holds the folder" {
         var cap: Captured = .init("");
         defer cap.deinit();
         try testing.expectEqual(@as(u8, 1), try cmd(cap.ctx(&env, 1, true)));
-        try testing.expect(std.mem.indexOf(u8, cap.text(), "while an engine is running") != null);
-        try testing.expect(std.mem.indexOf(u8, cap.text(), verb) != null);
+        try testing.expect(std.mem.indexOf(u8, cap.errText(), "while an engine is running") != null);
+        try testing.expect(std.mem.indexOf(u8, cap.errText(), verb) != null);
     }
 }
 
@@ -1087,7 +1130,6 @@ test "login: the pasted code is exchanged, a workspace joined, and the session s
     defer gpa.free(jwt_b);
     const refreshed = try std.fmt.allocPrint(gpa, "{{\"accessToken\":\"{s}\",\"refreshToken\":\"refresh-synthetic-2\"}}", .{jwt_b});
     defer gpa.free(refreshed);
-
     const routes = [_][2][]const u8{
         .{ "/auth/exchange", exchange },
         .{ "/auth/orgs", "{\"orgs\":[{\"id\":\"om-a\",\"organizationId\":\"org-a\",\"name\":\"Alpha\"},{\"id\":\"om-b\",\"organizationId\":\"org-b\",\"name\":\"Beta\"}]}" },
@@ -1341,4 +1383,42 @@ test "fix-sec 15: the engine never runs unlocked, and an unnamed holder is `unkn
     var pid_buf: [24]u8 = undefined;
     try testing.expectEqualStrings("unknown", holderPid(&pid_buf, .{ .pid = 0 }));
     try testing.expectEqualStrings("4242", holderPid(&pid_buf, .{ .pid = 4242 }));
+}
+
+test "fix-sec 18: lock errors go to stderr, not stdout" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec18");
+    defer tmp.remove();
+    var env = try syntheticEnv(dir);
+    defer env.deinit();
+    var engine = try InstanceLock.acquire(testing.allocator, testing.io, dir);
+    defer engine.release(testing.io);
+    var cap: Captured = .init("");
+    defer cap.deinit();
+    try testing.expectEqual(@as(u8, 1), try logout(cap.ctx(&env, 1, true)));
+    try testing.expect(std.mem.indexOf(u8, cap.errText(), "another Harness engine is already running") != null);
+    try testing.expect(std.mem.indexOf(u8, cap.text(), "already running") == null);
+}
+
+test "fix-sec 18: an engine that accepts and never upgrades can't hang a command" {
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try addr.listen(testing.io, .{ .reuse_address = true });
+    defer server.deinit(testing.io);
+    // Never accepted: the kernel completes the connect, nobody answers.
+    const started = Io.Clock.awake.now(testing.io);
+    try testing.expectError(error.Timeout, rpcCall(testing.allocator, testing.io, server.socket.address.getPort(), "EngineInfo", "{}", 300));
+    try testing.expect(started.durationTo(Io.Clock.awake.now(testing.io)).toMilliseconds() < 5_000);
+}
+
+test "fix-sec 18: the default project is a git checkout only when it is one" {
+    var tmp: TmpDir = .{};
+    const dir = try tmp.make("fixsec18git");
+    defer tmp.remove();
+    try testing.expect(!gitDetected(testing.io, dir));
+    const git = try std.fs.path.join(testing.allocator, &.{ dir, ".git" });
+    defer testing.allocator.free(git);
+    try Io.Dir.cwd().createDirPath(testing.io, git);
+    try testing.expect(gitDetected(testing.io, dir));
+    try testing.expect(!gitDetected(testing.io, "/nonexistent-synthetic-project"));
 }

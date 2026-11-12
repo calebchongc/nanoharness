@@ -567,8 +567,14 @@ test "a start that never answers counts as failed, and three in a row give up" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var env = Map.init(testing.allocator);
     defer env.deinit();
-    // `false` exits at once: an engine that stops before it answers.
-    try env.put("HARNESS_NANO_ENGINE_BIN", "/usr/bin/false");
+    // An engine that stops at once, before it answers (a script of our own,
+    // not a `false` binary at a path some systems lack).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "stops-at-once", .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = .executable_file } });
+    const stops = try tmp.dir.realPathFileAlloc(testing.io, "stops-at-once", testing.allocator);
+    defer testing.allocator.free(stops);
+    try env.put("HARNESS_NANO_ENGINE_BIN", stops);
     try env.put("PATH", "");
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();

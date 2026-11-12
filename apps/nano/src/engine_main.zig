@@ -324,7 +324,7 @@ pub fn main(init: std.process.Init) !void {
             .device_id = dev_copy,
             .path = path_copy,
             .name = name_copy,
-            .git_detected = true,
+            .git_detected = engine_cli.gitDetected(io, default_path),
         });
     }
 
