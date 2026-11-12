@@ -4,6 +4,7 @@
 //! unified diffs (`git diff HEAD`), GitHub remote URL extraction, and
 //! optimistic working-tree checksum verification (`DiscardWorkingTree`).
 const std = @import("std");
+const builtin = @import("builtin");
 const json = std.json;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -157,127 +158,151 @@ pub fn parseUnifiedDiffToJson(gpa: Allocator, checkout_path: []const u8, branch:
     return aw.toOwnedSlice();
 }
 
-fn captureGitStdout(gpa: Allocator, io: std.Io, cwd: []const u8, argv: []const []const u8) ?[]u8 {
-    if (comptime !std.process.can_spawn) return null;
-    var child = std.process.spawn(io, .{
-        .argv = argv,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .ignore,
-        .cwd = .{ .path = cwd },
-    }) catch return null;
-    defer _ = child.wait(io) catch {};
+/// Every production git call's deadline. The Rust engine's `Repos::git`
+/// has none; a wedged hook or credential helper must not hang a request.
+pub const git_timeout_ms: u32 = 30_000;
 
-    var out_buf: [65536]u8 = undefined;
-    var reader = child.stdout.?.readerStreaming(io, &out_buf);
-    const r = &reader.interface;
-    var out: std.ArrayList(u8) = .empty;
-    while (true) {
-        const line = (r.takeDelimiter('\n') catch break) orelse break;
-        out.appendSlice(gpa, line) catch {
-            out.deinit(gpa);
-            return null;
-        };
-        out.append(gpa, '\n') catch {
-            out.deinit(gpa);
-            return null;
-        };
-        if (out.items.len > 512 * 1024) break;
+pub const GitOutput = union(enum) {
+    /// stdout (owned).
+    ok: []u8,
+    /// The Rust engine's error text (`repos.rs` `Repos::git`), owned.
+    err: []u8,
+
+    pub fn deinit(self: GitOutput, gpa: Allocator) void {
+        switch (self) {
+            inline else => |b| gpa.free(b),
+        }
     }
-    return out.toOwnedSlice(gpa) catch {
-        out.deinit(gpa);
-        return null;
+};
+
+/// Run `git <args>` in `cwd`, killed at `timeout_ms`.
+pub fn runGit(gpa: Allocator, io: std.Io, cwd: []const u8, args: []const []const u8, timeout_ms: u32) !GitOutput {
+    const verb = if (args.len > 0) args[0] else "?";
+    if (comptime !std.process.can_spawn) return .{ .err = try gpa.dupe(u8, "git spawn failed: this platform cannot start processes") };
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "git");
+    try argv.appendSlice(gpa, args);
+    const deadline: std.Io.Timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake }) };
+    const res = std.process.run(gpa, io, .{
+        .argv = argv.items,
+        .cwd = .{ .path = cwd },
+        .stdout_limit = .limited(64 << 20),
+        .stderr_limit = .limited(1 << 20),
+        .timeout = deadline,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return .{ .err = try std.fmt.allocPrint(gpa, "git {s} timed out after {d} s", .{ verb, timeout_ms / 1000 }) },
+        else => return .{ .err = try std.fmt.allocPrint(gpa, "git spawn failed: {t}", .{e}) },
     };
+    defer gpa.free(res.stderr);
+    const ok = switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (ok) return .{ .ok = res.stdout };
+    gpa.free(res.stdout);
+    const message = std.mem.trim(u8, res.stderr, " \t\r\n");
+    if (message.len > 0) return .{ .err = try std.fmt.allocPrint(gpa, "git: {s}", .{message}) };
+    return .{ .err = switch (res.term) {
+        .exited => |code| try std.fmt.allocPrint(gpa, "git {s} failed (exit status: {d})", .{ verb, code }),
+        .signal => |sig| try std.fmt.allocPrint(gpa, "git {s} failed (signal: {d})", .{ verb, @backingInt(sig) }),
+        else => try std.fmt.allocPrint(gpa, "git {s} failed", .{verb}),
+    } };
 }
 
+/// A git-backed reply: the JSON, or the error to answer with (both owned).
+pub const GitJson = GitOutput;
+
 /// Run `git status --porcelain=v2 --branch` in `checkout_path` when `maybe_io` is set.
+/// A folder git can't read (or no Io) reports a clean `main`, as before.
 pub fn runGitStatusJson(gpa: Allocator, maybe_io: ?std.Io, checkout_path: []const u8) ![]u8 {
     if (maybe_io) |io| {
-        if (captureGitStdout(gpa, io, checkout_path, &.{ "git", "status", "--porcelain=v2", "--branch" })) |out| {
-            defer gpa.free(out);
-            if (out.len > 0) {
-                var st = try parseGitStatusPorcelainV2(gpa, out);
-                defer st.deinit(gpa);
-                return std.fmt.allocPrint(
-                    gpa,
-                    "{{\"branch\":{f},\"dirty\":{},\"ahead\":{d},\"behind\":{d}}}",
-                    .{ json.fmt(st.branch, .{}), !st.isClean(), st.ahead, st.behind },
-                );
-            }
+        const res = try runGit(gpa, io, checkout_path, &.{ "status", "--porcelain=v2", "--branch" }, git_timeout_ms);
+        defer res.deinit(gpa);
+        if (res == .ok and res.ok.len > 0) {
+            var st = try parseGitStatusPorcelainV2(gpa, res.ok);
+            defer st.deinit(gpa);
+            return std.fmt.allocPrint(
+                gpa,
+                "{{\"branch\":{f},\"dirty\":{},\"ahead\":{d},\"behind\":{d}}}",
+                .{ json.fmt(st.branch, .{}), !st.isClean(), st.ahead, st.behind },
+            );
         }
     }
     return gpa.dupe(u8, "{\"branch\":\"main\",\"dirty\":false,\"ahead\":0,\"behind\":0}");
 }
 
-/// Run `git diff HEAD` in `cwd` when `maybe_io` is set.
-pub fn runGitDiffJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 {
+/// Run `git diff HEAD` in `cwd` when `maybe_io` is set; git's error when it fails.
+pub fn runGitDiffJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) !GitJson {
     if (maybe_io) |io| {
-        if (captureGitStdout(gpa, io, cwd, &.{ "git", "diff", "HEAD" })) |diff_text| {
-            defer gpa.free(diff_text);
-            return parseUnifiedDiffToJson(gpa, cwd, "HEAD", diff_text);
+        const res = try runGit(gpa, io, cwd, &.{ "diff", "HEAD" }, git_timeout_ms);
+        switch (res) {
+            .err => return res,
+            .ok => |diff_text| {
+                defer gpa.free(diff_text);
+                return .{ .ok = try parseUnifiedDiffToJson(gpa, cwd, "HEAD", diff_text) };
+            },
         }
     }
-    return parseUnifiedDiffToJson(gpa, cwd, "HEAD", "");
+    return .{ .ok = try parseUnifiedDiffToJson(gpa, cwd, "HEAD", "") };
 }
 
-/// Run `git for-each-ref` for `ListBranches` when `maybe_io` is set.
-pub fn listBranchesJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 {
-    if (maybe_io) |io| {
-        if (captureGitStdout(gpa, io, cwd, &.{ "git", "for-each-ref", "--format=%(HEAD)|%(refname:short)", "refs/heads/" })) |out| {
-            defer gpa.free(out);
-            var aw: std.Io.Writer.Allocating = .init(gpa);
-            errdefer aw.deinit();
-            const w = &aw.writer;
-            try w.writeByte('[');
-            var count: usize = 0;
-            var lines = std.mem.splitScalar(u8, out, '\n');
-            while (lines.next()) |raw| {
-                const line = std.mem.trimEnd(u8, raw, "\r");
-                if (line.len < 3) continue;
-                const sep = std.mem.indexOfScalar(u8, line, '|') orelse continue;
-                const is_cur = std.mem.eql(u8, line[0..sep], "*");
-                const bname = line[sep + 1 ..];
-                if (bname.len == 0) continue;
-                if (count > 0) try w.writeByte(',');
-                try w.print("{{\"name\":{f},\"current\":{}}}", .{ json.fmt(bname, .{}), is_cur });
-                count += 1;
-            }
-            try w.writeByte(']');
-            if (count > 0) return aw.toOwnedSlice();
-            aw.deinit();
-        }
+/// `ListBranches`: the local branches (`git for-each-ref`), or git's error.
+pub fn listBranchesJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) !GitJson {
+    const io = maybe_io orelse return .{ .err = try gpa.dupe(u8, "git spawn failed: the engine has no I/O") };
+    const res = try runGit(gpa, io, cwd, &.{ "for-each-ref", "--format=%(HEAD)|%(refname:short)", "refs/heads/" }, git_timeout_ms);
+    const out = switch (res) {
+        .err => return res,
+        .ok => |o| o,
+    };
+    defer gpa.free(out);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    try w.writeByte('[');
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (line.len < 3) continue;
+        const sep = std.mem.indexOfScalar(u8, line, '|') orelse continue;
+        const is_cur = std.mem.eql(u8, line[0..sep], "*");
+        const bname = line[sep + 1 ..];
+        if (bname.len == 0) continue;
+        if (count > 0) try w.writeByte(',');
+        try w.print("{{\"name\":{f},\"current\":{}}}", .{ json.fmt(bname, .{}), is_cur });
+        count += 1;
     }
-    return gpa.dupe(
-        u8,
-        "[{\"name\":\"experimental-zig-branch\",\"current\":true},{\"name\":\"main\",\"current\":false}]",
-    );
+    try w.writeByte(']');
+    return .{ .ok = try aw.toOwnedSlice() };
 }
 
-/// Run `git for-each-ref` for `ListRefs` when `maybe_io` is set.
-pub fn listRefsJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 {
-    if (maybe_io) |io| {
-        if (captureGitStdout(gpa, io, cwd, &.{ "git", "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/tags/" })) |out| {
-            defer gpa.free(out);
-            var aw: std.Io.Writer.Allocating = .init(gpa);
-            errdefer aw.deinit();
-            const w = &aw.writer;
-            try w.writeByte('[');
-            var count: usize = 0;
-            var lines = std.mem.splitScalar(u8, out, '\n');
-            while (lines.next()) |raw| {
-                const rname = std.mem.trim(u8, raw, " \t\r");
-                if (rname.len == 0) continue;
-                if (count > 0) try w.writeByte(',');
-                try w.print("{{\"name\":{f}}}", .{json.fmt(rname, .{})});
-                count += 1;
-                if (count >= 128) break;
-            }
-            try w.writeByte(']');
-            if (count > 0) return aw.toOwnedSlice();
-            aw.deinit();
-        }
+/// `ListRefs`: branches and tags (`git for-each-ref`), or git's error.
+pub fn listRefsJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) !GitJson {
+    const io = maybe_io orelse return .{ .err = try gpa.dupe(u8, "git spawn failed: the engine has no I/O") };
+    const res = try runGit(gpa, io, cwd, &.{ "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/tags/" }, git_timeout_ms);
+    const out = switch (res) {
+        .err => return res,
+        .ok => |o| o,
+    };
+    defer gpa.free(out);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    try w.writeByte('[');
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |raw| {
+        const rname = std.mem.trim(u8, raw, " \t\r");
+        if (rname.len == 0) continue;
+        if (count > 0) try w.writeByte(',');
+        try w.print("{{\"name\":{f}}}", .{json.fmt(rname, .{})});
+        count += 1;
+        if (count >= 128) break;
     }
-    return gpa.dupe(u8, "[{\"name\":\"experimental-zig-branch\"},{\"name\":\"main\"}]");
+    try w.writeByte(']');
+    return .{ .ok = try aw.toOwnedSlice() };
 }
 
 test "git_host parses porcelain v2 status, unified diffs, GitHub remotes, and runs real git status" {
@@ -340,4 +365,92 @@ test "git_host parses porcelain v2 status, unified diffs, GitHub remotes, and ru
     defer live_st.deinit(gpa);
     try testing.expectEqualStrings(branch, live_st.branch);
     try testing.expect(live_st.isClean());
+}
+
+/// A fresh folder outside any repository (not under this checkout, where
+/// git would find the checkout's own `.git`).
+fn outsideTmp(gpa: Allocator, io: std.Io) ![]u8 {
+    var rnd: [6]u8 = undefined;
+    io.random(&rnd);
+    const dir = try std.fmt.allocPrint(gpa, "/tmp/harness-git-host-{x}", .{rnd});
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    return dir;
+}
+
+test "git_host: a folder git can't read answers git's own error, never a made-up branch list" {
+    if (comptime !std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const dir = try outsideTmp(gpa, io);
+    defer gpa.free(dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    const branches = try listBranchesJson(gpa, io, dir);
+    defer branches.deinit(gpa);
+    try testing.expect(branches == .err);
+    try testing.expect(std.mem.startsWith(u8, branches.err, "git: fatal: not a git repository"));
+    const refs = try listRefsJson(gpa, io, dir);
+    defer refs.deinit(gpa);
+    try testing.expect(refs == .err);
+    const diff = try runGitDiffJson(gpa, io, dir);
+    defer diff.deinit(gpa);
+    try testing.expect(diff == .err);
+    const no_io = try listBranchesJson(gpa, null, dir);
+    defer no_io.deinit(gpa);
+    try testing.expect(no_io == .err);
+
+    // Through the engine: RpcError::Failed with that text.
+    const engine_host = @import("engine_host.zig");
+    var host = try engine_host.EngineHost.init(gpa, "dev-git", "Synthetic");
+    defer host.deinit();
+    host.io = io;
+    const params_text = try std.fmt.allocPrint(gpa, "{{\"cwd\":{f}}}", .{json.fmt(dir, .{})});
+    defer gpa.free(params_text);
+    const params = try json.parseFromSlice(json.Value, gpa, params_text, .{});
+    defer params.deinit();
+    const out = try host.handle("ListBranches", params.value);
+    try testing.expect(out == .err);
+    try testing.expect(std.mem.startsWith(u8, out.err.exec_error, "git: fatal: not a git repository"));
+}
+
+test "git_host: branches and refs of a real repository" {
+    if (comptime !std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const dir = try outsideTmp(gpa, io);
+    defer gpa.free(dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    for ([_][]const []const u8{
+        &.{ "init", "-q", "-b", "synthetic-main" },
+        &.{ "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "first" },
+        &.{ "branch", "synthetic-feature" },
+        &.{ "tag", "v0.0.1-synthetic" },
+    }) |args| {
+        const r = try runGit(gpa, io, dir, args, git_timeout_ms);
+        defer r.deinit(gpa);
+        if (r == .err) std.debug.print("{s}\n", .{r.err});
+        try testing.expect(r == .ok);
+    }
+    const branches = try listBranchesJson(gpa, io, dir);
+    defer branches.deinit(gpa);
+    try testing.expectEqualStrings("[{\"name\":\"synthetic-feature\",\"current\":false},{\"name\":\"synthetic-main\",\"current\":true}]", branches.ok);
+    const refs = try listRefsJson(gpa, io, dir);
+    defer refs.deinit(gpa);
+    try testing.expectEqualStrings("[{\"name\":\"synthetic-feature\"},{\"name\":\"synthetic-main\"},{\"name\":\"v0.0.1-synthetic\"}]", refs.ok);
+}
+
+test "git_host: a git command that hangs is killed at its deadline" {
+    if (comptime !std.process.can_spawn or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const dir = try outsideTmp(gpa, io);
+    defer gpa.free(dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const started = std.Io.Clock.awake.now(io);
+    const r = try runGit(gpa, io, dir, &.{ "-c", "alias.synthetic-wait=!sleep 4", "synthetic-wait" }, 1_000);
+    defer r.deinit(gpa);
+    const elapsed_ms = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(r == .err);
+    try testing.expectEqualStrings("git -c timed out after 1 s", r.err);
+    try testing.expect(elapsed_ms < 10_000);
 }

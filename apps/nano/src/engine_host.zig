@@ -1543,6 +1543,18 @@ pub const EngineHost = struct {
     /// other request is served meanwhile. Only when the dispatcher holds the
     /// lock for this request; returns what `retakeAfterLongCall` needs. The
     /// call must not touch host state until the lock is retaken.
+    /// A git-backed reply, or git's error as `RpcError::Failed`.
+    fn gitReply(self: *EngineHost, res: git_host.GitJson) RpcOutcome {
+        return switch (res) {
+            .ok => |body| .{ .unary_json = body },
+            .err => |msg| blk: {
+                defer self.gpa.free(msg);
+                const rpcw = @import("rpcw_common.zig");
+                break :blk rpcw.failedMsg(rpcw.errText("{s}", .{msg}));
+            },
+        };
+    }
+
     pub fn releaseForLongCall(self: *EngineHost) ?std.Io {
         if (!self.held_for_dispatch) return null;
         const io = self.io orelse return null;
@@ -2368,11 +2380,11 @@ pub const EngineHost = struct {
             },
             .ListBranches => {
                 const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return .{ .unary_json = try git_host.listBranchesJson(self.gpa, self.io, cwd) };
+                return self.gitReply(try git_host.listBranchesJson(self.gpa, self.io, cwd));
             },
             .ListRefs => {
                 const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
-                return .{ .unary_json = try git_host.listRefsJson(self.gpa, self.io, cwd) };
+                return self.gitReply(try git_host.listRefsJson(self.gpa, self.io, cwd));
             },
             .ListGitHistory, .SearchGitHistory => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"commits\":[]}") };
@@ -2833,7 +2845,7 @@ pub const EngineHost = struct {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const cwd = requireStr(obj, "cwd") orelse return .{ .err = .{ .bad_params = "missing cwd" } };
                 _ = requireStr(obj, "mode") orelse return .{ .err = .{ .bad_params = "missing mode" } };
-                return .{ .unary_json = try git_host.runGitDiffJson(self.gpa, self.io, cwd) };
+                return self.gitReply(try git_host.runGitDiffJson(self.gpa, self.io, cwd));
             },
             .DiscardWorkingTree => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
