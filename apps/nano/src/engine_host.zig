@@ -2119,7 +2119,6 @@ pub const EngineHost = struct {
             .CancelAgentLogin,
             => return @import("rpc_logins.zig").handle(self, method, params),
             .InstallHarness => return @import("rpc_install.zig").installHarness(self, params),
-            .SimulatorInput,
             .LocalhostPageInput,
             => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
@@ -2224,7 +2223,8 @@ pub const EngineHost = struct {
                 const op = requireStr(obj, "op") orelse return .{ .err = .{ .bad_params = "missing op" } };
                 return self.handleMutate(op, obj);
             },
-            .WatchPreviews, .WatchTransfers => {
+            .WatchPreviews => return @import("engine_ports/previews_host.zig").watch(self, call_id, params),
+            .WatchTransfers => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "[]"));
             },
             .WatchConnectivity => {
@@ -2337,26 +2337,10 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"retried\":true}") };
             },
             .ShowImage => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
-                const path = requireStr(obj, "path") orelse "image.png";
-                const mime = inferAttachmentMime(path);
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"attached\":true,\"id\":{f},\"name\":{f},\"mimeType\":{f}}}",
-                    .{ json.fmt(id, .{}), json.fmt(std.fs.path.basename(path), .{}), json.fmt(mime, .{}) },
-                ) };
+                return @import("engine_ports/show_media_host.zig").showImage(self, params);
             },
             .ShowVisual => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"attached\":true,\"id\":{f}}}",
-                    .{json.fmt(id, .{})},
-                ) };
+                return @import("engine_ports/show_visual_host.zig").showVisual(self, params);
             },
             .QueueCommand => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -2910,7 +2894,9 @@ pub const EngineHost = struct {
                 defer self.retakeAfterLongCall(released);
                 return sims.toOutcome(RpcOutcome, try sims.handle(shared_sims, self.gpa, .shutdown, params));
             },
-            .WatchSimulatorScreen, .WatchLocalhostPage => {
+            .WatchSimulatorScreen => return @import("engine_ports/simulators_stream.zig").watchScreen(self, call_id, params),
+            .SimulatorInput => return @import("engine_ports/simulators_stream.zig").input(self, params),
+            .WatchLocalhostPage => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"frame\":null}"));
             },
             .ListLocalhostServers => {

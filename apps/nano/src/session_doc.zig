@@ -772,6 +772,10 @@ pub const SessionDoc = struct {
             } else if (std.mem.eql(u8, p.kind, "error")) {
                 try w.writeAll(",\"message\":");
                 try json.Stringify.encodeJsonString(p.text.items, .{}, w);
+            } else if ((std.mem.eql(u8, p.kind, "image") or std.mem.eql(u8, p.kind, "visual")) and p.call_json != null and p.call_json.?.len > 2) {
+                // `MessagePart::Image`/`Visual` fields, kept as one JSON object in `call_json`.
+                try w.writeByte(',');
+                try w.writeAll(p.call_json.?[1 .. p.call_json.?.len - 1]);
             } else {
                 try w.writeAll(",\"text\":");
                 try json.Stringify.encodeJsonString(p.text.items, .{}, w);
@@ -1116,6 +1120,12 @@ pub const SessionDoc = struct {
                             if (std.mem.eql(u8, pkind, "error")) if (po.get("message")) |mv| if (mv == .string) {
                                 try part.text.appendSlice(self.gpa, mv.string);
                             };
+                            if (std.mem.eql(u8, pkind, "image") or std.mem.eql(u8, pkind, "visual")) {
+                                var fields = try po.clone(arena.allocator());
+                                _ = fields.orderedRemove("id");
+                                _ = fields.orderedRemove("kind");
+                                part.call_json = try json.Stringify.valueAlloc(self.gpa, json.Value{ .object = fields }, .{});
+                            }
 
                             try msg.parts.append(self.gpa, part);
                         }

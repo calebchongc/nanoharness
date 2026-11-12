@@ -19,6 +19,10 @@
             // libsqlite3 to link (Linux, Windows): build.zig's linkSqlite.
             .lazy = true,
         },
+        .luau = .{
+            .url = "https://github.com/luau-lang/luau/archive/refs/tags/0.746.tar.gz",
+            .hash = "N-V-__8AABJAKgHM4O3pSxNXVoa8X0g4RMvVMsKGk8qs2RpV",
+        },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "file_icons_build.zig", "themes.json", "ios_themes.json", "src", "assets" },
+    .paths = .{ "build.zig", "build.zig.zon", "file_icons_build.zig", "luau_build.zig", "luau", "themes.json", "ios_themes.json", "src", "assets" },
 }
