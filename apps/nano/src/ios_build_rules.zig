@@ -243,7 +243,7 @@ pub const ipa_script =
     \\cp -R "$app" "$tmp/Payload/Harness.app"
     \\codesign --verify --strict --deep "$tmp/Payload/Harness.app"
     \\rm -f "$out"
-    \\ditto -c -k --sequesterRsrc --keepParent "$tmp/Payload" "$out"
+    \\ditto -c -k --norsrc --noextattr --keepParent "$tmp/Payload" "$out"
 ;
 
 pub fn ipaArgv() [6]Arg {
@@ -497,7 +497,7 @@ test "an ipa only comes from a real signature, zipped as Payload/Harness.app" {
     try testing.expectEqualStrings("-c", argv[1].text);
     try testing.expect(std.mem.indexOf(u8, argv[2].text, "Payload/Harness.app") != null);
     try testing.expect(std.mem.indexOf(u8, argv[2].text, "codesign --verify --strict") != null);
-    try testing.expect(std.mem.indexOf(u8, argv[2].text, "ditto -c -k --sequesterRsrc --keepParent") != null);
+    try testing.expect(std.mem.indexOf(u8, argv[2].text, "ditto -c -k --norsrc --noextattr --keepParent") != null);
     try testing.expectEqual(Arg.signed_bundle, argv[4]);
     try testing.expectEqual(Arg.ipa_out, argv[5]);
 }

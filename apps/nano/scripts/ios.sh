@@ -18,6 +18,7 @@
 # And the bundle:
 #   --bundle-id ID       HARNESS_IOS_BUNDLE_ID       default harness.codegraff.ios.nano
 #   --build-number N     HARNESS_IOS_BUILD_NUMBER    CFBundleVersion
+#   --version X.Y.Z      HARNESS_IOS_VERSION         CFBundleShortVersionString (default build.zig.zon's)
 #   --udid UDID          HARNESS_IOS_SIM_UDID        install-sim's Simulator (default: booted)
 #   --dry-run                                        print the zig build command, run nothing
 # A device build with no identity stops with what to pass (src/ios_build_rules.zig).
@@ -32,7 +33,7 @@
 set -eu
 usage() {
     echo "usage: sh scripts/ios.sh sim|device|ipa|install-sim [--identity NAME] [--profile FILE] [--team ID]" >&2
-    echo "       [--distribution] [--adhoc] [--bundle-id ID] [--build-number N] [--udid UDID] [--dry-run] [zig build arguments]" >&2
+    echo "       [--distribution] [--adhoc] [--bundle-id ID] [--build-number N] [--version X.Y.Z] [--udid UDID] [--dry-run] [zig build arguments]" >&2
     exit 2
 }
 mode="${1:-}"
@@ -48,6 +49,7 @@ profile="${HARNESS_IOS_PROFILE:-}"
 team="${HARNESS_IOS_TEAM_ID:-}"
 bundle_id="${HARNESS_IOS_BUNDLE_ID:-}"
 build_number="${HARNESS_IOS_BUILD_NUMBER:-}"
+version="${HARNESS_IOS_VERSION:-}"
 udid="${HARNESS_IOS_SIM_UDID:-booted}"
 adhoc=false
 distribution=false
@@ -65,6 +67,7 @@ while [ $# -gt 0 ]; do
     --team) value "$@"; team="$2"; shift 2 ;;
     --bundle-id) value "$@"; bundle_id="$2"; shift 2 ;;
     --build-number) value "$@"; build_number="$2"; shift 2 ;;
+    --version) value "$@"; version="$2"; shift 2 ;;
     --udid) value "$@"; udid="$2"; shift 2 ;;
     --adhoc) adhoc=true; shift ;;
     --distribution) distribution=true; shift ;;
@@ -87,6 +90,7 @@ cd "$(dirname "$0")/.."
 [ "$distribution" = true ] && set -- -Dios-distribution=true "$@"
 [ "$adhoc" = true ] && set -- -Dios-adhoc=true "$@"
 [ -n "$build_number" ] && set -- "-Dios-build-number=$build_number" "$@"
+[ -n "$version" ] && set -- "-Dios-version=$version" "$@"
 [ -n "$bundle_id" ] && set -- "-Dios-bundle-id=$bundle_id" "$@"
 [ -n "$team" ] && set -- "-Dios-team=$team" "$@"
 [ -n "$profile" ] && set -- "-Dios-profile=$profile" "$@"
