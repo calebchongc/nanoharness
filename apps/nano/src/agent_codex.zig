@@ -64,6 +64,15 @@ pub fn initializeParams(a: Allocator) ![]u8 {
     return std.fmt.allocPrint(a, "{{\"clientInfo\":{{\"name\":\"harness-native\",\"title\":\"Harness\",\"version\":{f}}},\"capabilities\":{{\"experimentalApi\":true}}}}", .{json.fmt(@import("build_info").version, .{})});
 }
 
+/// The `serviceTier` model option; rides thread-start and every turn.
+/// "default" means Standard and is omitted.
+pub fn serviceTier(a: Allocator, req: agent_turn.Request) ?[]const u8 {
+    const mo = req.model_options_json orelse return null;
+    const v = json.parseFromSliceLeaky(json.Value, a, mo, .{}) catch return null;
+    const tier = getStr(v, "serviceTier") orelse return null;
+    return if (eq(tier, "default")) null else tier;
+}
+
 /// `thread/start` params (plus `threadId` for `thread/resume`).
 pub fn threadParams(a: Allocator, req: agent_turn.Request, resume_id: ?[]const u8) ![]u8 {
     const pol = policyFor(req);
@@ -71,6 +80,7 @@ pub fn threadParams(a: Allocator, req: agent_turn.Request, resume_id: ?[]const u
     const w = &out.writer;
     try w.print("{{\"cwd\":{f},\"approvalPolicy\":{f},\"sandbox\":{f}", .{ json.fmt(req.cwd, .{}), json.fmt(pol.approval, .{}), json.fmt(pol.sandbox.wire(), .{}) });
     if (req.model) |m| try w.print(",\"model\":{f}", .{json.fmt(m, .{})});
+    if (serviceTier(a, req)) |tier| try w.print(",\"serviceTier\":{f}", .{json.fmt(tier, .{})});
     if (resume_id) |r| try w.print(",\"threadId\":{f}", .{json.fmt(r, .{})});
     try w.writeByte('}');
     return out.toOwnedSlice();
@@ -88,6 +98,7 @@ pub fn turnParams(a: Allocator, req: agent_turn.Request, thread_id: []const u8) 
     try w.print("{{\"threadId\":{f},\"input\":{s},\"approvalPolicy\":{f},\"sandboxPolicy\":{s},\"summary\":\"auto\"", .{ json.fmt(thread_id, .{}), try inputJson(a, req.prompt), json.fmt(pol.approval, .{}), sandboxPolicyJson(pol.sandbox) });
     if (req.model) |m| try w.print(",\"model\":{f}", .{json.fmt(m, .{})});
     if (effortFor(req.reasoning)) |e| try w.print(",\"effort\":{f}", .{json.fmt(e, .{})});
+    if (serviceTier(a, req)) |tier| try w.print(",\"serviceTier\":{f}", .{json.fmt(tier, .{})});
     try w.writeByte('}');
     return out.toOwnedSlice();
 }
@@ -699,4 +710,16 @@ test "codex: a missing binary ends the turn with Rust's not-installed error" {
     const doc = try rig.docJson();
     defer testing.allocator.free(doc);
     try testing.expect(std.mem.indexOf(u8, doc, "harness binary not found: /nonexistent/harness-agent-mock does not exist") != null);
+}
+
+test "codex: the service tier rides thread start and every turn, except Standard" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    var req: agent_turn.Request = .{ .chat_id = "c", .harness = "codex", .prompt = "hi", .cwd = "/w", .env = &env, .model = "gpt-5.5", .model_options_json = "{\"serviceTier\":\"fast\"}" };
+    try testing.expect(std.mem.endsWith(u8, try threadParams(a, req, null), ",\"model\":\"gpt-5.5\",\"serviceTier\":\"fast\"}"));
+    try testing.expect(std.mem.endsWith(u8, try turnParams(a, req, "th"), ",\"serviceTier\":\"fast\"}"));
+    req.model_options_json = "{\"serviceTier\":\"default\"}";
+    try testing.expect(std.mem.indexOf(u8, try turnParams(a, req, "th"), "serviceTier") == null);
 }

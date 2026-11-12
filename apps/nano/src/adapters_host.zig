@@ -307,5 +307,6 @@ test {
     _ = @import("agent_cursor.zig");
     _ = @import("agent_pi.zig");
     _ = @import("agent_opencode.zig");
+    _ = @import("agent_mock.zig");
     _ = @import("turn_host.zig");
 }

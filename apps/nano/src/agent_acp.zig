@@ -310,9 +310,96 @@ fn graffControl(a: Allocator, update: json.Value, title: []const u8) ?anyerror![
     return null;
 }
 
+/// `CompactionTracker::observe`: one chip per `compactionId`, opened by
+/// `in_progress` or a summary chunk, resolved by `completed`, `failed` or
+/// `cancelled`. A completed summary records its size (`itemTokens`); the
+/// text stays out of the doc like every tool output.
+fn mapCompaction(a: Allocator, kind: []const u8, update: json.Value, out: *std.ArrayList(Event)) !void {
+    const cid = getStr(update, "compactionId") orelse return;
+    if (cid.len == 0) return;
+    const id = try std.fmt.allocPrint(a, "acp-compaction-{s}", .{cid});
+    const opening = try (Call{ .unknown = .{ .name = agent_turn.compaction_tool } }).toJson(a);
+    try out.append(a, .{ .tool_call = .{ .id = id, .call = opening } });
+    if (eq(kind, "compaction_summary_chunk")) return;
+    const status = getStr(update, "status") orelse return;
+    const is_error = if (eq(status, "completed")) false else if (eq(status, "failed") or eq(status, "cancelled")) true else return;
+    if (!is_error) {
+        var summary: std.ArrayList(u8) = .empty;
+        if (get(update, "summary")) |blocks| if (blocks == .array) for (blocks.array.items) |b| {
+            const text = getStr(b, "text") orelse continue;
+            if (text.len == 0) continue;
+            if (summary.items.len > 0) try summary.appendSlice(a, "\n\n");
+            try summary.appendSlice(a, text);
+        };
+        if (summary.items.len > 0) {
+            var input = json.ObjectMap.empty;
+            try input.put(a, "kind", .{ .string = "summary" });
+            try input.put(a, "itemTokens", .{ .integer = @intCast((summary.items.len + 3) / 4) });
+            const call = try (Call{ .unknown = .{ .name = agent_turn.compaction_tool, .input = .{ .object = input } } }).toJson(a);
+            try out.append(a, .{ .tool_call = .{ .id = id, .call = call } });
+        }
+    }
+    try out.append(a, .{ .tool_result = .{ .id = id, .is_error = is_error } });
+}
+
+/// `harness_mcp_servers` + `session_mcp_servers`: `session/new`'s
+/// `mcpServers`. graff gets Harness's own stdio server speaking for the
+/// run's chat (`harness-engine mcp`) when the engine knows its executable;
+/// then the run's HTTP servers, only for an agent that advertised
+/// `agentCapabilities.mcpCapabilities.http`.
+pub fn sessionMcpServers(a: Allocator, agent: Agent, req: agent_turn.Request, init_result: ?json.Value) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    const w = &out.writer;
+    try w.writeByte('[');
+    var n: usize = 0;
+    if (agent == .graff) if (req.engine_exe) |exe| if (req.chat_id.len > 0) {
+        try w.print("{{\"name\":\"harness\",\"command\":{f},\"args\":[\"mcp\"],\"env\":[{{\"name\":\"HARNESS_CHAT_ID\",\"value\":{f}}}", .{ json.fmt(exe, .{}), json.fmt(req.chat_id, .{}) });
+        if (req.env.get("HARNESS_IPC_PORT")) |port| try w.print(",{{\"name\":\"HARNESS_IPC_PORT\",\"value\":{f}}}", .{json.fmt(port, .{})});
+        try w.writeAll("]}");
+        n += 1;
+    };
+    const http = blk: {
+        const r = init_result orelse break :blk false;
+        const caps = get(r, "agentCapabilities") orelse break :blk false;
+        const mcp = get(caps, "mcpCapabilities") orelse break :blk false;
+        break :blk agent_turn.getBool(mcp, "http") orelse false;
+    };
+    if (http) if (req.mcp_servers_json) |sj| {
+        const servers = json.parseFromSliceLeaky(json.Value, a, sj, .{}) catch json.Value{ .null = {} };
+        if (servers == .array) for (servers.array.items) |srv| {
+            const name = getStr(srv, "name") orelse continue;
+            const url = getStr(srv, "url") orelse continue;
+            if (n > 0) try w.writeByte(',');
+            n += 1;
+            try w.print("{{\"type\":\"http\",\"name\":{f},\"url\":{f},\"headers\":[", .{ json.fmt(name, .{}), json.fmt(url, .{}) });
+            var h: usize = 0;
+            if (get(srv, "headers")) |hs| switch (hs) {
+                .object => |o| for (o.keys(), o.values()) |k, v| if (v == .string) {
+                    if (h > 0) try w.writeByte(',');
+                    h += 1;
+                    try w.print("{{\"name\":{f},\"value\":{f}}}", .{ json.fmt(k, .{}), json.fmt(v.string, .{}) });
+                },
+                .array => |arr| for (arr.items) |pair| {
+                    const k, const v = if (pair == .array and pair.array.items.len == 2 and pair.array.items[0] == .string and pair.array.items[1] == .string)
+                        .{ pair.array.items[0].string, pair.array.items[1].string }
+                    else if (getStr(pair, "name")) |k| .{ k, getStr(pair, "value") orelse "" } else continue;
+                    if (h > 0) try w.writeByte(',');
+                    h += 1;
+                    try w.print("{{\"name\":{f},\"value\":{f}}}", .{ json.fmt(k, .{}), json.fmt(v, .{}) });
+                },
+                else => {},
+            };
+            try w.writeAll("]}");
+        };
+    };
+    try w.writeByte(']');
+    return out.written();
+}
+
 /// `map_update` for one `session/update`.
 pub fn mapUpdate(a: Allocator, update: json.Value, out: *std.ArrayList(Event)) !void {
     const kind = getStr(update, "sessionUpdate") orelse return;
+    if (eq(kind, "compaction_update") or eq(kind, "compaction_summary_chunk")) return mapCompaction(a, kind, update, out);
     if (eq(kind, "agent_message_chunk") or eq(kind, "agent_thought_chunk")) {
         const content = get(update, "content") orelse return;
         const text = getStr(content, "text") orelse return;
@@ -662,6 +749,7 @@ fn run(t: *Turn, spec: *const Spec) !void {
     const init_id = request(t, "initialize", try initializeParams(la, spec.agent, t.req.graff_draft_subagents)) orelse return setupExit(t, proc, spec, "initialize");
     const init_resp = (try wire.await_(la, init_id, false)) orelse return setupExit(t, proc, spec, "initialize");
     if (get(init_resp, "error")) |e| return t.fail("harness protocol error: {s}", .{try rpcError(la, "initialize", e)});
+    const mcp_servers = try sessionMcpServers(a, spec.agent, t.req, get(init_resp, "result"));
     if (get(init_resp, "result")) |r| if (get(r, "_meta")) |m| if (get(m, "steering")) |s| {
         st.steering_ext = agent_turn.getBool(s, "supported") orelse false;
     };
@@ -676,7 +764,7 @@ fn run(t: *Turn, spec: *const Spec) !void {
     var session_result: ?json.Value = null;
     var session_id: []const u8 = "";
     if (t.req.resume_id) |r| {
-        const params = try std.fmt.allocPrint(la, "{{\"cwd\":{f},\"mcpServers\":[],\"sessionId\":{f}}}", .{ json.fmt(t.req.cwd, .{}), json.fmt(r, .{}) });
+        const params = try std.fmt.allocPrint(la, "{{\"cwd\":{f},\"mcpServers\":{s},\"sessionId\":{f}}}", .{ json.fmt(t.req.cwd, .{}), mcp_servers, json.fmt(r, .{}) });
         const lid = request(t, "session/load", params) orelse return setupExit(t, proc, spec, "session/load");
         const resp = (try wire.await_(la, lid, false)) orelse return setupExit(t, proc, spec, "session/load");
         if (get(resp, "error")) |e| {
@@ -687,7 +775,7 @@ fn run(t: *Turn, spec: *const Spec) !void {
         }
     }
     if (session_id.len == 0) {
-        const params = try std.fmt.allocPrint(la, "{{\"cwd\":{f},\"mcpServers\":[]}}", .{json.fmt(t.req.cwd, .{})});
+        const params = try std.fmt.allocPrint(la, "{{\"cwd\":{f},\"mcpServers\":{s}}}", .{ json.fmt(t.req.cwd, .{}), mcp_servers });
         const nid = request(t, "session/new", params) orelse return setupExit(t, proc, spec, "session/new");
         const resp = (try wire.await_(la, nid, false)) orelse return setupExit(t, proc, spec, "session/new");
         if (get(resp, "error")) |e| return t.fail("harness protocol error: {s}", .{try rpcError(la, "session/new", e)});
@@ -883,7 +971,7 @@ test "acp: session updates map to typed tool calls, plan chips and stop outcomes
 
 const testkit = @import("agent_testkit.zig");
 
-const mock_agent =
+pub const mock_agent =
     \\#!/bin/sh
     \\d=$(dirname "$0")
     \\printf '%s\n' "$@" > "$d/argv.txt"
@@ -966,4 +1054,47 @@ test "acp: graff runs with --yolo and its environment; a missing binary is repor
         defer testing.allocator.free(doc);
         try testing.expect(std.mem.indexOf(u8, doc, "harness binary not found: /nonexistent/harness-agent-mock does not exist") != null);
     }
+}
+
+test "acp: graff's session/new carries Harness's MCP server for the chat" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    const turn_host = @import("turn_host.zig");
+    turn_host.engine_exe_override = "/opt/synthetic/harness-engine";
+    defer turn_host.engine_exe_override = null;
+    const rig = try testkit.Rig.create(.{ .harness = "graff", .override_var = "GRAFF_EXECUTABLE", .script = mock_agent, .autonomy = "full-access" });
+    defer rig.destroy();
+    rig.host.graff_exe = rig.script;
+    try rig.run("m-1", "hi");
+    try rig.waitIdle(5000);
+    const stdin = try rig.readFile("stdin.txt");
+    defer testing.allocator.free(stdin);
+    try testing.expect(std.mem.indexOf(u8, stdin, "\"method\":\"session/new\",\"params\":{\"cwd\":") != null);
+    try testing.expect(std.mem.indexOf(u8, stdin, "\"mcpServers\":[{\"name\":\"harness\",\"command\":\"/opt/synthetic/harness-engine\",\"args\":[\"mcp\"],\"env\":[{\"name\":\"HARNESS_CHAT_ID\",\"value\":\"chat-1\"}]}]") != null);
+}
+
+test "acp: HTTP MCP servers only for agents that take them; compaction opens and resolves one chip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    try env.put("HARNESS_IPC_PORT", "27990");
+    const req: agent_turn.Request = .{ .chat_id = "c1", .harness = "devin", .prompt = "", .cwd = "/w", .env = &env, .mcp_servers_json = "[{\"name\":\"browse\",\"url\":\"http://127.0.0.1:9/mcp\",\"headers\":{\"Authorization\":\"Bearer x\"}}]" };
+    const http = try json.parseFromSliceLeaky(json.Value, a, "{\"agentCapabilities\":{\"mcpCapabilities\":{\"http\":true}}}", .{});
+    try testing.expectEqualStrings("[{\"type\":\"http\",\"name\":\"browse\",\"url\":\"http://127.0.0.1:9/mcp\",\"headers\":[{\"name\":\"Authorization\",\"value\":\"Bearer x\"}]}]", try sessionMcpServers(a, .devin, req, http));
+    try testing.expectEqualStrings("[]", try sessionMcpServers(a, .devin, req, null));
+    var greq = req;
+    greq.engine_exe = "/e/harness-engine";
+    try testing.expectEqualStrings("[{\"name\":\"harness\",\"command\":\"/e/harness-engine\",\"args\":[\"mcp\"],\"env\":[{\"name\":\"HARNESS_CHAT_ID\",\"value\":\"c1\"},{\"name\":\"HARNESS_IPC_PORT\",\"value\":\"27990\"}]}]", try sessionMcpServers(a, .graff, greq, null));
+
+    var out: std.ArrayList(Event) = .empty;
+    const frames = [_][]const u8{
+        "{\"sessionUpdate\":\"compaction_update\",\"compactionId\":\"k1\",\"status\":\"in_progress\"}",
+        "{\"sessionUpdate\":\"compaction_update\",\"compactionId\":\"k1\",\"status\":\"completed\",\"summary\":[{\"type\":\"text\",\"text\":\"abcdefg\"}]}",
+    };
+    for (frames) |f| try mapUpdate(a, try json.parseFromSliceLeaky(json.Value, a, f, .{}), &out);
+    try testing.expectEqualStrings("acp-compaction-k1", out.items[0].tool_call.id);
+    try testing.expectEqualStrings("{\"kind\":\"unknown\",\"name\":\"Compact context\"}", out.items[0].tool_call.call);
+    try testing.expectEqualStrings("{\"kind\":\"unknown\",\"name\":\"Compact context\",\"input\":{\"kind\":\"summary\",\"itemTokens\":2}}", out.items[2].tool_call.call);
+    try testing.expect(!out.items[3].tool_result.is_error);
+    try testing.expectEqual(@as(usize, 4), out.items.len);
 }

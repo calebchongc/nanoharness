@@ -59,7 +59,48 @@ pub const Request = struct {
     graff_draft_subagents: bool = false,
     graff_compact_pct: i64 = 0,
     device_name: ?[]const u8 = null,
+    /// This engine's own executable when it is `harness-engine` (graff gets
+    /// its `mcp` server); null otherwise.
+    engine_exe: ?[]const u8 = null,
+    /// The run's `mcpServers` (`[{name, url, headers}]`) as JSON.
+    mcp_servers_json: ?[]const u8 = null,
+    /// `RunRequest::attachments`: uploaded files' absolute paths, which
+    /// adapters that take images inline (their path refs ride the prompt).
+    attachments: []const []const u8 = &.{},
 };
+
+/// `MAX_INLINE_IMAGE_BYTES`: a larger image rides only as its path ref.
+pub const max_inline_image_bytes: usize = 5 * 1024 * 1024;
+
+/// `image_media_type`: by extension, else by the file's leading bytes.
+pub fn imageMediaType(path: []const u8, bytes: []const u8) ?[]const u8 {
+    const ext = std.fs.path.extension(path);
+    const by_ext = [_][2][]const u8{ .{ ".png", "image/png" }, .{ ".jpg", "image/jpeg" }, .{ ".jpeg", "image/jpeg" }, .{ ".gif", "image/gif" }, .{ ".webp", "image/webp" } };
+    for (by_ext) |e| if (std.ascii.eqlIgnoreCase(ext, e[0])) return e[1];
+    if (std.mem.startsWith(u8, bytes, "\x89PNG")) return "image/png";
+    if (std.mem.startsWith(u8, bytes, "\xff\xd8\xff")) return "image/jpeg";
+    if (std.mem.startsWith(u8, bytes, "GIF8")) return "image/gif";
+    if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP")) return "image/webp";
+    return null;
+}
+
+pub const InlineImage = struct { media_type: []const u8, data_b64: []const u8 };
+
+/// `load_image_blocks`: each attachment that is a readable, supported image
+/// within the cap, base64-encoded in `a`; anything else is skipped (its
+/// path ref still rides the prompt), never fatal.
+pub fn loadImages(a: Allocator, io: Io, paths: []const []const u8) ![]InlineImage {
+    var out: std.ArrayList(InlineImage) = .empty;
+    for (paths) |path| {
+        const bytes = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_inline_image_bytes + 1)) catch continue;
+        if (bytes.len > max_inline_image_bytes) continue;
+        const media = imageMediaType(path, bytes) orelse continue;
+        const enc = std.base64.standard.Encoder;
+        const b64 = try a.alloc(u8, enc.calcSize(bytes.len));
+        try out.append(a, .{ .media_type = media, .data_b64 = enc.encode(b64, bytes) });
+    }
+    return out.items;
+}
 
 pub const DoneStatus = enum { completed, interrupted, errored };
 
@@ -148,7 +189,32 @@ pub fn waitAllExited(io: Io, ms: u32) bool {
     return true;
 }
 
+/// Whether `resolveExe` may search beyond the run's own `PATH` (the login
+/// shell, install dirs, Node version managers). Off in test builds, so a
+/// test only finds the stand-ins on the synthetic PATH it set and can never
+/// start an agent CLI installed on the machine running it.
+pub var allow_exe_search: bool = !@import("builtin").is_test;
+
 pub const interrupt_grace_ms: u32 = 2000;
+
+/// Longest a resume waits for the previous process on its session: the
+/// interrupt and kill graces plus slack (`live_sessions::WAIT`).
+pub const session_wait_ms: u32 = 10_000;
+
+/// Native sessions whose agent process is still alive
+/// (`claude/live_sessions.rs`): two processes on one session drop the new
+/// prompt, so a resume waits for the old one to be reaped.
+const SessionHold = struct { id: []u8, owner: *const Turn };
+var sessions_mu: Io.Mutex = .init;
+var live_sessions: std.ArrayList(SessionHold) = .empty;
+const sessions_gpa = std.heap.smp_allocator;
+
+fn sessionOpen(io: Io, id: []const u8) bool {
+    sessions_mu.lockUncancelable(io);
+    defer sessions_mu.unlock(io);
+    for (live_sessions.items) |h| if (std.mem.eql(u8, h.id, id)) return true;
+    return false;
+}
 pub const kill_grace_ms: u32 = 3000;
 
 pub const Turn = struct {
@@ -167,11 +233,18 @@ pub const Turn = struct {
     input_seq: u32 = 0,
     interrupted: std.atomic.Value(bool) = .init(false),
     finished: std.atomic.Value(bool) = .init(false),
+    /// Set under `emit_mu` with the Done.
     done_emitted: bool = false,
+    /// Serializes `emit`, so an event from another thread can't reach the
+    /// host after (or while) Done frees its side.
+    emit_mu: Io.Mutex = .init,
     /// A detailed failure message an adapter sets before returning an error.
     fail_msg: ?[]u8 = null,
     /// Adapter state (owned by the adapter's `run`, read by its callbacks under `mu`).
     state: ?*anyopaque = null,
+    /// This run's private build-wait directory (`BuildWaitMonitor`), made
+    /// with the first child environment and removed when the run ends.
+    build_wait_dir: ?[]const u8 = null,
     refs: std.atomic.Value(u32) = .init(1),
 
     pub fn create(gpa: Allocator, io: Io, adapter: *const Adapter, sink: Sink, asst_id: []const u8) !*Turn {
@@ -246,14 +319,19 @@ pub const Turn = struct {
             self.mu.unlock(self.io);
             p.destroy();
         }
+        // The child is reaped: its native session is free for the next run.
+        self.releaseSessions();
+        if (self.build_wait_dir) |d| Io.Dir.cwd().deleteTree(self.io, d) catch {};
         self.finished.store(true, .release);
     }
 
+    /// Report `ev` to the host. Nothing is reported after Done: the host
+    /// frees its side of the turn with it.
     pub fn emit(self: *Turn, ev: Event) void {
-        if (ev == .done) {
-            if (self.done_emitted) return;
-            self.done_emitted = true;
-        }
+        self.emit_mu.lockUncancelable(self.io);
+        defer self.emit_mu.unlock(self.io);
+        if (self.done_emitted) return;
+        if (ev == .done) self.done_emitted = true;
         self.sink.emitFn(self.sink.ctx, self, ev);
     }
 
@@ -268,6 +346,46 @@ pub const Turn = struct {
         self.mu.lockUncancelable(self.io);
         defer self.mu.unlock(self.io);
         self.proc = p;
+    }
+
+    /// Mark native session `id` as open in this turn's process until the
+    /// process is reaped (`live_sessions::register`). A newer hold on the
+    /// same id replaces an older one.
+    pub fn holdSession(self: *Turn, id: []const u8) void {
+        const copy = sessions_gpa.dupe(u8, id) catch return;
+        sessions_mu.lockUncancelable(self.io);
+        defer sessions_mu.unlock(self.io);
+        var i: usize = 0;
+        while (i < live_sessions.items.len) {
+            if (std.mem.eql(u8, live_sessions.items[i].id, id)) {
+                sessions_gpa.free(live_sessions.swapRemove(i).id);
+            } else i += 1;
+        }
+        live_sessions.append(sessions_gpa, .{ .id = copy, .owner = self }) catch sessions_gpa.free(copy);
+    }
+
+    /// Drop this turn's holds (only its own: a newer run may hold the id now).
+    fn releaseSessions(self: *Turn) void {
+        sessions_mu.lockUncancelable(self.io);
+        defer sessions_mu.unlock(self.io);
+        var i: usize = 0;
+        while (i < live_sessions.items.len) {
+            if (live_sessions.items[i].owner == self) {
+                sessions_gpa.free(live_sessions.swapRemove(i).id);
+            } else i += 1;
+        }
+    }
+
+    /// Wait until no process holds session `id`, at most `ms`, and no longer
+    /// than this turn stays uninterrupted (`wait_until_closed`). True when
+    /// the session was free in time.
+    pub fn waitSessionClosed(self: *Turn, id: []const u8, ms: u32) bool {
+        var waited: u32 = 0;
+        while (true) : (waited += 20) {
+            if (!sessionOpen(self.io, id)) return true;
+            if (waited >= ms or self.interrupted.load(.acquire)) return false;
+            Io.sleep(self.io, .fromMilliseconds(20), .awake) catch return false;
+        }
     }
 
     /// Write one line to the agent (any thread). False if it's gone.
@@ -352,12 +470,28 @@ pub const Turn = struct {
         var env = try self.req.env.clone(self.gpa);
         errdefer env.deinit();
         for (agent_proc.stripped_env) |k| _ = env.orderedRemove(k);
+        // Build-wait markers belong to this run alone (`apply_run_environment`).
         _ = env.orderedRemove("HARNESS_BUILD_WAIT_DIR");
-        const login = if (env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(self.gpa, self.io, self.req.env);
+        if (self.buildWaitDir()) |d| try env.put("HARNESS_BUILD_WAIT_DIR", d);
+        const login = if (env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(self.gpa, self.io, self.req.env, &self.interrupted);
         const path = try agent_proc.composeChildPath(self.gpa, exe, env.get("PATH"), login);
         defer self.gpa.free(path);
         try env.put("PATH", path);
         return env;
+    }
+
+    fn buildWaitDir(self: *Turn) ?[]const u8 {
+        if (self.build_wait_dir) |d| return d;
+        const base = std.mem.trimEnd(u8, self.req.env.get("TMPDIR") orelse "/tmp", "/");
+        var rnd: [8]u8 = undefined;
+        self.io.random(&rnd);
+        const dir = std.fmt.allocPrint(self.arena.allocator(), "{s}/harness-build-wait-{x}", .{ if (base.len > 0) base else "/tmp", rnd }) catch return null;
+        Io.Dir.cwd().createDirPath(self.io, dir) catch |err| {
+            std.log.warn("harness-engine: build queue status unavailable: {t}", .{err});
+            return null;
+        };
+        self.build_wait_dir = dir;
+        return dir;
     }
 
     /// Resolve an agent CLI (`resolve_*_executable`): `override_var` (must
@@ -369,15 +503,19 @@ pub const Turn = struct {
             return a.dupe(u8, v);
         };
         if (self.req.exe_hint) |h| return a.dupe(u8, h);
-        const login = if (self.req.env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(self.gpa, self.io, self.req.env);
-        const found = try agent_proc.findExecutable(self.gpa, self.io, .{
-            .name = name,
-            .path_env = self.req.env.get("PATH"),
-            .login_path = login,
-            .home = self.req.env.get("HOME"),
-            .extra = extra,
-            .fnm_dir = self.req.env.get("FNM_DIR"),
-        });
+        const found = if (!allow_exe_search)
+            try agent_proc.findExecutable(self.gpa, self.io, .{ .name = name, .path_env = self.req.env.get("PATH"), .home = null })
+        else blk: {
+            const login = if (self.req.env.get("HARNESS_DISABLE_SHELL_ENV") != null) null else agent_proc.loginShellPath(self.gpa, self.io, self.req.env, &self.interrupted);
+            break :blk try agent_proc.findExecutable(self.gpa, self.io, .{
+                .name = name,
+                .path_env = self.req.env.get("PATH"),
+                .login_path = login,
+                .home = self.req.env.get("HOME"),
+                .extra = extra,
+                .fnm_dir = self.req.env.get("FNM_DIR"),
+            });
+        };
         const f = found orelse return self.fail("harness binary not found: {s}", .{hint});
         defer self.gpa.free(f);
         return a.dupe(u8, f);
@@ -398,6 +536,8 @@ pub const Turn = struct {
 
     /// `crash_message` for this turn's process.
     pub fn crash(self: *Turn, proc: *AgentProc) []const u8 {
+        // Its stdout ended; a child that keeps running gets the usual graces.
+        proc.escalate(kill_grace_ms, kill_grace_ms * 2);
         const term = proc.wait();
         const tail = proc.stderrTail(self.gpa);
         defer if (tail) |s| self.gpa.free(s);

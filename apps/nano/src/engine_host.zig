@@ -3726,6 +3726,7 @@ pub const EngineHost = struct {
     }
 
     pub fn deleteChat(self: *EngineHost, chat_id: []const u8) bool {
+        turn_host.chatDeleted(self, chat_id);
         var removed = false;
         var i: usize = 0;
         while (i < self.chats.items.len) {
@@ -6282,7 +6283,7 @@ test "mock WebSocket server with concurrent async clients: Client A watches live
                 if (std.mem.indexOf(u8, msg.items, "Hello from concurrent Client B!") != null) {
                     self.saw_b_prompt.store(true, .release);
                 }
-                if (std.mem.indexOf(u8, msg.items, "Ack from dev-mock-srv: Hello from concurrent Client B!") != null) {
+                if (std.mem.indexOf(u8, msg.items, "Mock harness reporting in.") != null) {
                     self.saw_b_ack.store(true, .release);
                 }
                 self.lock.lockUncancelable(self.io);
@@ -6362,7 +6363,7 @@ test "mock WebSocket server with concurrent async clients: Client A watches live
     );
     try client_b.sendCall(
         "Mutate",
-        .{ .op = "createChat", .chatId = "chat-async-1", .spaceId = "sp-async", .config = .{ .harness = "graff" } },
+        .{ .op = "createChat", .chatId = "chat-async-1", .spaceId = "sp-async", .config = .{ .harness = "mock" } },
         rpc.Handler.of(AsyncClient, client_b, AsyncClient.onMutate),
     );
     try client_b.sendCall(

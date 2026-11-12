@@ -23,6 +23,7 @@ const Event = agent_turn.Event;
 /// Harness ids whose turns this engine runs, mapped to their adapters.
 pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
     const map = .{
+        .{ "mock", &@import("agent_mock.zig").adapter },
         .{ "claude-code", &@import("agent_claude.zig").adapter },
         .{ "codex", &@import("agent_codex.zig").adapter },
         .{ "graff", &@import("agent_acp.zig").graff },
@@ -40,12 +41,60 @@ pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
 /// Tests replace the engine's environment (agent overrides, PATH, HOME).
 pub var env_override: ?*const Environ.Map = null;
 
+/// Tests name the engine executable graff's Harness MCP server runs.
+pub var engine_exe_override: ?[]const u8 = null;
+var engine_exe_once: std.atomic.Value(bool) = .init(false);
+var engine_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+var engine_exe_len: usize = 0;
+
+/// This process's executable when it is `harness-engine`
+/// (`exo_bridge_programs`: only the engine binary serves `mcp`).
+fn engineExe(io: Io) ?[]const u8 {
+    if (engine_exe_override) |e| return e;
+    if (!engine_exe_once.load(.acquire)) {
+        live_mutex.lockUncancelable(io);
+        defer live_mutex.unlock(io);
+        if (!engine_exe_once.load(.acquire)) {
+            if (std.process.executablePath(io, &engine_exe_buf)) |n| {
+                const base = std.fs.path.stem(engine_exe_buf[0..n]);
+                if (std.mem.eql(u8, base, "harness-engine")) engine_exe_len = n;
+            } else |_| {}
+            engine_exe_once.store(true, .release);
+        }
+    }
+    return if (engine_exe_len > 0) engine_exe_buf[0..engine_exe_len] else null;
+}
+
+/// A turn the host is running. It holds its own reference to `turn`, so
+/// `liveTurn` and `shutdownHost` never see a freed one; it is freed with the
+/// turn's Done (`destroyLive`) whatever that Done's folding does.
 const Live = struct {
     host: *EngineHost,
     chat_id: []u8,
     turn: *Turn,
     /// The next text/reasoning delta starts a new part (after a steer).
     fresh: bool = false,
+    /// A run that replaces this turn: started once this turn's Done is in.
+    replacement: ?Replacement = null,
+};
+
+/// A `run` waiting for the chat's previous turn to stop (`dispatch_inner`'s
+/// replace path). Everything is owned.
+const Replacement = struct {
+    chat_id: []u8,
+    asst_id: []u8,
+    prompt: []u8,
+    cwd: []u8,
+    /// The run's request object as JSON.
+    req_json: []u8,
+
+    fn deinit(self: Replacement, gpa: Allocator) void {
+        gpa.free(self.chat_id);
+        gpa.free(self.asst_id);
+        gpa.free(self.prompt);
+        gpa.free(self.cwd);
+        gpa.free(self.req_json);
+    }
 };
 
 var live_mutex: Io.Mutex = .init;
@@ -66,6 +115,16 @@ fn removeLive(io: Io, l: *Live) void {
         _ = live_list.swapRemove(i);
         return;
     };
+}
+
+/// Unlist and free `l`, dropping its turn reference (idempotent unlisting).
+fn destroyLive(io: Io, l: *Live) void {
+    removeLive(io, l);
+    const gpa = l.host.gpa;
+    if (l.replacement) |r| r.deinit(gpa);
+    l.turn.release();
+    gpa.free(l.chat_id);
+    gpa.destroy(l);
 }
 
 /// Live turns on `host` (tests poll this).
@@ -131,16 +190,16 @@ fn reqStr(obj: json.ObjectMap, key: []const u8) ?[]const u8 {
 
 /// Run the turn for a `run` command whose user message and streaming
 /// assistant entry `asst_id` the engine already wrote. Called with the
-/// engine lock held. Starts the chat's adapter on its own thread; without an
-/// `io` (or for graff without a configured graff binary, as before) the
-/// engine acknowledges in place.
+/// engine lock held. Starts the chat's adapter on its own thread. A harness
+/// whose CLI can't be found ends the turn with Rust's "harness binary not
+/// found" error. Only a host with no `io` (unit tests that never run an
+/// agent) completes the entry in place.
 pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, prompt: []const u8, cwd: []const u8, req: json.ObjectMap) anyerror!void {
     // Whether this turn answers peer mail only: any origin but a person's.
     if (findChat(host, chat_id)) |c| c.running_turn_peer_only = if (reqStr(req, "turnOrigin")) |o| !std.mem.eql(u8, o, "human") else false;
     setPaused(host.io orelse return ackInPlace(host, chat_id, asst_id, prompt), chat_id, false);
     const chat = findChat(host, chat_id);
     const harness = reqStr(req, "harness") orelse (if (chat) |c| (if (c.harness.len > 0) c.harness else null) else null) orelse "graff";
-    if (std.mem.eql(u8, harness, "graff") and host.graff_exe == null) return ackInPlace(host, chat_id, asst_id, prompt);
     const io = host.io.?;
 
     const adapter = adapterFor(harness) orelse {
@@ -148,6 +207,17 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         defer host.gpa.free(msg);
         return failInPlace(host, chat_id, asst_id, msg);
     };
+    const model = reqStr(req, "model") orelse (if (chat) |c| c.model else null);
+    const reasoning = reqStr(req, "reasoning") orelse (if (chat) |c| c.reasoning else null);
+
+    // One turn per chat (`dispatch_inner`): a run that the live turn's
+    // runtime can take mid-turn is steered into it; any other replaces it
+    // once it has stopped. Never a second process on the chat.
+    if (findLive(io, host, chat_id)) |prev| {
+        if (try routeIntoLive(host, prev, adapter, model, reasoning, asst_id, prompt)) return;
+        try replaceLive(host, prev, chat_id, asst_id, prompt, cwd, req);
+        return;
+    }
 
     const live = try host.gpa.create(Live);
     errdefer host.gpa.destroy(live);
@@ -155,14 +225,15 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
     errdefer turn.release();
     live.* = .{ .host = host, .chat_id = try host.gpa.dupe(u8, chat_id), .turn = turn };
     errdefer host.gpa.free(live.chat_id);
+    // From here `live` owns the turn reference `create` returned.
 
     const a = turn.arena.allocator();
     const env = try a.create(Environ.Map);
-    env.* = if (env_override) |o| try o.clone(a) else try agent_proc.currentEnv(a);
+    // A test that sets no environment gets none: no PATH, so no agent CLI
+    // installed on the machine can start.
+    env.* = if (env_override) |o| try o.clone(a) else if (@import("builtin").is_test) Environ.Map.init(a) else try agent_proc.currentEnv(a);
     const auto_req = if (req.get("autoApprove")) |v| v == .bool and v.bool else false;
     const autonomy = agent_turn.applyAutonomy(host.autonomy_level, auto_req);
-    const model = reqStr(req, "model") orelse (if (chat) |c| c.model else null);
-    const reasoning = reqStr(req, "reasoning") orelse (if (chat) |c| c.reasoning else null);
     const resume_id: ?[]const u8 = if (chat) |c| (if (c.harness_session_id) |s| (if (s.len > 0) s else null) else null) else null;
     turn.req = .{
         .chat_id = try a.dupe(u8, chat_id),
@@ -180,6 +251,9 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         .graff_draft_subagents = host.graff_draft_subagents,
         .graff_compact_pct = host.graff_compact_at,
         .device_name = try a.dupe(u8, host.device_name),
+        .engine_exe = if (engineExe(io)) |e| try a.dupe(u8, e) else null,
+        .mcp_servers_json = if (req.get("mcpServers")) |ms| (if (ms == .array) try json.Stringify.valueAlloc(a, ms, .{}) else null) else null,
+        .attachments = try stringArray(a, req.get("attachments")),
     };
 
     {
@@ -187,19 +261,96 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         defer live_mutex.unlock(io);
         try live_list.append(list_gpa, live);
     }
-    turn.start() catch |err| {
-        removeLive(io, live);
-        host.gpa.free(live.chat_id);
-        host.gpa.destroy(live);
-        turn.release();
-        const msg = try std.fmt.allocPrint(host.gpa, "io: {t}", .{err});
-        defer host.gpa.free(msg);
-        return failInPlace(host, chat_id, asst_id, msg);
-    };
-    // The thread holds its own reference; drop ours.
-    turn.release();
+    startLive(host, live, chat_id, asst_id);
 }
 
+/// A JSON array's strings, copied into `a` (anything else: empty).
+fn stringArray(a: Allocator, v: ?json.Value) ![]const []const u8 {
+    const arr = v orelse return &.{};
+    if (arr != .array) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (arr.array.items) |x| if (x == .string and x.string.len > 0) try out.append(a, try a.dupe(u8, x.string));
+    return out.items;
+}
+
+fn optEql(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+/// Deliver a run into the live turn as a steer when its runtime can take it
+/// (same harness and model, steered mid-turn). The run's user message and
+/// entry `asst_id` are written already: the reply so far completes and the
+/// turn continues in `asst_id`.
+fn routeIntoLive(host: *EngineHost, prev: *Live, adapter: *const agent_turn.Adapter, model: ?[]const u8, reasoning: ?[]const u8, asst_id: []const u8, prompt: []const u8) !bool {
+    const t = prev.turn;
+    if (t.adapter != adapter or !adapter.steers_mid_turn) return false;
+    if (!optEql(t.req.model, model) or !optEql(t.req.reasoning, reasoning)) return false;
+    const steer_fn = adapter.steer orelse return false;
+    if (t.interrupted.load(.acquire) or !steer_fn(t, prompt)) return false;
+    const doc = try host.getOrCreateDoc(prev.chat_id);
+    const next = try host.gpa.dupe(u8, asst_id);
+    {
+        t.mu.lockUncancelable(t.io);
+        defer t.mu.unlock(t.io);
+        doc.setMessageStatus(t.asst_id, "complete") catch {};
+        host.journal.recordFinish(prev.chat_id, t.asst_id, "complete") catch {};
+        host.gpa.free(t.asst_id);
+        t.asst_id = next;
+    }
+    prev.fresh = true;
+    const reset_frame = try doc.toResetFrameJson(host.gpa);
+    defer host.gpa.free(reset_frame);
+    try host.broadcastWatch(.doc_messages, prev.chat_id, reset_frame);
+    return true;
+}
+
+/// Stop the live turn and start this run after its Done. A run already
+/// waiting there is superseded: its entry ends aborted.
+fn replaceLive(host: *EngineHost, prev: *Live, chat_id: []const u8, asst_id: []const u8, prompt: []const u8, cwd: []const u8, req: json.ObjectMap) !void {
+    const gpa = host.gpa;
+    const req_json = try json.Stringify.valueAlloc(gpa, json.Value{ .object = req }, .{});
+    errdefer gpa.free(req_json);
+    const r: Replacement = .{
+        .chat_id = try gpa.dupe(u8, chat_id),
+        .asst_id = try gpa.dupe(u8, asst_id),
+        .prompt = try gpa.dupe(u8, prompt),
+        .cwd = try gpa.dupe(u8, cwd),
+        .req_json = req_json,
+    };
+    if (prev.replacement) |old| {
+        defer old.deinit(gpa);
+        if (host.getOrCreateDoc(chat_id)) |doc| doc.setMessageStatus(old.asst_id, "aborted") catch {} else |_| {}
+        host.journal.recordFinish(chat_id, old.asst_id, "aborted") catch {};
+    }
+    prev.replacement = r;
+    prev.turn.interrupt();
+}
+
+/// Start the run that waited for the chat's previous turn to stop.
+fn startReplacement(host: *EngineHost, r: Replacement) void {
+    var arena = std.heap.ArenaAllocator.init(host.gpa);
+    defer arena.deinit();
+    const parsed = json.parseFromSliceLeaky(json.Value, arena.allocator(), r.req_json, .{}) catch return;
+    if (parsed != .object) return;
+    if (findChat(host, r.chat_id)) |c| setActivity(host, c, "working", host.nowMs());
+    broadcastRows(host);
+    dispatchRun(host, r.chat_id, r.asst_id, r.prompt, r.cwd, parsed.object) catch |err| std.log.warn("harness-engine: starting the replacing run failed: {t}", .{err});
+}
+
+/// Start `live`'s thread; on failure the entry ends with the error. No
+/// error escapes: `live` is either running or already freed.
+fn startLive(host: *EngineHost, live: *Live, chat_id: []const u8, asst_id: []const u8) void {
+    const io = live.turn.io;
+    live.turn.start() catch |err| {
+        destroyLive(io, live);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "io: {t}", .{err}) catch "io: spawn failed";
+        failInPlace(host, chat_id, asst_id, msg) catch |e| std.log.warn("harness-engine: failing the turn failed: {t}", .{e});
+    };
+}
+
+/// Test hosts without `io` only: production hosts always have one.
 fn ackInPlace(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, prompt: []const u8) !void {
     const doc = try host.getOrCreateDoc(chat_id);
     const reply_text = try std.fmt.allocPrint(host.gpa, "Ack from {s}: {s}", .{ host.device_id, prompt });
@@ -294,15 +445,22 @@ fn emit(ctx: *anyopaque, t: *Turn, ev: Event) void {
     const host = live.host;
     host.mutex.lockUncancelable(t.io);
     defer host.mutex.unlock(t.io);
-    if (host.stop_requested) {
-        if (ev == .done) {
-            removeLive(t.io, live);
-            host.gpa.free(live.chat_id);
-            host.gpa.destroy(live);
-        }
-        return;
+    // A stopping engine, or a chat deleted mid-turn: nothing to write, and
+    // no doc, snapshot or outbox batch is recreated for it.
+    if (!host.stop_requested and findChat(host, live.chat_id) != null) {
+        applyEvent(host, live, t, ev) catch |err| std.log.warn("harness-engine: folding {t} failed: {t}", .{ ev, err });
     }
-    applyEvent(host, live, t, ev) catch |err| std.log.warn("harness-engine: folding {t} failed: {t}", .{ ev, err });
+    if (ev != .done) return;
+    // Done frees the entry however its folding went (Turn.emit drops any
+    // event after Done, so nothing reaches it again), then starts the run
+    // that replaces it.
+    const next = live.replacement;
+    live.replacement = null;
+    destroyLive(t.io, live);
+    if (next) |r| {
+        defer r.deinit(host.gpa);
+        if (!host.stop_requested and findChat(host, r.chat_id) != null) startReplacement(host, r);
+    }
 }
 
 fn lastPart(doc: *session_doc.SessionDoc, msg_id: []const u8) ?*session_doc.PartItem {
@@ -441,14 +599,14 @@ fn finishLive(host: *EngineHost, live: *Live, t: *Turn, doc: *session_doc.Sessio
         if (std.mem.eql(u8, p.kind, "input")) p.resolved = true;
     };
     if (d.session_id) |sid| rememberSession(host, live.chat_id, sid);
-    try doc.setMessageStatus(asst, if (interrupted) "aborted" else "complete");
-    const chat_id = try host.gpa.dupe(u8, live.chat_id);
-    defer host.gpa.free(chat_id);
+    // Unlisted now so the next turn (the queue below) is the chat's live
+    // one; `emit` frees the entry after this returns.
     removeLive(t.io, live);
-    host.gpa.free(live.chat_id);
-    host.gpa.destroy(live);
-    try finishTurn(host, chat_id, asst, if (interrupted) "aborted" else "complete", if (d.status == .errored) "errored" else "idle");
-    drainQueue(host, chat_id) catch |err| std.log.warn("harness-engine: queue drain failed: {t}", .{err});
+    try doc.setMessageStatus(asst, if (interrupted) "aborted" else "complete");
+    try finishTurn(host, live.chat_id, asst, if (interrupted) "aborted" else "complete", if (d.status == .errored) "errored" else "idle");
+    // A replacing run goes first; its own Done drains the queue.
+    if (live.replacement != null) return;
+    drainQueue(host, live.chat_id) catch |err| std.log.warn("harness-engine: queue drain failed: {t}", .{err});
 }
 
 /// Start the first deliverable queued message as the next turn.
@@ -607,6 +765,16 @@ pub fn dismissInput(host: *EngineHost, chat_id: []const u8, request_id: []const 
     return false;
 }
 
+/// `deleteChat` (engine lock held): stop the chat's live turn. Its events
+/// and Done then find no chat and write nothing (`emit`).
+pub fn chatDeleted(host: *EngineHost, chat_id: []const u8) void {
+    const io = host.io orelse return;
+    setPaused(io, chat_id, false);
+    const t = liveTurn(io, host, chat_id) orelse return;
+    defer t.release();
+    t.interrupt();
+}
+
 /// The `interrupt` command: stop the live turn (its Done finishes the entry
 /// as "aborted") and pause the queue. False when nothing is running.
 pub fn interrupt(host: *EngineHost, chat_id: []const u8) bool {
@@ -632,12 +800,164 @@ pub fn shutdownHost(host: *EngineHost) void {
             turns.append(list_gpa, l.turn) catch l.turn.release();
         };
     }
-    for (turns.items) |t| {
+    defer for (turns.items) |t| t.release();
+    killTurns(io, turns.items);
+    // A hard gate: the host is freed after this returns, so no turn thread
+    // (or the request threads that hold a turn) may still be running. Waits
+    // inside a turn end on its interrupt; a process that respawned under a
+    // turn is killed again on every round.
+    while (!agent_turn.waitAllExited(io, 5000)) {
+        std.log.warn("harness-engine: waiting for {d} agent thread(s) to stop", .{agent_turn.active_threads.load(.acquire)});
+        killTurns(io, turns.items);
+    }
+}
+
+fn killTurns(io: Io, turns: []const *Turn) void {
+    for (turns) |t| {
         t.interrupted.store(true, .release);
         t.mu.lockUncancelable(io);
         if (t.proc) |p| p.terminate();
         t.mu.unlock(io);
     }
-    for (turns.items) |t| t.release();
-    _ = agent_turn.waitAllExited(io, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testkit = @import("agent_testkit.zig");
+
+test "turn_host: graff with no binary reports it missing instead of replying" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    // No configured graff copy, and GRAFF_EXECUTABLE names a missing file.
+    const rig = try testkit.Rig.create(.{ .harness = "graff", .override_var = "GRAFF_EXECUTABLE", .script = "", .missing_binary = true });
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitIdle(5000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expect(std.mem.indexOf(u8, doc, "Ack from") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"kind\":\"error\",\"message\":\"harness binary not found: /nonexistent/harness-agent-mock does not exist\"") != null);
+}
+
+fn mockRig(delay_ms: []const u8) !*testkit.Rig {
+    const rig = try testkit.Rig.create(.{ .harness = "mock", .override_var = "HARNESS_TEST_UNUSED", .script = "" });
+    errdefer rig.destroy();
+    try rig.env.put("HARNESS_MOCK_DELAY_MS", delay_ms);
+    return rig;
+}
+
+test "turn_host: deleting a chat mid-turn stops the turn and recreates nothing" {
+    const rig = try mockRig("150");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.call("Mutate", "{\"op\":\"deleteChat\",\"chatId\":\"chat-1\"}");
+    try rig.waitIdle(5000);
+    rig.host.mutex.lockUncancelable(rig.io);
+    defer rig.host.mutex.unlock(rig.io);
+    try testing.expect(rig.host.docs.get("chat-1") == null);
+    try testing.expect(rig.host.store.snapshots.get("chat-1") == null);
+    for (rig.host.store.outbox.items) |o| try testing.expect(!std.mem.eql(u8, o.doc_id, "chat-1"));
+}
+
+fn count(hay: []const u8, needle: []const u8) usize {
+    return std.mem.count(u8, hay, needle);
+}
+
+fn queueLen(rig: *testkit.Rig) !usize {
+    rig.host.mutex.lockUncancelable(rig.io);
+    defer rig.host.mutex.unlock(rig.io);
+    return (try rig.host.getOrCreateDoc("chat-1")).queue.items.len;
+}
+
+test "turn_host: a second run on a live turn that steers mid-turn is steered into it" {
+    const rig = try mockRig("100");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.run("m-2", "follow up");
+    // Never a second process (or turn) on the chat.
+    try testing.expectEqual(@as(usize, 1), liveCount(rig.io, rig.host));
+    try rig.waitIdle(8000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text\":\"follow up\"") != null);
+    try testing.expectEqual(@as(usize, 1), count(doc, "Mock harness reporting in."));
+    try testing.expect(std.mem.indexOf(u8, doc, "\"status\":\"aborted\"") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"status\":\"streaming\"") == null);
+}
+
+test "turn_host: a run that changes the model replaces the live turn once it stopped" {
+    const rig = try mockRig("100");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.command("{\"kind\":\"run\",\"messageId\":\"m-2\",\"request\":{\"prompt\":\"on another model\",\"model\":\"mock-fable-5\"}}");
+    try testing.expectEqual(@as(usize, 1), liveCount(rig.io, rig.host));
+    try rig.waitIdle(8000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expectEqual(@as(usize, 1), count(doc, "\"status\":\"aborted\""));
+    try testing.expectEqual(@as(usize, 1), count(doc, "Mock harness reporting in."));
+    try testing.expect(std.mem.indexOf(u8, doc, "\"status\":\"streaming\"") == null);
+}
+
+test "turn_host: a held queued message runs as the next turn when the turn ends" {
+    const rig = try mockRig("30");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.call("QueueMessage", "{\"chatId\":\"chat-1\",\"id\":\"q-1\",\"text\":\"queued one\",\"holdForTurnEnd\":true}");
+    try rig.waitFor("\"text\":\"queued one\"", 8000);
+    try rig.waitIdle(8000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expectEqual(@as(usize, 2), count(doc, "Mock harness reporting in."));
+    try testing.expectEqual(@as(usize, 0), try queueLen(rig));
+}
+
+test "turn_host: an interrupt pauses the queue" {
+    const rig = try mockRig("100");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    try rig.call("QueueMessage", "{\"chatId\":\"chat-1\",\"id\":\"q-1\",\"text\":\"queued one\",\"holdForTurnEnd\":true}");
+    try rig.command("{\"kind\":\"interrupt\"}");
+    try rig.waitIdle(5000);
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"status\":\"aborted\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text\":\"queued one\"") == null);
+    try testing.expectEqual(@as(usize, 1), try queueLen(rig));
+}
+
+test "turn_host: a steer for a turn-boundary harness waits in the queue" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+    const rig = try testkit.Rig.create(.{ .harness = "devin", .override_var = "DEVIN_EXECUTABLE", .script = @import("agent_acp.zig").mock_agent });
+    defer rig.destroy();
+    try rig.run("m-1", "clean up");
+    try rig.waitQuestion(5000);
+    try rig.command("{\"kind\":\"steer\",\"messageId\":\"s-1\",\"prompt\":\"also this\"}");
+    try testing.expectEqual(@as(usize, 1), try queueLen(rig));
+    const doc = try rig.docJson();
+    defer testing.allocator.free(doc);
+    try testing.expect(std.mem.indexOf(u8, doc, "also this") == null);
+    try rig.command("{\"kind\":\"interrupt\"}");
+    try rig.waitIdle(8000);
+}
+
+test "turn_host: shutting the host down mid-turn waits for the turn thread" {
+    const rig = try mockRig("200");
+    defer rig.destroy();
+    try rig.run("m-1", "hello");
+    try rig.waitFor("Streaming pipeline", 5000);
+    {
+        rig.host.mutex.lockUncancelable(rig.io);
+        defer rig.host.mutex.unlock(rig.io);
+        rig.host.stop_requested = true;
+    }
+    shutdownHost(rig.host);
+    try testing.expectEqual(@as(usize, 0), agent_turn.active_threads.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), liveCount(rig.io, rig.host));
 }

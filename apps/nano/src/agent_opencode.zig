@@ -12,6 +12,8 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const net = std.Io.net;
+const builtin = @import("builtin");
+const posix = std.posix;
 const agent_turn = @import("agent_turn.zig");
 const agent_proc = @import("agent_proc.zig");
 const Turn = agent_turn.Turn;
@@ -60,6 +62,90 @@ pub fn pctEncode(a: Allocator, s: []const u8) ![]u8 {
 }
 
 pub const Response = struct { status: u16, body: []const u8 };
+
+/// `CALL_TIMEOUT`: the bound on every request but the event stream.
+pub const call_timeout_ms: u32 = 60_000;
+/// A readiness probe's bound.
+pub const probe_timeout_ms: u32 = 2000;
+/// Largest response body read whole.
+pub const max_body_bytes: usize = 32 * 1024 * 1024;
+/// Largest single SSE event.
+pub const max_event_bytes: usize = 64 * 1024 * 1024;
+
+/// The next header line without its line end; a line longer than the read
+/// buffer is skipped whole (null at the end of the stream).
+fn headerLine(rd: *std.Io.Reader) !?[]const u8 {
+    while (true) {
+        const raw = rd.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                _ = try rd.discardDelimiterInclusive('\n');
+                continue;
+            },
+            else => |e| return e,
+        };
+        return std.mem.trimEnd(u8, raw orelse return null, "\r");
+    }
+}
+
+/// Server-sent events, split by any line end (`\n`, `\r\n`, `\r`), with
+/// each event's `data:` lines joined by `\n` (the SSE spec).
+pub const Sse = struct {
+    line: std.ArrayList(u8) = .empty,
+    data: std.ArrayList(u8) = .empty,
+    has_data: bool = false,
+    /// The last byte was `\r`: a `\n` right after it ends no second line.
+    cr: bool = false,
+
+    pub fn deinit(self: *Sse, gpa: Allocator) void {
+        self.line.deinit(gpa);
+        self.data.deinit(gpa);
+    }
+
+    /// Feed `bytes`; each completed event's data is appended to `out`
+    /// (copied into `a`).
+    pub fn feed(self: *Sse, gpa: Allocator, a: Allocator, bytes: []const u8, out: *std.ArrayList([]const u8)) !void {
+        for (bytes) |b| {
+            if (b == '\n' and self.cr) {
+                self.cr = false;
+                continue;
+            }
+            self.cr = b == '\r';
+            if (b == '\r' or b == '\n') {
+                try self.endLine(gpa, a, out);
+                continue;
+            }
+            if (self.line.items.len + self.data.items.len >= max_event_bytes) return error.EventTooLarge;
+            try self.line.append(gpa, b);
+        }
+    }
+
+    fn endLine(self: *Sse, gpa: Allocator, a: Allocator, out: *std.ArrayList([]const u8)) !void {
+        defer self.line.clearRetainingCapacity();
+        const l = self.line.items;
+        if (l.len == 0) {
+            if (self.has_data) try out.append(a, try a.dupe(u8, self.data.items));
+            self.data.clearRetainingCapacity();
+            self.has_data = false;
+            return;
+        }
+        const field_end = std.mem.indexOfScalar(u8, l, ':') orelse l.len;
+        if (!std.mem.eql(u8, l[0..field_end], "data")) return;
+        var value = if (field_end < l.len) l[field_end + 1 ..] else "";
+        if (value.len > 0 and value[0] == ' ') value = value[1..];
+        if (self.has_data) try self.data.append(gpa, '\n');
+        try self.data.appendSlice(gpa, value);
+        self.has_data = true;
+    }
+};
+
+/// Bound each read on `stream` (and each write) to `ms`; a stalled server
+/// then fails the call instead of hanging the thread.
+fn setTimeouts(stream: net.Stream, ms: u32) void {
+    if (comptime builtin.os.tag == .windows) return;
+    const tv: posix.timeval = .{ .sec = @intCast(ms / 1000), .usec = @intCast((ms % 1000) * 1000) };
+    posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+}
 
 /// A connection whose response head has been read.
 const Conn = struct {
@@ -126,9 +212,15 @@ const Conn = struct {
     }
 };
 
-fn open(s: Server, gpa: Allocator, method: []const u8, path: []const u8, body: ?[]const u8, accept: []const u8) !*Conn {
+/// Connect and send a request, then read the response head. `timeout_ms`
+/// bounds every read and write (null: the event stream, which lives for the
+/// whole run).
+fn open(s: Server, gpa: Allocator, method: []const u8, path: []const u8, body: ?[]const u8, accept: []const u8, timeout_ms: ?u32) !*Conn {
     const addr = try net.IpAddress.parseIp4("127.0.0.1", s.port);
+    // A loopback connect is answered at once (accepted or refused); std's
+    // threaded Io has no connect timeout yet, so reads and writes carry it.
     const stream = try addr.connect(s.io, .{ .mode = .stream });
+    if (timeout_ms) |ms| setTimeouts(stream, ms);
     const c = try gpa.create(Conn);
     errdefer gpa.destroy(c);
     c.* = .{ .stream = stream };
@@ -146,12 +238,11 @@ fn open(s: Server, gpa: Allocator, method: []const u8, path: []const u8, body: ?
     try w.interface.flush();
     c.reader = stream.reader(s.io, &c.rbuf);
     const rd = c.r();
-    const status_line = (try rd.takeDelimiter('\n')) orelse return error.EndOfStream;
+    const status_line = (try headerLine(rd)) orelse return error.EndOfStream;
     var parts = std.mem.tokenizeScalar(u8, status_line, ' ');
     _ = parts.next();
     c.status = std.fmt.parseInt(u16, parts.next() orelse "0", 10) catch 0;
-    while (try rd.takeDelimiter('\n')) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
+    while (try headerLine(rd)) |line| {
         if (line.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = line[0..colon];
@@ -163,15 +254,22 @@ fn open(s: Server, gpa: Allocator, method: []const u8, path: []const u8, body: ?
     return c;
 }
 
-/// One request; the whole response body in `a`.
+/// One request bounded by `call_timeout_ms`; the whole response body in `a`.
 pub fn request(s: Server, a: Allocator, gpa: Allocator, method: []const u8, path: []const u8, body: ?[]const u8) !Response {
-    const c = try open(s, gpa, method, path, body, "application/json");
+    return requestWithin(s, a, gpa, method, path, body, call_timeout_ms);
+}
+
+pub fn requestWithin(s: Server, a: Allocator, gpa: Allocator, method: []const u8, path: []const u8, body: ?[]const u8, timeout_ms: u32) !Response {
+    const c = try open(s, gpa, method, path, body, "application/json", timeout_ms);
     defer {
         c.close(s.io);
         gpa.destroy(c);
     }
     var out: std.ArrayList(u8) = .empty;
-    while (try c.next()) |chunk| try out.appendSlice(a, chunk);
+    while (try c.next()) |chunk| {
+        if (out.items.len + chunk.len > max_body_bytes) return error.ResponseTooLarge;
+        try out.appendSlice(a, chunk);
+    }
     return .{ .status = c.status, .body = out.items };
 }
 
@@ -399,6 +497,62 @@ fn serverOf(t: *Turn) ?State {
 const kind_permission: u8 = 1;
 const kind_question: u8 = 2;
 
+/// POSTs to the server made off the calling thread: answers and interrupts
+/// arrive on RPC threads holding the engine lock, and a call may take up to
+/// `call_timeout_ms`. The job holds a turn reference until it's done.
+const Job = struct {
+    t: *Turn,
+    server: Server,
+    arena: std.heap.ArenaAllocator,
+    path: []const u8,
+    body: ?[]const u8,
+    /// Tried when `path` doesn't answer 2xx (the legacy permission route).
+    fallback_path: ?[]const u8 = null,
+    fallback_body: ?[]const u8 = null,
+    /// Nothing answered 2xx (an abort): end the server.
+    kill_on_fail: bool = false,
+
+    fn post(self: *Job, path: []const u8, body: ?[]const u8) bool {
+        const r = request(self.server, self.arena.allocator(), self.t.gpa, "POST", path, body) catch return false;
+        return r.status >= 200 and r.status < 300;
+    }
+
+    fn runIt(self: *Job) void {
+        var ok = self.post(self.path, self.body);
+        if (!ok) if (self.fallback_path) |fp| {
+            ok = self.post(fp, self.fallback_body);
+        };
+        if (!ok and self.kill_on_fail) {
+            // Nothing will settle the turn: end the server now.
+            self.t.mu.lockUncancelable(self.t.io);
+            defer self.t.mu.unlock(self.t.io);
+            if (self.t.proc) |p| p.escalate(0, agent_turn.kill_grace_ms);
+        }
+        const t = self.t;
+        self.arena.deinit();
+        t.gpa.destroy(self);
+        t.release();
+        _ = agent_turn.active_threads.fetchSub(1, .acq_rel);
+    }
+};
+
+/// Start a `Job` (built by `fill` in the job's arena); without a thread it
+/// runs in place.
+fn postAsync(t: *Turn, server: Server, fill: anytype) void {
+    const job = t.gpa.create(Job) catch return;
+    job.* = .{ .t = t, .server = server, .arena = .init(t.gpa), .path = "", .body = null };
+    fill.apply(job) catch {
+        job.arena.deinit();
+        t.gpa.destroy(job);
+        return;
+    };
+    t.retain();
+    // Counted with the turn threads, so shutdown and tests wait for it.
+    _ = agent_turn.active_threads.fetchAdd(1, .acq_rel);
+    const th = std.Thread.spawn(.{}, Job.runIt, .{job}) catch return job.runIt();
+    th.detach();
+}
+
 fn answer(t: *Turn, p: *const agent_turn.Pending, answers: ?[]const agent_turn.Answer) void {
     var arena = std.heap.ArenaAllocator.init(t.gpa);
     defer arena.deinit();
@@ -409,18 +563,22 @@ fn answer(t: *Turn, p: *const agent_turn.Pending, answers: ?[]const agent_turn.A
     switch (p.kind) {
         kind_permission => {
             const reply = if (agent_turn.labelsFor(answers, getStr(data, "qid") orelse "").len > 0 and agent_turn.answeredYes(answers)) "once" else "reject";
-            const path = std.fmt.allocPrint(a, "/permission/{s}/reply", .{id}) catch return;
-            const body = std.fmt.allocPrint(a, "{{\"reply\":\"{s}\"}}", .{reply}) catch return;
-            const ok = if (request(st.server, a, t.gpa, "POST", path, body)) |r| r.status >= 200 and r.status < 300 else |_| false;
-            if (!ok) {
-                const legacy = std.fmt.allocPrint(a, "/session/{s}/permissions/{s}", .{ st.session_id, id }) catch return;
-                const lbody = std.fmt.allocPrint(a, "{{\"response\":\"{s}\"}}", .{reply}) catch return;
-                _ = request(st.server, a, t.gpa, "POST", legacy, lbody) catch {};
-            }
+            postAsync(t, st.server, struct {
+                id: []const u8,
+                session_id: []const u8,
+                reply: []const u8,
+                fn apply(self: @This(), job: *Job) !void {
+                    const ja = job.arena.allocator();
+                    job.path = try std.fmt.allocPrint(ja, "/permission/{s}/reply", .{self.id});
+                    job.body = try std.fmt.allocPrint(ja, "{{\"reply\":\"{s}\"}}", .{self.reply});
+                    job.fallback_path = try std.fmt.allocPrint(ja, "/session/{s}/permissions/{s}", .{ self.session_id, self.id });
+                    job.fallback_body = try std.fmt.allocPrint(ja, "{{\"response\":\"{s}\"}}", .{self.reply});
+                }
+            }{ .id = id, .session_id = st.session_id, .reply = reply });
         },
         kind_question => {
             if (answers == null) {
-                _ = request(st.server, a, t.gpa, "POST", std.fmt.allocPrint(a, "/question/{s}/reject", .{id}) catch return, null) catch {};
+                postAsync(t, st.server, PathBody{ .path = std.fmt.allocPrint(a, "/question/{s}/reject", .{id}) catch return, .body = null });
                 return;
             }
             const qs = json.parseFromSliceLeaky([]agent_turn.Question, a, p.questions, .{ .ignore_unknown_fields = true }) catch return;
@@ -431,26 +589,31 @@ fn answer(t: *Turn, p: *const agent_turn.Pending, answers: ?[]const agent_turn.A
                 out.writer.print("{f}", .{json.fmt(agent_turn.labelsFor(answers, q.id), .{})}) catch return;
             }
             out.writer.writeAll("]}") catch return;
-            _ = request(st.server, a, t.gpa, "POST", std.fmt.allocPrint(a, "/question/{s}/reply", .{id}) catch return, out.written()) catch {};
+            postAsync(t, st.server, PathBody{ .path = std.fmt.allocPrint(a, "/question/{s}/reply", .{id}) catch return, .body = out.written() });
         },
         else => {},
     }
 }
 
+/// A `postAsync` filler for one POST (copied into the job's arena).
+const PathBody = struct {
+    path: []const u8,
+    body: ?[]const u8,
+    kill_on_fail: bool = false,
+    fn apply(self: PathBody, job: *Job) !void {
+        const ja = job.arena.allocator();
+        job.path = try ja.dupe(u8, self.path);
+        job.body = if (self.body) |b| try ja.dupe(u8, b) else null;
+        job.kill_on_fail = self.kill_on_fail;
+    }
+};
+
 fn interrupt(t: *Turn) void {
-    var arena = std.heap.ArenaAllocator.init(t.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var buf: [256]u8 = undefined;
     const st = serverOf(t) orelse return;
     if (st.session_id.len == 0) return;
-    const path = std.fmt.allocPrint(a, "/session/{s}/abort", .{st.session_id}) catch return;
-    const ok = if (request(st.server, a, t.gpa, "POST", path, null)) |r| r.status >= 200 and r.status < 300 else |_| false;
-    if (!ok) {
-        // Nothing will settle the turn: end the server now.
-        t.mu.lockUncancelable(t.io);
-        defer t.mu.unlock(t.io);
-        if (t.proc) |p| p.escalate(0, agent_turn.kill_grace_ms);
-    }
+    const path = std.fmt.bufPrint(&buf, "/session/{s}/abort", .{st.session_id}) catch return;
+    postAsync(t, st.server, PathBody{ .path = path, .body = null, .kill_on_fail = true });
 }
 
 fn freePort(io: Io) !u16 {
@@ -491,12 +654,71 @@ fn openAsk(t: *Turn, a: Allocator, feed: *Feed) !void {
     }
 }
 
-/// `prompt_async` body.
-pub fn promptBody(a: Allocator, prompt: []const u8, model: ?[]const u8) ![]u8 {
+/// `prompt_async` body (`prompt_body`), with the reasoning `variant` when
+/// the model advertises one.
+pub fn promptBody(a: Allocator, prompt: []const u8, model: ?[]const u8, variant: ?[]const u8) ![]u8 {
+    return promptBodyWith(a, prompt, model, variant, &.{});
+}
+
+/// `mime_for`.
+fn mimeFor(path: []const u8) []const u8 {
+    const ext = std.fs.path.extension(path);
+    const table = [_][2][]const u8{ .{ ".png", "image/png" }, .{ ".jpg", "image/jpeg" }, .{ ".jpeg", "image/jpeg" }, .{ ".gif", "image/gif" }, .{ ".webp", "image/webp" }, .{ ".pdf", "application/pdf" } };
+    for (table) |e| if (std.ascii.eqlIgnoreCase(ext, e[0])) return e[1];
+    return "application/octet-stream";
+}
+
+/// `prompt_body`: the text part, then one `file` part per attachment.
+pub fn promptBodyWith(a: Allocator, prompt: []const u8, model: ?[]const u8, variant: ?[]const u8, attachments: []const []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    const w = &out.writer;
+    try w.print("{{\"parts\":[{{\"type\":\"text\",\"text\":{f}}}", .{json.fmt(prompt, .{})});
+    for (attachments) |path| {
+        const url = try std.fmt.allocPrint(a, "file://{s}", .{path});
+        try w.print(",{{\"type\":\"file\",\"mime\":{f},\"filename\":{f},\"url\":{f}}}", .{ json.fmt(mimeFor(path), .{}), json.fmt(std.fs.path.basename(path), .{}), json.fmt(url, .{}) });
+    }
+    try w.writeByte(']');
     if (model) |m| if (std.mem.indexOfScalar(u8, m, '/')) |slash| {
-        return std.fmt.allocPrint(a, "{{\"parts\":[{{\"type\":\"text\",\"text\":{f}}}],\"model\":{{\"providerID\":{f},\"modelID\":{f}}}}}", .{ json.fmt(prompt, .{}), json.fmt(m[0..slash], .{}), json.fmt(m[slash + 1 ..], .{}) });
+        try w.print(",\"model\":{{\"providerID\":{f},\"modelID\":{f}}}", .{ json.fmt(m[0..slash], .{}), json.fmt(m[slash + 1 ..], .{}) });
     };
-    return std.fmt.allocPrint(a, "{{\"parts\":[{{\"type\":\"text\",\"text\":{f}}}]}}", .{json.fmt(prompt, .{})});
+    if (variant) |v| try w.print(",\"variant\":{f}", .{json.fmt(v, .{})});
+    try w.writeByte('}');
+    return out.written();
+}
+
+/// `variant_candidates`: the variant ids a reasoning level may use, best first.
+pub fn variantCandidates(reasoning: ?[]const u8) []const []const u8 {
+    const r = reasoning orelse return &.{};
+    if (eq(r, "none")) return &.{"none"};
+    if (eq(r, "minimal")) return &.{ "minimal", "low" };
+    if (eq(r, "low")) return &.{ "low", "minimal" };
+    if (eq(r, "medium")) return &.{"medium"};
+    if (eq(r, "high")) return &.{"high"};
+    if (eq(r, "xhigh")) return &.{ "xhigh", "x-high", "high" };
+    if (eq(r, "max")) return &.{ "max", "xhigh", "high" };
+    if (eq(r, "ultra") or eq(r, "ultracode") or eq(r, "ultrathink")) return &.{ "ultra", "max", "high" };
+    return &.{};
+}
+
+/// `pick_variant`: the requested effort as a variant the model advertises
+/// in the server's `/provider` catalog (`{all: [{id, models: {id: {variants}}}]}`).
+pub fn pickVariant(catalog: json.Value, model: ?[]const u8, reasoning: ?[]const u8) ?[]const u8 {
+    const m = model orelse return null;
+    const slash = std.mem.indexOfScalar(u8, m, '/') orelse return null;
+    const candidates = variantCandidates(reasoning);
+    if (candidates.len == 0) return null;
+    const all = get(catalog, "all") orelse return null;
+    if (all != .array) return null;
+    for (all.array.items) |p| {
+        if (!eq(getStr(p, "id") orelse "", m[0..slash])) continue;
+        const models = get(p, "models") orelse return null;
+        const info = get(models, m[slash + 1 ..]) orelse return null;
+        const variants = get(info, "variants") orelse return null;
+        if (variants != .object) return null;
+        for (candidates) |c| if (variants.object.get(c) != null) return c;
+        return null;
+    }
+    return null;
 }
 
 fn run(t: *Turn) !void {
@@ -536,7 +758,7 @@ fn run(t: *Turn) !void {
         for ([_][]const u8{ "/api/info", "/api/status", "/api/health", "/global/health" }) |path| {
             var probe_arena = std.heap.ArenaAllocator.init(t.gpa);
             defer probe_arena.deinit();
-            const resp = request(srv, probe_arena.allocator(), t.gpa, "GET", path, null) catch continue;
+            const resp = requestWithin(srv, probe_arena.allocator(), t.gpa, "GET", path, null, probe_timeout_ms) catch continue;
             if (resp.status == 401 or resp.status == 403) return t.fail("harness protocol error: opencode authentication rejected at {s}: {d}", .{ path, resp.status });
             if (resp.status < 200 or resp.status >= 300) continue;
             const v = json.parseFromSliceLeaky(json.Value, probe_arena.allocator(), resp.body, .{}) catch continue;
@@ -576,14 +798,21 @@ fn run(t: *Turn) !void {
     t.emit(.{ .session_started = sid });
 
     // The bus, then the prompt.
-    const bus = open(srv, t.gpa, "GET", "/global/event", null, "text/event-stream") catch |err| return t.fail("harness protocol error: opencode GET /global/event: {t}", .{err});
+    const bus = open(srv, t.gpa, "GET", "/global/event", null, "text/event-stream", null) catch |err| return t.fail("harness protocol error: opencode GET /global/event: {t}", .{err});
     defer {
         bus.close(io);
         t.gpa.destroy(bus);
     }
     if (bus.status < 200 or bus.status >= 300) return t.fail("harness protocol error: opencode GET /global/event: {d}", .{bus.status});
     const prompt_path = try std.fmt.allocPrint(a, "/session/{s}/prompt_async", .{sid});
-    const presp = try request(srv, a, t.gpa, "POST", prompt_path, try promptBody(a, t.req.prompt, t.req.model));
+    // Variants are per model: the requested effort rides only a model that has it.
+    const variant: ?[]const u8 = if (variantCandidates(t.req.reasoning).len == 0) null else blk: {
+        const resp = request(srv, a, t.gpa, "GET", "/provider", null) catch break :blk null;
+        if (resp.status < 200 or resp.status >= 300) break :blk null;
+        const catalog = json.parseFromSliceLeaky(json.Value, a, resp.body, .{}) catch break :blk null;
+        break :blk pickVariant(catalog, t.req.model, t.req.reasoning);
+    };
+    const presp = try request(srv, a, t.gpa, "POST", prompt_path, try promptBodyWith(a, t.req.prompt, t.req.model, variant, t.req.attachments));
     if (presp.status < 200 or presp.status >= 300) {
         const msg = try httpError(a, "POST", prompt_path, presp);
         t.emit(.{ .err = msg });
@@ -593,26 +822,22 @@ fn run(t: *Turn) !void {
 
     var feed: Feed = .{ .gpa = t.gpa, .session_id = sid };
     defer feed.deinit();
-    var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(t.gpa);
+    var sse: Sse = .{};
+    defer sse.deinit(t.gpa);
+    var chunk_arena = std.heap.ArenaAllocator.init(t.gpa);
+    defer chunk_arena.deinit();
     var line_arena = std.heap.ArenaAllocator.init(t.gpa);
     defer line_arena.deinit();
     while (!feed.settled) {
         const chunk = (bus.next() catch null) orelse break;
-        try pending.appendSlice(t.gpa, chunk);
-        while (std.mem.indexOf(u8, pending.items, "\n\n")) |end| {
+        defer _ = chunk_arena.reset(.retain_capacity);
+        var frames: std.ArrayList([]const u8) = .empty;
+        try sse.feed(t.gpa, chunk_arena.allocator(), chunk, &frames);
+        for (frames.items) |data| {
             defer _ = line_arena.reset(.retain_capacity);
             const la = line_arena.allocator();
-            const frame = try la.dupe(u8, pending.items[0..end]);
-            pending.replaceRangeAssumeCapacity(0, end + 2, &.{});
-            var data: std.ArrayList(u8) = .empty;
-            var lines = std.mem.splitScalar(u8, frame, '\n');
-            while (lines.next()) |l| {
-                const line = std.mem.trimEnd(u8, l, "\r");
-                if (std.mem.startsWith(u8, line, "data:")) try data.appendSlice(la, std.mem.trimStart(u8, line["data:".len..], " "));
-            }
-            if (data.items.len == 0) continue;
-            const v = json.parseFromSliceLeaky(json.Value, la, data.items, .{}) catch continue;
+            if (data.len == 0) continue;
+            const v = json.parseFromSliceLeaky(json.Value, la, data, .{}) catch continue;
             var events: std.ArrayList(Event) = .empty;
             try feed.apply(la, v, &events);
             for (events.items) |ev| t.emit(ev);
@@ -654,11 +879,34 @@ test "opencode: prompt body, percent-encoding and tool calls" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":{\"providerID\":\"anthropic\",\"modelID\":\"claude-opus-5-5\"}}", try promptBody(a, "hi", "anthropic/claude-opus-5-5"));
-    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}]}", try promptBody(a, "hi", null));
+    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":{\"providerID\":\"anthropic\",\"modelID\":\"claude-opus-5-5\"}}", try promptBody(a, "hi", "anthropic/claude-opus-5-5", null));
+    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}]}", try promptBody(a, "hi", null, null));
+    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}],\"model\":{\"providerID\":\"p\",\"modelID\":\"m\"},\"variant\":\"high\"}", try promptBody(a, "hi", "p/m", "high"));
+    try testing.expectEqualStrings("{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"file\",\"mime\":\"image/png\",\"filename\":\"a b.PNG\",\"url\":\"file:///w/a b.PNG\"}]}", try promptBodyWith(a, "hi", null, null, &.{"/w/a b.PNG"}));
+    const catalog = try json.parseFromSliceLeaky(json.Value, a, "{\"all\":[{\"id\":\"p\",\"models\":{\"m\":{\"variants\":{\"low\":{},\"high\":{}}}}}]}", .{});
+    try testing.expectEqualStrings("high", pickVariant(catalog, "p/m", "xhigh").?);
+    try testing.expectEqualStrings("low", pickVariant(catalog, "p/m", "minimal").?);
+    try testing.expect(pickVariant(catalog, "p/m", "medium") == null);
+    try testing.expect(pickVariant(catalog, "p/other", "high") == null);
     try testing.expectEqualStrings("/w/my%20repo/a%2Bb", try pctEncode(a, "/w/my repo/a+b"));
     const input = try json.parseFromSliceLeaky(json.Value, a, "{\"filePath\":\"/w/a.ts\",\"oldString\":\"x\"}", .{});
     try testing.expectEqualStrings("{\"kind\":\"editFile\",\"path\":\"/w/a.ts\"}", try toolCall(a, "edit", input));
+}
+
+test "opencode: SSE events split on any line end and join multi-line data with a newline" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var sse: Sse = .{};
+    defer sse.deinit(testing.allocator);
+    var out: std.ArrayList([]const u8) = .empty;
+    // Split mid-terminator and mid-field, as a socket may deliver it.
+    const pieces = [_][]const u8{ "data: {\"a\":1}\r", "\n\r\ndata: line1\ndata:line2\n\n: keepalive\n\nevent: x\nda", "ta: last\r\r" };
+    for (pieces) |p| try sse.feed(testing.allocator, a, p, &out);
+    try testing.expectEqual(@as(usize, 3), out.items.len);
+    try testing.expectEqualStrings("{\"a\":1}", out.items[0]);
+    try testing.expectEqualStrings("line1\nline2", out.items[1]);
+    try testing.expectEqualStrings("last", out.items[2]);
 }
 
 test "opencode: the bus folds parts by role, deltas, tools, errors and idle" {
@@ -717,7 +965,7 @@ const MockServer = struct {
         const s = self.bus orelse return;
         var buf: [4096]u8 = undefined;
         var w = s.writer(self.io, &buf);
-        const body = std.fmt.allocPrint(testing.allocator, "data: {{\"directory\":\"/w\",\"payload\":{s}}}\n\n", .{event}) catch return;
+        const body = std.fmt.allocPrint(testing.allocator, "data: {{\"directory\":\"/w\",\"payload\":{s}}}\r\n\r\n", .{event}) catch return;
         defer testing.allocator.free(body);
         w.interface.print("{x}\r\n{s}\r\n", .{ body.len, body }) catch return;
         w.interface.flush() catch return;

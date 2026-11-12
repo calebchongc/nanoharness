@@ -896,8 +896,13 @@ test "two-way HTTP Edge sync: local Zig EngineHost session creation, turn execut
 
     // 1. `host_zig` creates a space + chat and executes a turn locally.
     try execRpc(&host_zig, 1, "Mutate", "{\"op\":\"createSpace\",\"spaceId\":\"sp-zig-sync\",\"path\":\"/work/nanoharness\",\"name\":\"nanoharness\"}");
-    try execRpc(&host_zig, 2, "Mutate", "{\"op\":\"createChat\",\"chatId\":\"chat-zig-sync-1\",\"spaceId\":\"sp-zig-sync\",\"config\":{\"harness\":\"graff\",\"model\":\"claude-agent/claude-opus-5-5\",\"reasoning\":\"high\"}}");
-    try execRpc(&host_zig, 3, "QueueCommand", "{\"chatId\":\"chat-zig-sync-1\",\"command\":{\"kind\":\"run\",\"messageId\":\"msg-zig-1\",\"request\":{\"prompt\":\"Sync this Zig session across all devices\"}}}");
+    try execRpc(&host_zig, 2, "Mutate", "{\"op\":\"createChat\",\"chatId\":\"chat-zig-sync-1\",\"spaceId\":\"sp-zig-sync\",\"config\":{\"harness\":\"mock\",\"model\":\"claude-agent/claude-opus-5-5\",\"reasoning\":\"high\"}}");
+    // The mock agent runs the turn on its own thread under the engine lock.
+    host_zig.mutex.lockUncancelable(io);
+    const run_res = execRpc(&host_zig, 3, "QueueCommand", "{\"chatId\":\"chat-zig-sync-1\",\"command\":{\"kind\":\"run\",\"messageId\":\"msg-zig-1\",\"request\":{\"prompt\":\"Sync this Zig session across all devices\"}}}");
+    host_zig.mutex.unlock(io);
+    try run_res;
+    try testing.expect(@import("agent_turn.zig").waitAllExited(io, 5000));
 
     // 2. `host_zig` syncs with the HTTP Edge server, then `host_peer` syncs from the HTTP Edge server.
     _ = host_zig.syncFromEdgeRegistry(io);
@@ -932,7 +937,7 @@ test "two-way HTTP Edge sync: local Zig EngineHost session creation, turn execut
     var watch_msgs = try host_peer.handle("WatchDocMessages", watch_p.value);
     defer watch_msgs.stream_items_json.deinit(gpa);
     try testing.expect(std.mem.indexOf(u8, watch_msgs.stream_items_json.items[0], "Sync this Zig session across all devices") != null);
-    try testing.expect(std.mem.indexOf(u8, watch_msgs.stream_items_json.items[0], "Ack from dev-zig-mac: Sync this Zig session across all devices") != null);
+    try testing.expect(std.mem.indexOf(u8, watch_msgs.stream_items_json.items[0], "Mock harness reporting in.") != null);
 
     // 4. Reverse direction: `host_peer` renames & archives the chat -> pushes to Edge -> `host_zig` pulls delta!
     try execRpc(&host_peer, 10, "Mutate", "{\"op\":\"renameChat\",\"chatId\":\"chat-zig-sync-1\",\"title\":\"Renamed on GPUI Peer\"}");

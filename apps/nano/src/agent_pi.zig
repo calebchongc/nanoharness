@@ -327,6 +327,14 @@ pub fn versionSupported(version: []const u8) bool {
 fn probeVersion(t: *Turn, exe: []const u8, env: *const std.process.Environ.Map) ?[]const u8 {
     const p = agent_proc.AgentProc.spawn(t.gpa, t.io, &.{ exe, "--version" }, null, env, .{ .stdin = false }) catch return null;
     defer p.destroy();
+    // The turn's process while it runs, so an interrupt or shutdown ends it.
+    t.setProc(p);
+    defer {
+        t.mu.lockUncancelable(t.io);
+        t.proc = null;
+        t.mu.unlock(t.io);
+    }
+    if (t.interrupted.load(.acquire)) p.terminate();
     p.armDeadline(10_000);
     const line = (p.readLine() catch return null) orelse return null;
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
