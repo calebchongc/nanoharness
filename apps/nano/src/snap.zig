@@ -74,6 +74,9 @@ pub fn main(init: std.process.Init) !void {
     if (scene.get("auth")) |v| @import("app_workspace_gate.zig").authItem(&a, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     if (str(scene, "open")) |id| a.openChat(id, null);
+    // First-run setup at a step (`HARNESS_SETUP_STEP`, which a scene has no
+    // environment for).
+    if (num(scene, "setupStep")) |n| @import("view_setup.zig").open(&a, @intFromFloat(n));
     // Bots: a `BotsState` reply as "bots", the clock its times are read
     // against as "botsNow" (ms), and the page shown: "inbox", "new" or a
     // bot's name. "botsDetail" is what `BotDetail` would answer for its

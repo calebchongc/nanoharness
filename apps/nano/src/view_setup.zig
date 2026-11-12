@@ -1,7 +1,8 @@
-//! First-run setup, as the GPUI app's (crates/ui/src/setup.rs): four
-//! questions, then a ready page, over the whole window. Graff comes first
-//! and picked (it signs in with CodeGraff); Claude Code and Codex are
-//! extras. Each answer sets the real setting: the extras through
+//! First-run setup, as the GPUI app's (crates/ui/src/setup.rs): six
+//! steps (`order`), then a ready page, over the whole window: the CodeGraff
+//! sign-in, the agents this computer has (`ListHarnesses`), effort,
+//! autonomy, notifications and a first project. Graff comes first and
+//! picked (it signs in with CodeGraff); Claude Code and Codex are extras. Each answer sets the real setting: the extras through
 //! `SetHarnessEnabled`, the default effort as the new chat's model and
 //! level, the device's autonomy through `SetAutonomy`, and Settings ›
 //! Notifications' switch. It shows once: `setup.json` in the data folder
@@ -22,13 +23,21 @@ const workspace = @import("workspace.zig");
 const agent = @import("app_agent.zig");
 const App = @import("app.zig").App;
 
-pub const questions: usize = 4;
+pub const questions: usize = order.len;
 
-/// Off until GPUI's desktop onboarding (`feat/desktop-onboarding`) is on
-/// main: Nano matches main's GPUI, which neither runs first-run setup at
-/// launch nor shows Settings › Agents' Autonomy card. `HARNESS_SETUP_STEP`
-/// still opens it, for working on it.
-pub const enabled = false;
+/// The steps, in order; the ready page follows the last.
+pub const Step = enum { sign_in, agents, effort, autonomy, notify, project, ready };
+pub const order = [_]Step{ .sign_in, .agents, .effort, .autonomy, .notify, .project };
+
+/// The step at index `i`: past the questions, the ready page.
+pub fn stepAt(i: usize) Step {
+    return if (i < order.len) order[i] else .ready;
+}
+
+/// It was off while Nano matched a GPUI main without desktop onboarding
+/// (`feat/desktop-onboarding`). With the Rust UI gone, Nano is the desktop,
+/// so it runs at a first launch; `HARNESS_SETUP_STEP=n` opens it at n.
+pub const enabled = true;
 
 /// What agents on a device may do without asking (`harness_proto::Autonomy`).
 pub const Autonomy = enum {
@@ -110,6 +119,8 @@ pub const Setup = struct {
     autonomy_call: ?u64 = null,
     notify: bool = true,
     starter: ?usize = null,
+    /// The first project picked from the existing ones.
+    project: ?usize = null,
     /// A write that failed (static text).
     err: ?[]const u8 = null,
 };
@@ -160,6 +171,9 @@ pub fn open(a: *App, step: usize) void {
         const s = &a.view.setup.?;
         if (a.engine.call("GetAutonomy", .{}, .of(App, a, onAutonomy))) |id| s.autonomy_call = id;
         agent.ensureModels(a, "graff");
+        @import("app_account.zig").refresh(a);
+        // The agents this computer has, asked now if they aren't in.
+        if (a.harnesses.items.len == 0) a.loadAgents();
     }
     a.redraw();
 }
@@ -264,12 +278,12 @@ fn onSaved(a: *App, _: u64, r: rpc.Reply) void {
 pub fn next(a: *App) void {
     const s = if (a.view.setup) |*x| x else return;
     s.err = null;
-    switch (s.step) {
-        0 => for (extras, 0..) |id, i| if (s.extras_on[i] != s.extras_was[i]) {
+    switch (stepAt(s.step)) {
+        .agents => for (extras, 0..) |id, i| if (s.extras_on[i] != s.extras_was[i]) {
             s.extras_was[i] = s.extras_on[i];
             _ = a.engine.call("SetHarnessEnabled", .{ .harness = id, .enabled = s.extras_on[i] }, .of(App, a, onEnabled));
         },
-        2 => _ = a.engine.call("SetAutonomy", .{ .autonomy = s.autonomy.wire() }, .of(App, a, onSaved)),
+        .autonomy => _ = a.engine.call("SetAutonomy", .{ .autonomy = s.autonomy.wire() }, .of(App, a, onSaved)),
         else => {},
     }
     if (s.step >= questions) return finish(a, false);
@@ -286,12 +300,12 @@ fn back(a: *App) void {
 /// ←/→: the effort's rung or the autonomy's stop.
 fn nudge(a: *App, by: i32) void {
     const s = if (a.view.setup) |*x| x else return;
-    switch (s.step) {
-        1 => if (effort(a, s)) |e| if (e.levels.len > 0) {
+    switch (stepAt(s.step)) {
+        .effort => if (effort(a, s)) |e| if (e.levels.len > 0) {
             const at: i32 = @intCast(e.at orelse 0);
             s.level = @intCast(std.math.clamp(at + by, 0, @as(i32, @intCast(e.levels.len - 1))));
         },
-        2 => {
+        .autonomy => {
             const at: i32 = @intFromEnum(s.autonomy);
             s.autonomy = @enumFromInt(@as(u2, @intCast(std.math.clamp(at + by, 0, 2))));
         },
@@ -323,13 +337,15 @@ pub fn finish(a: *App, skipped: bool) void {
         }
         if (a.settings.get(.notifications_enabled) != s.notify) a.settings.set(.notifications_enabled, s.notify);
         if (s.starter) |i| a.composer.set(starters[i]);
+        if (s.project) |i| if (i < a.spaces.items.len) a.select(null, a.spaces.items[i].id);
     }
     a.view.setup = null;
     a.view.focus_composer = true;
     a.redraw();
 }
 
-/// Open, it has every key: Return goes on, Escape back, ←/→ adjust.
+/// Open, it has every key: Return goes on, Escape back, ←/→ adjust; Tab
+/// moves between its controls and Space presses the one it's on.
 pub fn keys(c: *ui.Context, a: *App) bool {
     if (a.view.setup == null) return false;
     const S = ui.Shortcut;
@@ -357,28 +373,40 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const s = if (a.view.setup) |*x| x else return;
     seed(a, s);
     ui.key(c, "setup-overlay");
-    const root = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).row().bg(k.shell);
+    const opaque_k = @import("view_gaps_kit.zig").solid(k);
+    const root = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(9).row().bg(opaque_k.shell);
     defer root.end();
     questionPane(c, a, k, s);
     _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .fill, .background = k.border }, .none, null);
-    const right = ui.div(c).column().grow().w(0).hFull().center().bg(k.composer);
+    const right = ui.div(c).column().grow().w(0).hFull().center().bg(opaque_k.composer);
     defer right.end();
-    switch (s.step) {
-        0 => agentsPane(c, a, k, s),
-        1 => effortPane(c, a, k, s),
-        2 => autonomyPane(c, k, s),
-        3 => notifyPane(c, k, s),
-        else => readyPane(c, a, k, s),
+    switch (stepAt(s.step)) {
+        .sign_in => signInPane(c, a, k),
+        .agents => agentsPane(c, a, k, s),
+        .effort => effortPane(c, a, k, s),
+        .autonomy => autonomyPane(c, k, s),
+        .notify => notifyPane(c, k, s),
+        .project => projectPane(c, a, k, s),
+        .ready => readyPane(c, a, k, s),
     }
 }
 
+/// A box the keyboard reaches: Tab moves to it, Return or Space presses it.
+fn pressable(c: *ui.Context, k: theme.Colors, d: ui.Div) bool {
+    const it = c.interact(d.index, .{ .focusable = true });
+    if (it.focused) _ = d.border(k.accent).borderW(1.5);
+    return it.clicked;
+}
+
 fn copy(step: usize) [2][]const u8 {
-    return switch (step) {
-        0 => .{ "Start with Graff", "Graff is already connected through your CodeGraff sign-in. Add Claude Code or Codex too if you use them." },
-        1 => .{ "How hard should it think?", "Your default for new Graff sessions. Change it per message from the composer." },
-        2 => .{ "How much can it do without asking?", "Applies to every agent on this computer. Change it any time in Settings > Agents." },
-        3 => .{ "Ping you when it needs you?", "A desktop banner when a session waits on you or finishes while Harness is in the background." },
-        else => .{ "Your first agent is ready", "Graff is live on this computer." },
+    return switch (stepAt(step)) {
+        .sign_in => .{ "Sign in to CodeGraff", "Graff runs on your CodeGraff account. Sign in now, or later from Settings > Accounts." },
+        .project => .{ "Pick your first project", "Sessions run in a project folder. Pick one you have, add a folder, or start without a project." },
+        .agents => .{ "Start with Graff", "Graff runs on your CodeGraff sign-in. Add Claude Code or Codex too if you use them." },
+        .effort => .{ "How hard should it think?", "Your default for new Graff sessions. Change it per message from the composer." },
+        .autonomy => .{ "How much can it do without asking?", "Applies to every agent on this computer. Change it any time in Settings > Agents." },
+        .notify => .{ "Ping you when it needs you?", "A desktop banner when a session waits on you or finishes while Harness is in the background." },
+        .ready => .{ "Your first agent is ready", "Graff is live on this computer." },
     };
 }
 
@@ -421,14 +449,14 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             const b = ui.div(c).row().px(14).py(9).rounded(9).border(k.border).borderW(1).hover(k.ink(0.05));
             defer b.end();
             ui.text(c, "Back", set.st(c, 13, .{ .color = k.text }));
-            if (b.clicked()) back(a);
+            if (pressable(c, k, b)) back(a);
         }
         ui.spacer(c);
         ui.key(c, "setup-next");
         const n = ui.div(c).row().px(18).py(9).rounded(9).bg(k.text).hover(k.text.alpha(0.88));
         defer n.end();
         ui.text(c, if (s.step >= questions) "Start a session" else "Next", set.st(c, 13, .{ .weight = .medium, .color = k.on_solid }));
-        if (n.clicked()) next(a);
+        if (pressable(c, k, n)) next(a);
     }
     {
         const r = ui.div(c).row().w(text_w).itemsCenter();
@@ -440,7 +468,7 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             const sk = ui.div(c).row().py(4).hover(k.ink(0.04)).rounded(6);
             defer sk.end();
             ui.text(c, "Skip setup", set.st(c, 12, .{ .color = if (sk.hovered()) k.text else k.muted }));
-            if (sk.clicked()) finish(a, true);
+            if (pressable(c, k, sk)) finish(a, true);
         }
     }
 }
@@ -484,9 +512,20 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
                 defer b.end();
                 ui.text(c, "Recommended", set.st(c, 10.5, .{ .weight = .medium, .color = k.success_muted }));
             }
-            if (a.harnesses.items.len == 0) status(c, k, false, "Checking this computer…") else status(c, k, true, "Connected with CodeGraff");
+            if (a.harnesses.items.len == 0 and a.harnesses_failed)
+                status(c, k, false, "Couldn't check this computer's agents")
+            else if (a.harnesses.items.len == 0)
+                status(c, k, false, "Checking this computer…")
+            else if (a.account.codegraff.signed_in)
+                status(c, k, true, "Connected with CodeGraff")
+            else
+                status(c, k, false, "Sign in with CodeGraff to use it");
         }
         checkCircle(c, k, true);
+    }
+    if (a.harnesses.items.len == 0 and a.harnesses_failed) {
+        ui.key(c, "setup-agents-retry");
+        if (@import("view_gaps_kit.zig").button(c, k, "Check again", .{ .icon = .refresh })) a.loadAgents();
     }
     set.space(c, 6);
     ui.text(c, "O\u{200A}P\u{200A}T\u{200A}I\u{200A}O\u{200A}N\u{200A}A\u{200A}L\u{2002}E\u{200A}X\u{200A}T\u{200A}R\u{200A}A\u{200A}S", set.st(c, 10.5, .{ .weight = .medium, .color = k.muted }));
@@ -502,7 +541,9 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             const t = ui.div(c).column().grow().w(0).gap(3);
             defer t.end();
             ui.text(c, extra_names[i], set.st(c, 14, .{ .weight = .medium, .color = k.text }));
-            if (!s.extras_seen)
+            if (!s.extras_seen and a.harnesses_failed)
+                status(c, k, false, "Couldn't check this computer")
+            else if (!s.extras_seen)
                 status(c, k, false, "Checking this computer…")
             else if (!installed)
                 status(c, k, false, "Not installed. Install it from Settings > Agents")
@@ -512,7 +553,7 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
                 status(c, k, true, "Optional, ready");
         }
         checkCircle(c, k, s.extras_on[i]);
-        if (installed and e.clicked()) {
+        if (installed and pressable(c, k, e)) {
             s.extras_on[i] = !s.extras_on[i];
             a.redraw();
         }
@@ -537,7 +578,7 @@ fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             t = if (on) t.bg(k.card).border(k.border).borderW(1) else t.hover(k.ink(0.05));
             defer t.end();
             kit.ellipsisText(c, m.label, set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }), 140);
-            if (t.clicked() and !on) {
+            if (pressable(c, k, t) and !on) {
                 s.model = i;
                 s.level = null;
                 a.redraw();
@@ -566,7 +607,7 @@ fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
                     ui.key(c, c.print("setup-effort-{d}", .{i}));
                     const b = ui.div(c).grow().w(0).h(10).rounded(3).bg(if (i <= at) k.text else k.ink(0.1));
                     defer b.end();
-                    if (b.clicked()) {
+                    if (pressable(c, k, b)) {
                         s.level = i;
                         a.redraw();
                     }
@@ -599,7 +640,7 @@ fn autonomyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
             t = if (on) t.bg(k.card).border(k.border).borderW(1) else t.hover(k.ink(0.05));
             defer t.end();
             ui.text(c, x.label(), set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }));
-            if (t.clicked()) s.autonomy = x;
+            if (pressable(c, k, t)) s.autonomy = x;
         }
     }
     {
@@ -641,7 +682,7 @@ fn notifyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
             ui.text(c, ch.body, set.st(c, 12, .{ .color = k.muted }));
         }
         checkCircle(c, k, picked);
-        if (d.clicked()) s.notify = ch.on;
+        if (pressable(c, k, d)) s.notify = ch.on;
     }
     const note = ui.div(c).column().w(right_w).pt(4);
     defer note.end();
@@ -673,7 +714,7 @@ fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         const rows = [_][4][]const u8{
             .{ "Agents", names.items, "Model", model },
             .{ "Thinking", thinking, "Access", s.autonomy.label() },
-            .{ "Notifications", if (s.notify) "Desktop banners on" else "Off", "", "" },
+            .{ "Notifications", if (s.notify) "Desktop banners on" else "Off", "Project", if (s.project) |i| (if (i < a.spaces.items.len) a.spaces.items[i].name else "None") else "None" },
         };
         for (rows) |row| {
             const r = ui.div(c).row().wFull().gap(16);
@@ -692,7 +733,7 @@ fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         ch = if (on) ch.border(k.text).bg(k.selected) else ch.border(k.border).bg(k.card).hover(k.ink(0.04));
         defer ch.end();
         ui.text(c, label, set.st(c, 13, .{ .color = k.text }));
-        if (ch.clicked()) {
+        if (pressable(c, k, ch)) {
             s.starter = if (on) null else i;
             a.redraw();
         }
@@ -716,4 +757,81 @@ test "autonomy's wire names round trip, and a reply reads" {
 test "the access a level allows grows with it" {
     try testing.expect(Autonomy.read_only.allowed() < Autonomy.workspace.allowed());
     try testing.expectEqual(capabilities.len, Autonomy.full_access.allowed());
+}
+
+fn signInPane(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const gk = @import("view_gaps_kit.zig");
+    const acct = @import("app_account.zig");
+    const cg = a.account.codegraff;
+    const col = ui.div(c).column().w(right_w).gap(12);
+    defer col.end();
+    {
+        const d = card(c, k, cg.signed_in);
+        defer d.end();
+        icons.icon(c, .@"graff-mark", 28, k.text, 0);
+        {
+            const t = ui.div(c).column().grow().w(0).gap(3);
+            defer t.end();
+            ui.text(c, "CodeGraff", set.st(c, 15, .{ .weight = .semibold, .color = k.text }));
+            if (cg.signed_in)
+                status(c, k, true, c.print("Signed in as {s}", .{cg.who orelse "your account"}))
+            else if (cg.pending)
+                status(c, k, false, "Waiting for the browser…")
+            else
+                status(c, k, false, "Not signed in");
+        }
+        checkCircle(c, k, cg.signed_in);
+    }
+    if (!cg.signed_in) {
+        ui.key(c, "setup-sign-in");
+        if (gk.button(c, k, if (cg.pending) "Open the browser again" else "Sign in with CodeGraff", .{ .look = .primary, .h = 34, .icon = .global })) acct.signIn(a);
+    }
+    const note = ui.div(c).column().w(right_w).pt(4);
+    defer note.end();
+    ui.text(c, "Signing in opens your browser. Claude Code and Codex use their own sign-ins.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
+}
+
+fn projectPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
+    const gk = @import("view_gaps_kit.zig");
+    const col = ui.div(c).column().w(right_w).gap(10);
+    defer col.end();
+    const shown = @min(a.spaces.items.len, 4);
+    for (a.spaces.items[0..shown], 0..) |sp, i| {
+        const picked = s.project == i;
+        ui.key(c, c.print("setup-project-{d}", .{i}));
+        const d = card(c, k, picked);
+        defer d.end();
+        icons.icon(c, .folder, 20, k.text, 0);
+        {
+            const t = ui.div(c).column().grow().w(0).gap(2);
+            defer t.end();
+            kit.ellipsisText(c, sp.name, set.st(c, 14, .{ .weight = .medium, .color = k.text }), right_w - 100);
+            kit.ellipsisText(c, sp.path, set.st(c, 12, .{ .color = k.muted }), right_w - 100);
+        }
+        checkCircle(c, k, picked);
+        if (pressable(c, k, d)) s.project = if (picked) null else i;
+    }
+    if (shown == 0) ui.text(c, "No projects yet.", set.st(c, 13, .{ .color = k.muted }));
+    ui.key(c, "setup-add-project");
+    if (gk.button(c, k, "Add a project folder…", .{ .icon = .plus, .h = 34 })) {
+        // Setup closes with what's been answered; the folder sheet opens.
+        finish(a, false);
+        @import("app_open_chooser.zig").open(a, .new_project);
+    }
+    const note = ui.div(c).column().w(right_w).pt(4);
+    defer note.end();
+    ui.text(c, "Next without picking one starts a session with no project.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
+}
+
+test "setup's steps: sign-in first, a project last, then the ready page" {
+    try testing.expectEqual(Step.sign_in, stepAt(0));
+    try testing.expectEqual(Step.agents, stepAt(1));
+    try testing.expectEqual(Step.project, stepAt(questions - 1));
+    try testing.expectEqual(Step.ready, stepAt(questions));
+    try testing.expectEqual(Step.ready, stepAt(99));
+    // Every question appears once.
+    for (std.enums.values(Step)) |x| {
+        if (x == .ready) continue;
+        try testing.expectEqual(@as(usize, 1), std.mem.count(Step, &order, &.{x}));
+    }
 }

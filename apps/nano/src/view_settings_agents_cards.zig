@@ -283,7 +283,7 @@ pub fn autonomyCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         const col = ui.div(c).column().w(tw);
         defer col.end();
         title(c, k, "First-run setup", tw);
-        subtitleIn(c, k, "Agent, effort, autonomy and notifications, one question at a time.", tw);
+        subtitleIn(c, k, "Sign-in, agents, effort, autonomy, notifications and a first project, one step at a time.", tw);
     }
     ui.key(c, "replay-setup");
     if (shots.action(c, k, "Replay setup")) setup.open(a, 0);
