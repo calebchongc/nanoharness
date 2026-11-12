@@ -2161,15 +2161,8 @@ pub const EngineHost = struct {
             .InstallHarness,
             .CompleteAgentLogin,
             .CancelAgentLogin,
-            .CodegraffSandboxAction,
-            .CodegraffCreateSandbox,
-            .CodegraffCreateTemporarySandbox,
-            .SetUpSimulators,
-            .BootSimulator,
-            .ShutdownSimulator,
             .SimulatorInput,
             .LocalhostPageInput,
-            .ApplyUpdate,
             => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
@@ -2248,10 +2241,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"harness\":null,\"model\":null}") };
             },
             .CodegraffSandboxes => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"enabled\":true,\"sandboxes\":[],\"sizes\":[{\"id\":\"standard\",\"cpu\":4,\"memoryGiB\":8,\"diskGiB\":20,\"pricePerHourMicroUsd\":120000,\"default\":true}]}",
-                ) };
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .list, params));
+            },
+            .CodegraffCreateSandbox => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .create, params));
+            },
+            .CodegraffCreateTemporarySandbox => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .create_temporary, params));
+            },
+            .CodegraffSandboxAction => {
+                const sb = @import("sandboxes_host.zig");
+                return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .action, params));
             },
             .CodegraffGithubRunners => {
                 return .{ .unary_json = try self.gpa.dupe(
@@ -3049,18 +3052,26 @@ pub const EngineHost = struct {
                 return .{ .err = .{ .exec_error = "project action not found" } };
             },
             .UpdateStatus => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "targetDeviceId") orelse return .{ .err = .{ .bad_params = "missing targetDeviceId" } };
-                return self.oneStreamItem(false, try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"currentVersion\":{f},\"latestVersion\":{f},\"updateAvailable\":false,\"state\":\"upToDate\",\"host\":{{\"mode\":\"desktop\",\"automatic\":true,\"phase\":\"idle\"}}}}",
-                    .{ json.fmt(build_info.version, .{}), json.fmt(build_info.version, .{}) },
-                ));
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                const u = try upd.forEngine(EngineHost, self);
+                if (call_id != 0) try self.registerWatch(call_id, .doc_messages, upd.watch_target);
+                return self.oneStreamItem(false, try u.statusJson(self.gpa));
             },
-            .CheckForUpdates, .QueueUpdate => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "targetDeviceId") orelse return .{ .err = .{ .bad_params = "missing targetDeviceId" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
+            .CheckForUpdates => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .check));
+            },
+            .QueueUpdate => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .queue));
+            },
+            .ApplyUpdate => {
+                const upd = @import("updates_host.zig");
+                if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
+                return upd.toOutcome(RpcOutcome, try upd.handle(try upd.forEngine(EngineHost, self), self.gpa, .apply));
             },
             .WatchHarnessUpdates => {
                 if (params == .object) {
@@ -3239,7 +3250,20 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"closed\":{}}}", .{closed}) };
             },
             .ListSimulators => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"simulators\":[]}") };
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .list, params));
+            },
+            .SetUpSimulators => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .set_up, params));
+            },
+            .BootSimulator => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .boot, params));
+            },
+            .ShutdownSimulator => {
+                const sims = @import("simulators_host.zig");
+                return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .shutdown, params));
             },
             .WatchSimulatorScreen, .WatchLocalhostPage => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"frame\":null}"));

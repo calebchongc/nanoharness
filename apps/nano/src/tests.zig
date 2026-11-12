@@ -168,6 +168,11 @@ test {
     _ = @import("mobile_parity_tests.zig");
     _ = @import("ios_host.zig");
     _ = @import("view_mobile.zig");
+    _ = @import("proc_seam.zig");
+    _ = @import("simulators_host.zig");
+    _ = @import("tests_rpc_devices.zig");
+    _ = @import("sandboxes_host.zig");
+    _ = @import("updates_host.zig");
 }
 
 test "auth_host.formatRfc3339Ms round-trips 1:1 with rules.parseTime" {
