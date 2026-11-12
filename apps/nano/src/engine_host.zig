@@ -599,6 +599,8 @@ pub const ChatRecord = struct {
     last_completed_peer_only: bool = false,
     /// The running turn's origin is not a person (set when it starts).
     running_turn_peer_only: bool = false,
+    /// `config.sandbox`, when the chat's config named one.
+    sandbox: ?@import("chat_sandbox.zig").Sandbox = null,
     activity_started_at_ms: i64 = 0,
     activity_updated_at_ms: i64 = 0,
     created_at_ms: i64 = 0,
@@ -1278,16 +1280,16 @@ pub const EngineHost = struct {
         }
         if (c.chat_mode) {
             w.print(
-                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}}}",
-                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":true}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
             ) catch {
                 aw.deinit();
                 return;
             };
         } else {
             w.print(
-                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}}}",
-                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
             ) catch {
                 aw.deinit();
                 return;
@@ -3322,6 +3324,11 @@ pub const EngineHost = struct {
                 const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
                 if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
                 const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const sandbox = switch (@import("chat_sandbox.zig").fromConfig(cfg_val.object)) {
+                    .bad => |m| return .{ .err = .{ .bad_params = m } },
+                    .absent => null,
+                    .ok => |sb| sb,
+                };
                 const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
                 const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
                 const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
@@ -3372,6 +3379,7 @@ pub const EngineHost = struct {
                         .cwd = cw_c,
                         .branch = br_c,
                         .parent_chat_id = pa_c,
+                        .sandbox = sandbox,
                         .created_at_ms = self.nowMs(),
                     });
                 }
@@ -3400,6 +3408,11 @@ pub const EngineHost = struct {
                 const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
                 if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
                 const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const sandbox = switch (@import("chat_sandbox.zig").fromConfig(cfg_val.object)) {
+                    .bad => |m| return .{ .err = .{ .bad_params = m } },
+                    .absent => null,
+                    .ok => |sb| sb,
+                };
                 const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
                 const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
                 for (self.chats.items) |*c| {
@@ -3417,12 +3430,13 @@ pub const EngineHost = struct {
                             if (c.reasoning) |old| self.gpa.free(old);
                             c.reasoning = r_copy;
                         }
+                        if (sandbox) |sb| c.sandbox = sb;
                         const eff_model = c.model orelse defaultModelForHarness(c.harness);
                         const eff_reas = c.reasoning orelse "high";
                         if (std.fmt.allocPrint(
                             self.gpa,
-                            "\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}",
-                            .{ json.fmt(c.harness, .{}), json.fmt(eff_model, .{}), json.fmt(eff_reas, .{}) },
+                            "\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}",
+                            .{ json.fmt(c.harness, .{}), json.fmt(eff_model, .{}), json.fmt(eff_reas, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                         )) |inner| {
                             defer self.gpa.free(inner);
                             self.enqueueFieldUpdateOp("chats", chat_id, inner);
@@ -3921,13 +3935,13 @@ pub const EngineHost = struct {
             }
             if (c.chat_mode) {
                 try w.print(
-                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}",
-                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":true}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                 );
             } else {
                 try w.print(
-                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s}}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}), @import("chat_sandbox.zig").member(c.sandbox) },
                 );
             }
         }
@@ -4200,7 +4214,7 @@ pub const EngineHost = struct {
             row_cnt += 1;
             const sc = c.source_context_json orelse "null";
             w.print(
-                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":{}}}}}}}",
+                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}{s},\"chatMode\":{}}}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(c.id, .{}),
@@ -4221,6 +4235,7 @@ pub const EngineHost = struct {
                     json.fmt(c.harness, .{}),
                     json.fmt(c.model, .{}),
                     json.fmt(c.reasoning, .{}),
+                    @import("chat_sandbox.zig").member(c.sandbox),
                     c.chat_mode,
                 },
             ) catch return;
@@ -5143,6 +5158,7 @@ pub const EngineHost = struct {
         sc_json = null;
         rec.archived = archived;
         rec.chat_mode = chat_mode;
+        rec.sandbox = @import("chat_sandbox.zig").fromRow(cfg_obj);
         rec.created_at_ms = created_ms;
         rec.last_message_at_ms = last_msg_ms;
         rec.last_prompt_at_ms = last_prompt_ms;
