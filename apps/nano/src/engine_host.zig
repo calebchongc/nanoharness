@@ -2904,13 +2904,7 @@ pub const EngineHost = struct {
                 const deleted = self.deleteAction(space_id, action_id);
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"deleted\":{}}}", .{deleted}) };
             },
-            .RunProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "actionId") orelse return .{ .err = .{ .bad_params = "missing actionId" } };
-                return .{ .err = .{ .exec_error = "project action not found" } };
-            },
+            .RunProjectAction => return @import("rpcg_terminals.zig").runProjectAction(self, params),
             .UpdateStatus => {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
@@ -3060,55 +3054,11 @@ pub const EngineHost = struct {
                 const routine: ?[]const u8 = if (obj.get("routine")) |rv| (if (rv == .string) rv.string else null) else null;
                 return self.handleRunBot(bot, msg, routine);
             },
-            .OpenTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse "term-1";
-                const cwd = requireStr(obj, "cwd") orelse "/tmp";
-                const cols: u16 = if (obj.get("cols")) |cv| (if (cv == .integer and cv.integer > 0) @intCast(cv.integer) else 80) else 80;
-                const rows: u16 = if (obj.get("rows")) |rv| (if (rv == .integer and rv.integer > 0) @intCast(rv.integer) else 24) else 24;
-                const sess = try self.terminals.getOrCreate(tid, cwd, cols, rows, false);
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"terminalId\":{f},\"cols\":{d},\"rows\":{d}}}",
-                    .{ json.fmt(sess.id, .{}), sess.cols, sess.rows },
-                ) };
-            },
-            .SubscribeTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                if (self.terminals.sessions.getPtr(tid)) |sess| {
-                    return self.oneStreamItem(
-                        false,
-                        try std.fmt.allocPrint(
-                            self.gpa,
-                            "{{\"terminalId\":{f},\"output\":{f},\"exited\":{}}}",
-                            .{ json.fmt(sess.id, .{}), json.fmt(sess.scrollback.items, .{}), sess.exited },
-                        ),
-                    );
-                }
-                return .{ .err = .{ .exec_error = "terminal not found" } };
-            },
-            .WriteTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const data = requireStr(obj, "data") orelse return .{ .err = .{ .bad_params = "missing data" } };
-                const written = try self.terminals.writeInput(tid, data);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"written\":{}}}", .{written}) };
-            },
-            .ResizeTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const cols: u16 = if (obj.get("cols")) |cv| (if (cv == .integer and cv.integer > 0) @intCast(cv.integer) else 80) else 80;
-                const rows: u16 = if (obj.get("rows")) |rv| (if (rv == .integer and rv.integer > 0) @intCast(rv.integer) else 24) else 24;
-                const resized = self.terminals.resize(tid, cols, rows);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"resized\":{}}}", .{resized}) };
-            },
-            .CloseTerminal => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse return .{ .err = .{ .bad_params = "missing terminalId" } };
-                const closed = self.terminals.close(tid);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"closed\":{}}}", .{closed}) };
-            },
+            .OpenTerminal => return @import("rpcg_terminals.zig").openTerminal(self, params),
+            .SubscribeTerminal => return @import("rpcg_terminals.zig").subscribeTerminal(self, call_id, params),
+            .WriteTerminal => return @import("rpcg_terminals.zig").writeTerminal(self, params),
+            .ResizeTerminal => return @import("rpcg_terminals.zig").resizeTerminal(self, params),
+            .CloseTerminal => return @import("rpcg_terminals.zig").closeTerminal(self, params),
             .ListSimulators => {
                 const sims = @import("simulators_host.zig");
                 return sims.toOutcome(RpcOutcome, try sims.handle(try sims.shared(self.io, self.data_dir), self.gpa, .list, params));
@@ -6403,26 +6353,17 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
         try testing.expect(std.mem.indexOf(u8, cmds.unary_json, "\"compact\"") != null);
     }
 
-    // 3. Test OpenTerminal -> WriteTerminal -> ResizeTerminal -> SubscribeTerminal -> CloseTerminal.
+    // 3. Terminal RPCs answer with Rust's shapes and errors (this host has no
+    // I/O, so no PTY opens; rpcg_terminals_tests.zig runs real shells).
     {
-        const open_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\",\"cwd\":\"/tmp\",\"cols\":100,\"rows\":30}", .{});
+        const open_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"chat-parity\",\"cwd\":\"/tmp\",\"cols\":100,\"rows\":30}", .{});
         const open_r = try host.handle("OpenTerminal", open_p);
-        defer gpa.free(open_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, open_r.unary_json, "\"cols\":100") != null);
-
-        const write_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\",\"data\":\"zig version\\n\"}", .{});
-        const write_r = try host.handle("WriteTerminal", write_p);
-        defer gpa.free(write_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, write_r.unary_json, "\"written\":true") != null);
-
+        try testing.expectEqualStrings("could not open a pty: the engine has no I/O", open_r.err.exec_error);
         const sub_p = try json.parseFromSliceLeaky(json.Value, a, "{\"terminalId\":\"t-parity\"}", .{});
-        var sub_r = try host.handle("SubscribeTerminal", sub_p);
-        defer sub_r.stream_items_json.deinit(gpa);
-        try testing.expect(std.mem.indexOf(u8, sub_r.stream_items_json.items[0], "zig version") != null);
-
+        const sub_r = try host.handle("SubscribeTerminal", sub_p);
+        try testing.expectEqualStrings("Terminal not found", sub_r.err.exec_error);
         const close_r = try host.handle("CloseTerminal", sub_p);
-        defer gpa.free(close_r.unary_json);
-        try testing.expect(std.mem.indexOf(u8, close_r.unary_json, "\"closed\":true") != null);
+        try testing.expectEqualStrings("Terminal not found", close_r.err.exec_error);
     }
 
     // 4. Test Lean Theorem `complete_delete_zero_leak_and_no_resurrection`:
