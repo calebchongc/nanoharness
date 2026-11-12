@@ -963,6 +963,7 @@ pub const EngineHost = struct {
         }
         for (self.device_poll_threads.items) |th| th.join();
         self.device_poll_threads.deinit(self.gpa);
+        @import("updates_host.zig").releaseHost(self);
 
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);

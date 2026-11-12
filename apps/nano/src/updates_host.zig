@@ -77,6 +77,11 @@ pub fn headlessArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "harness-{s}-{s}-{s}.tar.gz", .{ version, k.os, k.arch });
 }
 
+/// `harness-<ver>-macos-<arch>-app.tar.gz` (`mac_app_artifact`).
+pub fn macAppArtifactAlloc(gpa: Allocator, version: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "harness-{s}-macos-{s}-app.tar.gz", .{ version, platformKey().arch });
+}
+
 pub fn autoUpdateFrom(value: ?[]const u8) bool {
     const v = std.mem.trim(u8, value orelse return true, " \t\r\n");
     var buf: [8]u8 = undefined;
@@ -435,6 +440,44 @@ pub const Updater = struct {
         return null;
     }
 
+    /// `stage_mac_app`: download and unpack the app tarball into
+    /// `{data_dir}/updates/<ver>/Harness.app` (idempotent); the staged bundle's
+    /// path in `arena`, or why not. The manifest must give the tarball's
+    /// SHA-256: an app update is never installed unverified.
+    pub fn stageMacApp(self: *Updater, arena: Allocator, m: Manifest, data_dir: []const u8) !union(enum) { ok: []const u8, err: []const u8 } {
+        if (builtin.os.tag != .macos)
+            return .{ .err = try std.fmt.allocPrint(arena, "macOS app updates are not supported on {s}", .{@tagName(builtin.os.tag)}) };
+        const file = try macAppArtifactAlloc(arena, m.version);
+        if (m.sha256For(file) == null)
+            return .{ .err = try std.fmt.allocPrint(arena, "stable macOS update is missing the {s} checksum", .{file}) };
+        if (!validVersion(m.version)) return .{ .err = "the release names an invalid version" };
+        const io = self.io orelse return .{ .err = "updates need file access" };
+        const dir = try std.fmt.allocPrint(arena, "{s}/updates/{s}", .{ data_dir, m.version });
+        if (try stagedMacApp(arena, io, dir)) |staged| return .{ .ok = staged };
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |e|
+            return .{ .err = try std.fmt.allocPrint(arena, "creating {s}: {s}", .{ dir, @errorName(e) }) };
+        const tarball = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, file });
+        if (try self.download(arena, io, m, file, tarball)) |e| return .{ .err = e };
+        var out = try self.runner.run(arena, .{ .argv = &.{ "tar", "-xzf", tarball, "-C", dir }, .timeout_ms = 10 * 60_000 });
+        if (!out.ok()) {
+            return .{ .err = try std.fmt.allocPrint(arena, "tar -xzf {s} -C {s} failed ({s}): {s}", .{
+                tarball, dir, @tagName(out.term), std.mem.trim(u8, out.stderr, " \t\r\n"),
+            }) };
+        }
+        std.Io.Dir.cwd().deleteFile(io, tarball) catch {};
+        if (try stagedMacApp(arena, io, dir)) |staged| return .{ .ok = staged };
+        return .{ .err = try std.fmt.allocPrint(arena, "app tarball {s} did not contain Harness.app", .{file}) };
+    }
+
+    fn stagedMacApp(arena: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+        for ([_][]const u8{ "Harness.app", "Harnesser.app" }) |name| {
+            const bundle = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, name });
+            if (exists(io, try std.fmt.allocPrint(arena, "{s}/Contents/MacOS/harness", .{bundle}))) return bundle;
+        }
+        return null;
+    }
+
     /// Atomically repoint `app_root/current` at `app_root/<ver>`.
     pub fn applyHeadless(self: *Updater, arena: Allocator, app_root: []const u8, version: []const u8) !?[]const u8 {
         const io = self.io orelse return "updates need file access";
@@ -573,9 +616,13 @@ pub fn handle(u: *Updater, reply_gpa: Allocator, method: Method) !Reply {
 
 // ---------------------------------------------------------------- the engine's wiring
 
+/// The engine's updater, for one host at a time: set up by `forEngine`,
+/// dropped by `releaseHost` when that host goes away.
 const Engine = struct {
     updater: Updater,
-    sys_runner: proc.SystemRunner,
+    /// The host's I/O; null for a host without one (then nothing runs).
+    io: ?std.Io,
+    sys_runner: ?proc.SystemRunner,
     host: *anyopaque,
     started: bool = false,
 };
@@ -780,18 +827,20 @@ pub fn downloadTo(gpa: Allocator, io: std.Io, url: []const u8, dest: []const u8,
     return fetchInto(gpa, io, url, limits, &fw.interface, &hash);
 }
 
-var engine_io: std.Io = undefined;
-
 /// The engine's updater for `host` (an `*EngineHost`), started once: the
-/// release check thread runs for managed and app installs.
+/// release check thread runs for managed and app installs. Another host's
+/// updater is replaced (its check thread, if any, must have ended).
 pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
-    if (engine_state) |*e| return &e.updater;
+    if (engine_state) |*e| {
+        if (e.host == @as(*anyopaque, host)) return &e.updater;
+        if (e.started) return error.UpdaterInUse;
+        freeState();
+    }
     const gpa = std.heap.smp_allocator;
     var install: Install = .{ .kind = .unmanaged };
     var exe_buf: [4096]u8 = undefined;
     var root_buf: [4096]u8 = undefined;
     if (host.io) |io| {
-        engine_io = io;
         if (std.process.executablePath(io, &exe_buf)) |n| {
             const found = detectInstallFrom(exe_buf[0..n], proc.getenv("HOME"), builtin.os.tag, &root_buf, io, isDevBundleAt);
             install = .{ .kind = found.kind, .path = try gpa.dupe(u8, found.path) };
@@ -806,7 +855,8 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
     };
     engine_state = .{
         .host = host,
-        .sys_runner = .{ .io = engine_io },
+        .io = host.io,
+        .sys_runner = if (host.io) |io| .{ .io = io } else null,
         .updater = .{
             .gpa = gpa,
             .io = host.io,
@@ -815,7 +865,7 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
             .edge_url = try gpa.dupe(u8, host.auth.edge_url orelse ""),
             .current_version = @import("build_info").version,
             .releases_override = override,
-            .http = .{ .ctx = &engine_io, .get_fn = stdGet, .download_fn = stdDownload },
+            .http = .{ .get_fn = stdGet, .download_fn = stdDownload },
             .runner = .{ .run_fn = noSpawn },
             .restarter = .{ .restart_fn = Wiring(Host).restart },
             .quiescent_fn = Wiring(Host).quiescent,
@@ -824,7 +874,13 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
     const e = &engine_state.?;
     e.updater.quiescent_ctx = host;
     e.updater.restarter.ctx = host;
-    if (host.io != null) e.updater.runner = e.sys_runner.runner();
+    if (e.io != null) {
+        e.updater.http.ctx = &e.io.?;
+        e.updater.runner = e.sys_runner.?.runner();
+    } else {
+        // No I/O, no network: a check fails instead of reading an unset `Io`.
+        e.updater.http = .{ .get_fn = noNetwork };
+    }
     if (host.io != null and install.checksReleases()) {
         _ = host.bg_workers_active.fetchAdd(1, .acq_rel);
         if (std.Thread.spawn(.{}, Wiring(Host).loop, .{host})) |th| {
@@ -835,6 +891,28 @@ pub fn forEngine(comptime Host: type, host: *Host) !*Updater {
         }
     }
     return &e.updater;
+}
+
+fn noNetwork(_: ?*anyopaque, _: Allocator, _: []const u8) anyerror!HttpReply {
+    return error.NoNetworkIo;
+}
+
+fn freeState() void {
+    if (engine_state) |*e| {
+        e.updater.deinit();
+        if (e.updater.install.path.len > 0) std.heap.smp_allocator.free(e.updater.install.path);
+        std.heap.smp_allocator.free(e.updater.edge_url);
+        if (e.updater.releases_override) |o| std.heap.smp_allocator.free(o);
+    }
+    engine_state = null;
+}
+
+/// `host` is going away (its background workers have ended): forget its
+/// updater, so nothing keeps a pointer to it.
+pub fn releaseHost(host: *anyopaque) void {
+    const e = engine_state orelse return;
+    if (e.host != host) return;
+    freeState();
 }
 
 /// Whether the engine's updater is set up (the engine does it at start-up).
@@ -854,14 +932,8 @@ pub fn publishStatus(comptime Host: type, host: *Host) void {
 
 /// Tests: forget the engine's updater (only when no check thread runs).
 pub fn resetForTests() void {
-    if (engine_state) |*e| {
-        if (e.started) return;
-        e.updater.deinit();
-        if (e.updater.install.path.len > 0) std.heap.smp_allocator.free(e.updater.install.path);
-        std.heap.smp_allocator.free(e.updater.edge_url);
-        if (e.updater.releases_override) |o| std.heap.smp_allocator.free(o);
-    }
-    engine_state = null;
+    if (engine_state) |e| if (e.started) return;
+    freeState();
 }
 
 fn noSpawn(_: ?*anyopaque, gpa: Allocator, _: proc.Request) Allocator.Error!proc.Output {
@@ -1039,7 +1111,7 @@ fn Wiring(comptime Host: type) type {
                 var i: usize = 1;
                 while (i < argc) : (i += 1) argv.append(gpa, std.mem.span(raw[i])) catch return;
             } else if (builtin.os.tag == .linux) {
-                const io = engine_io;
+                const io = (engine_state orelse return).io orelse return;
                 const text = std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/cmdline", gpa, .limited(1 << 20)) catch return;
                 var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\x00"), 0);
                 _ = it.next();
@@ -1550,4 +1622,72 @@ test "fix-sec 7: a managed update streams the real download into place" {
     defer gpa.free(r);
     try testing.expectEqualStrings("{\"ok\":true,\"version\":\"0.2.101\"}", r);
     try testing.expectEqual(@as(usize, 1), fr.count);
+}
+
+test "fix-sec 8: the engine's updater belongs to one host and goes with it" {
+    const engine_host = @import("engine_host.zig");
+    resetForTests();
+    defer resetForTests();
+    {
+        var first = try engine_host.EngineHost.init(testing.allocator, "dev-first", "Synthetic");
+        defer first.deinit();
+        _ = try forEngine(engine_host.EngineHost, &first);
+        try testing.expectEqual(@as(?*anyopaque, &first), configuredHost());
+    }
+    // The host went away: nothing points at it any more.
+    try testing.expectEqual(@as(?*anyopaque, null), configuredHost());
+    var second = try engine_host.EngineHost.init(testing.allocator, "dev-second", "Synthetic");
+    defer second.deinit();
+    const u = try forEngine(engine_host.EngineHost, &second);
+    try testing.expectEqual(@as(?*anyopaque, &second), configuredHost());
+    // Without I/O a check fails cleanly instead of touching an unset `Io`.
+    try testing.expect(!(try u.checkOnce(1)));
+    try testing.expectEqual(Phase.failed, u.phase);
+}
+
+const AppTarEffect = struct {
+    fn unpack(_: ?*anyopaque, req: proc.Request) void {
+        // argv: tar -xzf <tarball> -C <dir>
+        var buf: [1024]u8 = undefined;
+        const d = std.fmt.bufPrint(&buf, "{s}/Harness.app/Contents/MacOS", .{req.argv[4]}) catch return;
+        std.Io.Dir.cwd().createDirPath(testing.io, d) catch return;
+        var b2: [1024]u8 = undefined;
+        const p = std.fmt.bufPrint(&b2, "{s}/harness", .{d}) catch return;
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = "#!/bin/sh\n" }) catch return;
+    }
+};
+
+test "fix-sec 8: stage_mac_app requires the tarball's checksum and stages Harness.app" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(data_dir);
+    const artifact = try macAppArtifactAlloc(gpa, "0.2.101");
+    defer gpa.free(artifact);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("app bytes", &digest, .{});
+    var fh: FakeHttp = .{ .routes = &.{.{ .suffix = "-app.tar.gz", .status = 200, .body = "app bytes" }} };
+    var fr: FakeRestart = .{};
+    var tar = proc.FakeRunner.init(gpa, &.{.{ .prefix = "tar -xzf", .effect = AppTarEffect.unpack }});
+    defer tar.deinit();
+    var u = testUpdater(.mac_app, "/Applications/Harness.app", fh.http(), tar.runner(), fr.restarter(), testing.io);
+    defer u.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const unverified = try json.parseFromSliceLeaky(json.Value, a, "{\"files\":{}}", .{});
+    const missing = try u.stageMacApp(a, .{ .version = "0.2.101", .files = unverified.object.get("files").?.object }, data_dir);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "stable macOS update is missing the {s} checksum", .{artifact}), missing.err);
+    try testing.expectEqual(@as(usize, 0), fh.calls);
+
+    const files_text = try std.fmt.allocPrint(a, "{{\"files\":{{\"{s}\":{{\"sha256\":\"{s}\"}}}}}}", .{ artifact, &std.fmt.bytesToHex(digest, .lower) });
+    const verified = try json.parseFromSliceLeaky(json.Value, a, files_text, .{});
+    const staged = try u.stageMacApp(a, .{ .version = "0.2.101", .files = verified.object.get("files").?.object }, data_dir);
+    try testing.expect(std.mem.endsWith(u8, staged.ok, "/updates/0.2.101/Harness.app"));
+    // Staged once: a second call reuses it.
+    _ = try u.stageMacApp(a, .{ .version = "0.2.101", .files = verified.object.get("files").?.object }, data_dir);
+    try testing.expectEqual(@as(usize, 1), tar.calls.items.len);
 }
