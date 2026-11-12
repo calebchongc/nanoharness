@@ -20,6 +20,9 @@ const RpcOutcome = common.RpcOutcome;
 const min_title_chars: usize = 2;
 const title_chars: usize = 90;
 const head_lines: usize = 400;
+/// The longest head line buffered: a longer one (a pasted image, say) is
+/// skipped as unreadable rather than held in memory.
+const max_head_line: usize = 4 * 1024 * 1024;
 const graff_suffix = ".transcript.jsonl";
 
 pub const Source = enum {
@@ -149,9 +152,21 @@ const HeadReader = struct {
         while (!self.done and self.parsed < head_lines) {
             self.line.clearRetainingCapacity();
             const r = &self.reader.interface;
-            _ = r.streamDelimiterLimit(&self.line.writer, '\n', .limited(64 * 1024 * 1024)) catch {
-                self.done = true;
-                return null;
+            _ = r.streamDelimiterLimit(&self.line.writer, '\n', .limited(max_head_line)) catch |err| switch (err) {
+                error.StreamTooLong => {
+                    // Drop the rest of the line without buffering it.
+                    self.line.deinit();
+                    self.line = .init(self.gpa);
+                    _ = r.discardDelimiterInclusive('\n') catch {
+                        self.done = true;
+                        return null;
+                    };
+                    continue;
+                },
+                else => {
+                    self.done = true;
+                    return null;
+                },
             };
             // Consume the delimiter, or note the end of the file.
             if (r.buffered().len > 0) r.toss(1) else self.done = true;
@@ -420,6 +435,9 @@ fn discoverGraff(gpa: Allocator, io: std.Io, projects: []const []const u8, cwd: 
 pub const Roots = struct {
     claude_dir: []const u8,
     codex_home: []const u8,
+    /// Project folders to look in for `.graff/sessions`, besides `cwd` and the
+    /// chats' folders (`Roots::projects`; the engine sets none).
+    projects: []const []const u8 = &.{},
 };
 
 /// `discover`: every tool's sessions, newest write first.
@@ -438,6 +456,20 @@ pub fn discover(gpa: Allocator, io: std.Io, roots: Roots, projects: []const []co
         }
     }.newer);
     return found;
+}
+
+/// `ExternalHistory::projects`: `cwd`, then `Roots::projects`, then every
+/// chat's folder, each once.
+pub fn projectFolders(gpa: Allocator, out: *std.ArrayList([]const u8), cwd: ?[]const u8, roots_projects: []const []const u8, chats: anytype) !void {
+    if (cwd) |c| try addProject(gpa, out, c);
+    for (roots_projects) |p| try addProject(gpa, out, p);
+    for (chats) |chat| if (chat.cwd) |c| try addProject(gpa, out, c);
+}
+
+fn addProject(gpa: Allocator, out: *std.ArrayList([]const u8), p: []const u8) !void {
+    if (p.len == 0) return;
+    for (out.items) |have| if (std.mem.eql(u8, have, p)) return;
+    try out.append(gpa, p);
 }
 
 fn writeSession(w: *std.Io.Writer, s: Session) !void {
@@ -466,16 +498,10 @@ pub fn externalHistoryList(host: *engine_host.EngineHost, params: json.Value) !R
     // native session ids Harness itself started.
     var projects: std.ArrayList([]const u8) = .empty;
     defer projects.deinit(gpa);
-    if (cwd) |c| if (c.len > 0) try projects.append(gpa, c);
-    for (host.chats.items) |chat| {
-        const c = chat.cwd orelse continue;
-        if (c.len == 0) continue;
-        for (projects.items) |p| {
-            if (std.mem.eql(u8, p, c)) break;
-        } else try projects.append(gpa, c);
-    }
+    const roots: Roots = .{ .claude_dir = claude_dir, .codex_home = codex_home };
+    try projectFolders(gpa, &projects, cwd, roots.projects, host.chats.items);
 
-    var found = try discover(gpa, io, .{ .claude_dir = claude_dir, .codex_home = codex_home }, projects.items, cwd);
+    var found = try discover(gpa, io, roots, projects.items, cwd);
     defer {
         for (found.items) |*s| s.deinit(gpa);
         found.deinit(gpa);
@@ -672,4 +698,36 @@ test "rpcw_history ExternalHistoryList hides sessions already in Harness" {
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("fresh", rows[0].object.get("id").?.string);
     try testing.expect(rows[0].object.get("cwd").? == .null);
+}
+
+test "fix-sec 14: a huge head line is skipped without being held in memory" {
+    const f = try Fx.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const big = try gpa.alloc(u8, max_head_line + 4096);
+    defer gpa.free(big);
+    @memset(big, 'x');
+    const text = try std.mem.concat(gpa, u8, &.{ big, "\n{\"cwd\":\"/work/synthetic\"}\n" });
+    defer gpa.free(text);
+    try f.write("history.jsonl", text);
+    const path = try std.fs.path.join(gpa, &.{ f.base, "history.jsonl" });
+    defer gpa.free(path);
+    const r = HeadReader.open(gpa, testing.io, path).?;
+    defer r.close();
+    const v = r.next() orelse return error.TestExpectedLine;
+    try testing.expectEqualStrings("/work/synthetic", strField(v, "cwd").?);
+    try testing.expect(r.line.writer.buffer.len <= max_head_line + 64 * 1024);
+}
+
+test "fix-sec 14: graff project folders: cwd, then the roots' projects, then chats, each once" {
+    const gpa = testing.allocator;
+    var out: std.ArrayList([]const u8) = .empty;
+    defer out.deinit(gpa);
+    const Chat = struct { cwd: ?[]const u8 };
+    const chats = [_]Chat{ .{ .cwd = "/work/b" }, .{ .cwd = null }, .{ .cwd = "/work/a" }, .{ .cwd = "" } };
+    try projectFolders(gpa, &out, "/work/a", &.{ "/work/roots", "/work/a" }, &chats);
+    try testing.expectEqual(@as(usize, 3), out.items.len);
+    try testing.expectEqualStrings("/work/a", out.items[0]);
+    try testing.expectEqualStrings("/work/roots", out.items[1]);
+    try testing.expectEqualStrings("/work/b", out.items[2]);
 }
