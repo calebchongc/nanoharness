@@ -2393,7 +2393,8 @@ pub const EngineHost = struct {
                 const op = requireStr(obj, "op") orelse return .{ .err = .{ .bad_params = "missing op" } };
                 return self.handleMutate(op, obj);
             },
-            .WatchPreviews, .WatchTransfers => {
+            .WatchPreviews => return @import("previews_host.zig").watch(self, call_id, params),
+            .WatchTransfers => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "[]"));
             },
             .WatchConnectivity => {
