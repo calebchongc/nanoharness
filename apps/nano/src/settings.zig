@@ -646,8 +646,14 @@ pub const Store = struct {
         s.fresh = false;
         const own = s.path orelse return;
         const tmp = std.fmt.allocPrint(a, "{s}.nano-tmp", .{own}) catch return;
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = body }) catch return;
-        std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), own, io) catch {};
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = body }) catch |err| {
+            std.log.warn("settings save failed: {s}: {s}", .{ own, @errorName(err) });
+            return;
+        };
+        std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), own, io) catch |err| {
+            std.log.warn("settings save failed: {s}: {s}", .{ own, @errorName(err) });
+            std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        };
     }
 
     /// Reads what the file says; what it doesn't say keeps its default.
@@ -1025,6 +1031,24 @@ test "Nano keeps its own settings and starts by project without rewriting Harnes
     defer restored.deinit();
     try testing.expectEqual(Organization.by_device, restored.organization());
     try testing.expect(!restored.get(.sound_enabled));
+}
+
+test "a migrated copy that can't be saved is reported and leaves no temporary file" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = legacy_settings_file, .data = "{\"soundEnabled\":false}" });
+    // Nano's own path is taken by a folder, so the rename can't land.
+    try tmp.dir.createDirPath(io, settings_file ++ "/occupied");
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    var s = Store.openIn(testing.allocator, io, base);
+    defer s.deinit();
+    try testing.expectEqual(Organization.by_project, s.organization());
+    try testing.expect(!s.get(.sound_enabled));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, settings_file ++ ".nano-tmp", .{}));
 }
 
 test "sections in the GPUI app's order, groups and saved keys" {

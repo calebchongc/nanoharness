@@ -310,8 +310,23 @@ pub fn setupAction(host: *EngineHost, space_id: []const u8) ?*const engine_host.
 /// `,"setupAction":{…}` (or `,"setupError":"…"` when it can't start) to `w`.
 /// Writes nothing when the space has no setup Action.
 pub fn writeWorktreeSetup(host: *EngineHost, w: *std.Io.Writer, space_id: []const u8, project_root: []const u8, worktree_path: []const u8) !void {
-    const action = setupAction(host, space_id) orelse return;
     const io = host.io orelse return;
+    // The persisted store (`project-actions.json`, rpcw_actions.zig) is where
+    // Actions live; `host.actions` is only an in-memory fallback.
+    var arena = std.heap.ArenaAllocator.init(host.gpa);
+    defer arena.deinit();
+    var persisted: engine_host.ProjectActionRecord = undefined;
+    const action: *const engine_host.ProjectActionRecord = if (@import("rpcw_actions.zig").persistedSetupAction(host, arena.allocator(), space_id)) |act| blk: {
+        persisted = .{
+            .id = @constCast(act.id),
+            .space_id = @constCast(space_id),
+            .name = @constCast(act.name),
+            .command = @constCast(act.command),
+            .icon = @constCast(@tagName(act.icon)),
+            .run_on_worktree_create = true,
+        };
+        break :blk &persisted;
+    } else setupAction(host, space_id) orelse return;
     const root = common.canonicalize(host.gpa, io, worktree_path) orelse try host.gpa.dupe(u8, worktree_path);
     defer host.gpa.free(root);
     switch (try launchAction(host, action, project_root, root, 80, 24, true)) {

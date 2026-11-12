@@ -869,8 +869,8 @@ pub const EngineHost = struct {
     workspace_scope: []const u8 = "synced",
     keep_awake_enabled: bool = false,
     autonomy_level: []u8,
-    graff_draft_subagents: bool = true,
-    graff_compact_at: i64 = 80,
+    graff_draft_subagents: bool = false,
+    graff_compact_at: i64 = 0,
     sidebar_sort_by: []u8,
     sidebar_group_by: []u8,
     sync_budget: SyncBudget = .{},
@@ -908,7 +908,7 @@ pub const EngineHost = struct {
         errdefer gpa.free(did);
         const dname = try gpa.dupe(u8, device_name);
         errdefer gpa.free(dname);
-        const auton = try gpa.dupe(u8, "workspace");
+        const auton = try gpa.dupe(u8, "full-access");
         errdefer gpa.free(auton);
         const sort_by = try gpa.dupe(u8, "updated");
         errdefer gpa.free(sort_by);
@@ -940,10 +940,12 @@ pub const EngineHost = struct {
         const copy = try self.gpa.dupe(u8, dir);
         if (self.data_dir) |old| self.gpa.free(old);
         self.data_dir = copy;
+        @import("rpcw_settings.zig").loadInto(self);
     }
 
     pub fn deinit(self: *EngineHost) void {
         self.stop_requested = true;
+        @import("rpcw_actions.zig").shutdown();
         turn_host.shutdownHost(self);
         _ = self.device_poll_gen.fetchAdd(1, .acq_rel);
         if (self.oauth_capture) |cap| {
@@ -966,6 +968,7 @@ pub const EngineHost = struct {
         for (self.device_poll_threads.items) |th| th.join();
         self.device_poll_threads.deinit(self.gpa);
         @import("updates_host.zig").releaseHost(self);
+        @import("rpcw_keep_awake.zig").release();
 
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);
@@ -1584,6 +1587,7 @@ pub const EngineHost = struct {
     }
 
     pub fn broadcastWatch(self: *EngineHost, kind: WatchKind, target_id: ?[]const u8, payload_json: []const u8) !void {
+        if (kind == .sessions) @import("rpcw_keep_awake.zig").follow(self);
         for (self.watches.items) |w| {
             if (w.kind != kind) continue;
             if (target_id) |tid| {
@@ -1609,7 +1613,7 @@ pub const EngineHost = struct {
     /// Insert `full_path -> bytes` into `committed_uploads`, evicting the oldest entry
     /// when `committed_uploads.count() >= max_committed_uploads_cache` (Lean Theorem
     /// `commit_stream_always_bounded`). Takes ownership of `full_path` and `bytes`.
-    fn insertCommittedUploadBounded(self: *EngineHost, full_path: []u8, bytes: []u8) !void {
+    pub fn insertCommittedUploadBounded(self: *EngineHost, full_path: []u8, bytes: []u8) !void {
         if (self.committed_uploads.fetchRemove(full_path)) |old| {
             self.gpa.free(old.key);
             self.gpa.free(old.value);
@@ -1703,8 +1707,9 @@ pub const EngineHost = struct {
                 if (doc.local_seq > 0 or self.store.loadSnapshot(kv.key) != null) {
                     if (doc.exportSnapshot(self.gpa)) |snap| {
                         defer self.gpa.free(snap);
-                        self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch {};
-                    } else |_| {}
+                        self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch |err|
+                            std.log.warn("snapshot save failed: chat={s} error={s}", .{ kv.key, @errorName(err) });
+                    } else |err| std.log.warn("snapshot export failed: chat={s} error={s}", .{ kv.key, @errorName(err) });
                 }
                 self.evicted_docs_total += 1;
             } else {
@@ -2012,55 +2017,7 @@ pub const EngineHost = struct {
                 try gop.value_ptr.appendSlice(self.gpa, decoded);
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
-            .UploadCommit => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const upload_id = requireStr(obj, "uploadId") orelse return .{ .err = .{ .bad_params = "missing uploadId" } };
-                const raw_name = requireStr(obj, "fileName") orelse "attachment.bin";
-                const base_name = std.fs.path.basename(raw_name);
-                const safe_name = if (base_name.len > 0) base_name else "attachment.bin";
-
-                var bytes: []u8 = &.{};
-                if (self.staged_uploads.fetchRemove(upload_id)) |kv| {
-                    self.gpa.free(kv.key);
-                    var list = kv.value;
-                    errdefer list.deinit(self.gpa);
-                    bytes = try list.toOwnedSlice(self.gpa);
-                } else {
-                    bytes = try self.gpa.dupe(u8, "");
-                }
-                var transferred = false;
-                errdefer if (!transferred) self.gpa.free(bytes);
-
-                const dir_path = if (self.data_dir) |dd|
-                    try std.fmt.allocPrint(self.gpa, "{s}/uploads", .{std.mem.trimEnd(u8, dd, "/")})
-                else
-                    try self.gpa.dupe(u8, "/tmp/harness-zig-live/uploads");
-                defer self.gpa.free(dir_path);
-                if (self.io) |io| {
-                    std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
-                }
-                const full_path = try std.fmt.allocPrint(self.gpa, "{s}/{s}-{s}", .{ dir_path, upload_id, safe_name });
-                errdefer if (!transferred) self.gpa.free(full_path);
-
-                if (self.io) |io| {
-                    if (std.Io.Dir.cwd().createFile(io, full_path, .{ .truncate = true })) |f| {
-                        defer f.close(io);
-                        f.writeStreamingAll(io, bytes) catch {};
-                    } else |_| {}
-                }
-
-                // Allocate reply BEFORE inserting into committed_uploads (Lean Theorem `safe_commit_never_double_frees_or_leaks`).
-                const reply_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"path\":{f}}}",
-                    .{json.fmt(full_path, .{})},
-                );
-                errdefer self.gpa.free(reply_json);
-
-                try self.insertCommittedUploadBounded(full_path, bytes);
-                transferred = true;
-                return .{ .unary_json = reply_json };
-            },
+            .UploadCommit => return @import("rpcw_uploads.zig").commit(self, params),
             .ReadAttachmentChunk => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
@@ -2112,7 +2069,7 @@ pub const EngineHost = struct {
                     "[{\"name\":\"compact\",\"description\":\"Compact conversation history\"},{\"name\":\"clear\",\"description\":\"Start a fresh chat\"}]",
                 ) };
             },
-            .TakeProjectActionSetup => return @import("rpcw_project_action_setup.zig").takeProjectActionSetup(self, params),
+            .TakeProjectActionSetup => return @import("rpcw_actions.zig").takeSetup(self, params),
             .ListAgentAccounts => {
                 if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     const force_usage: bool = if (requireObj(params)) |obj|
@@ -2121,24 +2078,9 @@ pub const EngineHost = struct {
                         true;
                     return .{ .unary_json = try self.agent_accounts.listAgentAccountsJson(self.io, self.nowMs(), force_usage) };
                 }
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"accounts\":[" ++
-                        "{\"id\":\"graff-local\",\"harness\":\"graff\",\"email\":\"local@codegraff.com\",\"displayName\":\"CodeGraff\",\"planLabel\":\"Max\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.12}]}," ++
-                        "{\"id\":\"claude-local\",\"harness\":\"claude-code\",\"displayName\":\"Claude Code CLI\",\"planLabel\":\"Max\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.18}]}," ++
-                        "{\"id\":\"codex-local\",\"harness\":\"codex\",\"displayName\":\"Codex CLI\",\"planLabel\":\"Pro\",\"active\":true,\"switchable\":false,\"usageWindows\":[{\"label\":\"5-hour window\",\"usedFraction\":0.05}]}" ++
-                        "],\"warnings\":[]}",
-                ) };
+                return @import("rpcw_usage.zig").noHomeAccounts(self.gpa);
             },
-            .CodegraffUsage => {
-                if (self.auth.codegraff_client_id != null) {
-                    return .{ .unary_json = try self.auth.fetchCodegraffUsageJson(self.io) };
-                }
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"email\":\"local@codegraff.com\",\"tier\":\"Max\",\"credits_micro_usd\":50000000,\"spend_30d_micro_usd\":1250000,\"requests_30d\":48,\"key_spend_monthly_micro_usd\":0,\"key_budget_resets_at\":\"\"}",
-                ) };
-            },
+            .CodegraffUsage => return @import("rpcw_usage.zig").codegraffUsage(self),
             .CodegraffJobs => {
                 if (self.auth.codegraff_client_id != null) {
                     return .{ .unary_json = try self.auth.fetchCodegraffJobsJson(self.io) };
@@ -2182,71 +2124,16 @@ pub const EngineHost = struct {
             => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
-            .GetAutonomy => {
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"autonomy\":{f},\"chosen\":true}}",
-                    .{json.fmt(self.autonomy_level, .{})},
-                ) };
-            },
-            .SetAutonomy => {
-                if (requireObj(params)) |obj| {
-                    if (requireStr(obj, "autonomy")) |lvl| {
-                        const copy = try self.gpa.dupe(u8, lvl);
-                        self.gpa.free(self.autonomy_level);
-                        self.autonomy_level = copy;
-                    }
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"autonomy\":{f},\"chosen\":true}}",
-                    .{json.fmt(self.autonomy_level, .{})},
-                ) };
-            },
-            .GetKeepAwake => {
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"enabled\":{},\"supported\":true}}",
-                    .{self.keep_awake_enabled},
-                ) };
-            },
-            .SetKeepAwake => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("enabled")) |v| if (v == .bool) {
-                        self.keep_awake_enabled = v.bool;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"enabled\":{},\"supported\":true}}",
-                    .{self.keep_awake_enabled},
-                ) };
-            },
-            .GetGraffDraftSubagents => {
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
-            },
-            .SetGraffDraftSubagents => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("enabled")) |v| if (v == .bool) {
-                        self.graff_draft_subagents = v.bool;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
-            },
-            .GetGraffCompactAt => {
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
-            },
-            .SetGraffCompactAt => {
-                if (requireObj(params)) |obj| {
-                    if (obj.get("percent")) |v| if (v == .integer) {
-                        self.graff_compact_at = v.integer;
-                    };
-                }
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
-            },
-            .GetTitleSettings, .SetTitleSettings => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"harness\":null,\"model\":null}") };
-            },
+            .GetAutonomy => return @import("rpcw_settings.zig").getAutonomy(self),
+            .SetAutonomy => return @import("rpcw_settings.zig").setAutonomy(self, params),
+            .GetKeepAwake => return @import("rpcw_settings.zig").getKeepAwake(self),
+            .SetKeepAwake => return @import("rpcw_settings.zig").setKeepAwake(self, params),
+            .GetGraffDraftSubagents => return @import("rpcw_settings.zig").getGraffDraftSubagents(self),
+            .SetGraffDraftSubagents => return @import("rpcw_settings.zig").setGraffDraftSubagents(self, params),
+            .GetGraffCompactAt => return @import("rpcw_settings.zig").getGraffCompactAt(self),
+            .SetGraffCompactAt => return @import("rpcw_settings.zig").setGraffCompactAt(self, params),
+            .GetTitleSettings => return @import("rpcw_settings.zig").getTitleSettings(self),
+            .SetTitleSettings => return @import("rpcw_settings.zig").setTitleSettings(self, params),
             .CodegraffSandboxes => {
                 const sb = @import("sandboxes_host.zig");
                 return sb.toOutcome(RpcOutcome, try sb.handle(sb.engineCtx(self.io, self.auth.codegraff_api_key, self.auth.codegraff_gateway, self.data_dir), self.gpa, .list, params));
@@ -2327,12 +2214,7 @@ pub const EngineHost = struct {
             .FetchAll => return @import("rpcg_rpc.zig").fetchAll(self, params),
             .SwitchRef => return @import("rpcg_rpc.zig").switchRef(self, params),
             .GetCheckoutFileDiffText => return @import("rpcg_rpc.zig").getCheckoutFileDiffText(self, params),
-            .ListDrives => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"drives\":[{\"name\":\"Macintosh HD\",\"path\":\"/\"}]}",
-                ) };
-            },
+            .ListDrives => return @import("rpcw_workspace_files.zig").listDrives(self),
             .ListFolders => {
                 const req_path = if (requireObj(params)) |obj| (requireStr(obj, "path") orelse ".") else ".";
                 return .{ .unary_json = try workspace_files_host.listFoldersJson(self.gpa, self.io, req_path) };
@@ -2457,7 +2339,7 @@ pub const EngineHost = struct {
             .ShowImage => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "img-1";
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
                 const path = requireStr(obj, "path") orelse "image.png";
                 const mime = inferAttachmentMime(path);
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -2469,7 +2351,7 @@ pub const EngineHost = struct {
             .ShowVisual => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "vis-1";
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"attached\":true,\"id\":{f}}}",
@@ -2767,7 +2649,8 @@ pub const EngineHost = struct {
                 const root = self.chatWorkspacePath(chat_id);
                 return .{ .unary_json = try workspace_files_host.listWorkspaceDirectoryJson(self.gpa, self.io, root, dir) };
             },
-            .SearchWorkspaceFiles, .SearchFiles => {
+            .SearchWorkspaceFiles => return @import("rpcw_search.zig").searchWorkspaceFiles(self, params),
+            .SearchFiles => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const cid_opt = requireStr(obj, "chatId");
                 const sid_opt = requireStr(obj, "spaceId");
@@ -2828,53 +2711,15 @@ pub const EngineHost = struct {
                     .{ json.fmt(path, .{}), json.fmt(mime, .{}) },
                 ) };
             },
-            .WriteWorkspaceFile => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
-                const content = requireStr(obj, "content") orelse return .{ .err = .{ .bad_params = "missing content" } };
-                if (!workspace_files_host.isSafeRelativePath(path)) {
-                    return .{ .err = .{ .bad_params = "path traversal denied" } };
-                }
-                if (self.io) |io| {
-                    if (requireStr(obj, "chatId")) |cid| {
-                        const root = self.chatWorkspacePath(cid);
-                        if (!std.mem.startsWith(u8, root, "/tmp/parity-project")) {
-                            workspace_files_host.writeWorkspaceFile(self.gpa, io, root, path, content) catch {};
-                        }
-                    }
-                }
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"written\":true}") };
-            },
+            .WriteWorkspaceFile => return @import("rpcw_workspace_files.zig").writeWorkspaceFile(self, params),
             .WatchWorkspaceFiles => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"changed\":[]}"));
             },
             .WatchWorkspaceGitStatus => return @import("rpcg_rpc.zig").watchWorkspaceGitStatus(self, call_id, params),
-            .ListProjectActions => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                return .{ .unary_json = try self.actionsJson(space_id) };
-            },
-            .UpsertProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const action_id = requireStr(obj, "actionId") orelse "test";
-                const act_val = obj.get("action") orelse return .{ .err = .{ .bad_params = "missing action" } };
-                if (act_val != .object) return .{ .err = .{ .bad_params = "action must be object" } };
-                const name = requireStr(act_val.object, "name") orelse return .{ .err = .{ .bad_params = "missing action.name" } };
-                const command = requireStr(act_val.object, "command") orelse return .{ .err = .{ .bad_params = "missing action.command" } };
-                const icon = requireStr(act_val.object, "icon") orelse "play";
-                const run_wt = if (act_val.object.get("runOnWorktreeCreate")) |v| (if (v == .bool) v.bool else false) else false;
-                try self.upsertAction(space_id, action_id, name, command, icon, run_wt);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"actionId\":{f}}}", .{json.fmt(action_id, .{})}) };
-            },
-            .DeleteProjectAction => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-                const action_id = requireStr(obj, "actionId") orelse return .{ .err = .{ .bad_params = "missing actionId" } };
-                const deleted = self.deleteAction(space_id, action_id);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"deleted\":{}}}", .{deleted}) };
-            },
-            .RunProjectAction => return @import("rpcg_terminals.zig").runProjectAction(self, params),
+            .ListProjectActions => return @import("rpcw_actions.zig").list(self, params),
+            .UpsertProjectAction => return @import("rpcw_actions.zig").upsert(self, params),
+            .DeleteProjectAction => return @import("rpcw_actions.zig").delete(self, params),
+            .RunProjectAction => return @import("rpcw_actions.zig").run(self, params),
             .UpdateStatus => {
                 const upd = @import("updates_host.zig");
                 if (upd.targetProblem(params, self.device_id)) |e| return .{ .err = .{ .exec_error = e } };
@@ -5981,13 +5826,16 @@ test "the Zig engine understands every request harness-nano sends (protocol/desk
 
     var host = try EngineHost.init(testing.allocator, "dev-zig-parity", "Zig Host");
     defer host.deinit();
+    var dir_tmp = testing.tmpDir(.{});
+    defer dir_tmp.cleanup();
+    const dir_path = try dir_tmp.dir.realPathFileAlloc(testing.io, ".", a);
 
     for (v.object.get("requests").?.array.items) |case| {
         const name = case.object.get("name").?.string;
         const method = case.object.get("method").?.string;
         const raw_params = try json.Stringify.valueAlloc(a, case.object.get("params").?, .{});
         const sub1 = try std.mem.replaceOwned(u8, a, raw_params, "$DEVICE", host.device_id);
-        const sub2 = try std.mem.replaceOwned(u8, a, sub1, "$DIR", "/tmp/parity-project");
+        const sub2 = try std.mem.replaceOwned(u8, a, sub1, "$DIR", dir_path);
         const params_val = try json.parseFromSliceLeaky(json.Value, a, sub2, .{});
 
         var outcome = try host.handle(method, params_val);
@@ -6277,6 +6125,12 @@ test "UploadChunk, UploadCommit, ReadAttachmentChunk, and SignIn/SignOut round-t
 
     var host = try EngineHost.init(gpa, "dev-upload", "UploadHost");
     defer host.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    try host.setDataDir(tmp_root);
+    host.io = testing.io;
+    const upload_path = try std.fmt.allocPrint(a, "{s}/uploads/up-123-image.png", .{tmp_root});
 
     // 1. UploadChunk with base64 PNG header bytes ("hello-png")
     const chunk_params = try json.parseFromSliceLeaky(json.Value, a, "{\"uploadId\":\"up-123\",\"seq\":0,\"data\":\"aGVsbG8tcG5n\"}", .{});
@@ -6288,10 +6142,12 @@ test "UploadChunk, UploadCommit, ReadAttachmentChunk, and SignIn/SignOut round-t
     const commit_params = try json.parseFromSliceLeaky(json.Value, a, "{\"uploadId\":\"up-123\",\"fileName\":\"image.png\"}", .{});
     const commit_out = try host.handle("UploadCommit", commit_params);
     defer gpa.free(commit_out.unary_json);
-    try testing.expect(std.mem.indexOf(u8, commit_out.unary_json, "/tmp/harness-zig-live/uploads/up-123-image.png") != null);
+    try testing.expect(std.mem.indexOf(u8, commit_out.unary_json, upload_path) != null);
+    // The sign-in steps below stay offline.
+    host.io = null;
 
     // 3. ReadAttachmentChunk -> returns base64 data + image/png mimeType + done:true
-    const read_params = try json.parseFromSliceLeaky(json.Value, a, "{\"path\":\"/tmp/harness-zig-live/uploads/up-123-image.png\",\"offset\":0}", .{});
+    const read_params = try json.parseFromSliceLeaky(json.Value, a, try std.fmt.allocPrint(a, "{{\"path\":{f},\"offset\":0}}", .{json.fmt(upload_path, .{})}), .{});
     const read_out = try host.handle("ReadAttachmentChunk", read_params);
     defer gpa.free(read_out.unary_json);
     try testing.expect(std.mem.indexOf(u8, read_out.unary_json, "\"mimeType\":\"image/png\"") != null);
@@ -6393,6 +6249,10 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
 
     // 5. Test Lean Theorem `commit_stream_always_bounded`:
     // committing 12 uploads strictly bounds `committed_uploads.count() <= max_committed_uploads_cache` (8).
+    var up_tmp = testing.tmpDir(.{});
+    defer up_tmp.cleanup();
+    try host.setDataDir(try up_tmp.dir.realPathFileAlloc(testing.io, ".", a));
+    host.io = testing.io;
     for (0..12) |i| {
         const up_json = try std.fmt.allocPrint(a, "{{\"uploadId\":\"lru-{d}\",\"seq\":0,\"data\":\"aGVsbG8=\"}}", .{i});
         const up_p = try json.parseFromSliceLeaky(json.Value, a, up_json, .{});
@@ -6894,11 +6754,11 @@ test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity 
     try testing.expect(!doc.queue.items[0].isAutoDeliverable(false));
 
     // 4. Autonomy & sidebar preferences round-trip.
-    const set_aut = try host.handle("SetAutonomy", try json.parseFromSliceLeaky(json.Value, a, "{\"autonomy\":\"full\"}", .{}));
+    const set_aut = try host.handle("SetAutonomy", try json.parseFromSliceLeaky(json.Value, a, "{\"autonomy\":\"full-access\"}", .{}));
     defer gpa.free(set_aut.unary_json);
     const get_aut = try host.handle("GetAutonomy", json.Value{ .object = .empty });
     defer gpa.free(get_aut.unary_json);
-    try testing.expectEqualStrings("{\"autonomy\":\"full\",\"chosen\":true}", get_aut.unary_json);
+    try testing.expectEqualStrings("{\"autonomy\":\"full-access\",\"chosen\":true}", get_aut.unary_json);
 
     const set_app = try host.handle("Mutate", try json.parseFromSliceLeaky(json.Value, a, "{\"op\":\"setAppearance\",\"sortBy\":\"created\",\"groupBy\":\"status\"}", .{}));
     defer gpa.free(set_app.unary_json);

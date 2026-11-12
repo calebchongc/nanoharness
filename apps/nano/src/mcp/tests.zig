@@ -1624,6 +1624,7 @@ test "mcp waits: create_chat and send_message wait for the engine's turn, and an
     defer f.destroy();
     const a = f.arena.allocator();
     try f.setup(try std.fmt.allocPrint(a, "{{\"op\":\"createSpace\",\"spaceId\":\"space-real\",\"path\":\"{s}/home\",\"name\":\"real\"}}", .{f.base}));
+    _ = try f.host_link.engine().call(a, "SetAutonomy", "{\"autonomy\":\"workspace\"}"); // a level that asks (the default, full access, doesn't)
 
     // create_chat with a prompt and wait: the turn runs on its own thread and
     // the wait sees it complete.

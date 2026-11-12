@@ -173,6 +173,7 @@ test {
     _ = @import("rpcw_codex_conversation.zig");
     _ = @import("rpcg_all.zig");
     _ = @import("rpc_agent_setup_tests.zig");
+    _ = @import("rpcw_settings_tests.zig");
     _ = @import("multi_machine_sync.zig");
     _ = @import("ios_scroll.zig");
     _ = @import("mobile_glass.zig");
