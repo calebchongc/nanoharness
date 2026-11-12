@@ -1,0 +1,54 @@
+// Local-only edge for scripts/local-edge.sh: `wrangler dev --local` with the
+// state persisted in a temporary folder. No account, no routes, no
+// Hyperdrive, no secrets: every binding below is simulated by Miniflare on
+// this machine, and every value is made up. Never deploy with this file.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "harness-edge-local",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": { "loro-crdt": "loro-crdt/base64" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "VAULT_ROOMS", "class_name": "VaultRoom" },
+      { "name": "ROOM_ACTORS", "class_name": "RoomActor" },
+      { "name": "ACCOUNT_PURGE", "class_name": "AccountPurge" },
+      { "name": "REFRESH_LEEWAY", "class_name": "RefreshLeeway" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionRoom", "DeviceRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["RegistryRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] },
+    { "tag": "v6", "new_sqlite_classes": ["RoomActor"] },
+    { "tag": "v7", "new_sqlite_classes": ["AccountPurge"] },
+    { "tag": "v8", "new_sqlite_classes": ["RefreshLeeway"] }
+  ],
+  // Local R2 (Miniflare, files under --persist-to). Made-up bucket names.
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "local-blobs" },
+    { "binding": "RELEASES", "bucket_name": "local-releases" }
+  ],
+  // No Hyperdrive: with dev auth, agent rooms use the Worker's in-memory
+  // store (room-actor.ts `devStore`), which a restart empties.
+  "vars": {
+    // Dev auth (auth.ts `verifyToken`): the bearer is `user` or `user@org`.
+    "AUTH_MODE": "dev",
+    // Made-up values so /auth/orgs answers; nothing is signed with them.
+    "CODEGRAFF_OAUTH_CLIENT_ID": "cg_client_local_synthetic",
+    "HARNESS_AUTH_SIGNING_KEY": "local-synthetic-signing-key-not-a-secret-0000",
+    // A closed loopback port: a sandbox sign-in fails here instead of
+    // reaching the real gateway.
+    "CODEGRAFF_GATEWAY_URL": "http://127.0.0.1:9"
+  }
+}
