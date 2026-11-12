@@ -103,18 +103,30 @@ fn wireErr(arena: Allocator, method: []const u8, msg: []const u8) ![]const u8 {
 
 // ---- WebSocket backend ---------------------------------------------------------
 
+/// How long a unary call waits for its reply before failing.
+pub const call_timeout_ms: i64 = 90_000;
+
 pub const WsEngine = struct {
     gpa: Allocator,
     io: Io,
     port: u16,
+    /// A unary call's deadline (`call_timeout_ms`; tests shorten it).
+    call_timeout_ms: i64 = call_timeout_ms,
+    /// Guards everything below. Never held across a socket write or a dial:
+    /// the reader thread needs it to hand frames over.
     mutex: Io.Mutex = .init,
     cond: Io.Condition = .init,
-    client: ?*ws.Client = null,
+    conn: ?*Conn = null,
+    /// A dial is under way (outside the lock); others wait for it.
+    dialing: bool = false,
+    closing: bool = false,
     /// Bumped on every dial; a slot from an older connection is dead.
     generation: u64 = 0,
     next_id: u64 = 1,
     slots: std.AutoHashMapUnmanaged(u64, *Slot) = .empty,
-    readers: std.ArrayList(std.Thread) = .empty,
+    /// Reader threads still running. Each is detached and counts itself
+    /// out as it ends, so reconnects leave nothing behind.
+    live_readers: usize = 0,
 
     const Slot = struct {
         generation: u64,
@@ -122,23 +134,41 @@ pub const WsEngine = struct {
         closed: bool = false,
     };
 
+    /// One socket: its reader holds a reference until it ends, and each
+    /// sender holds one while it writes, so the client outlives both.
+    const Conn = struct {
+        client: *ws.Client,
+        generation: u64,
+        refs: usize,
+        dead: bool = false,
+    };
+
     pub fn init(gpa: Allocator, io: Io, port: u16) WsEngine {
         return .{ .gpa = gpa, .io = io, .port = port };
     }
 
+    /// Closes the socket and waits for its reader to end. No call may be
+    /// in flight.
     pub fn deinit(self: *WsEngine) void {
         self.mutex.lockUncancelable(self.io);
-        if (self.client) |c| c.shutdown();
-        self.mutex.unlock(self.io);
-        for (self.readers.items) |t| t.join();
-        self.readers.deinit(self.gpa);
+        self.closing = true;
+        if (self.conn) |c| self.killLocked(c);
+        while (self.live_readers > 0 or self.dialing) self.cond.waitUncancelable(self.io, &self.mutex);
         var it = self.slots.iterator();
         while (it.next()) |e| self.freeSlot(e.value_ptr.*);
         self.slots.deinit(self.gpa);
+        self.mutex.unlock(self.io);
     }
 
     pub fn engine(self: *WsEngine) Engine {
         return .{ .ptr = self, .vtable = &.{ .call = callFn, .subscribe = subscribeFn } };
+    }
+
+    /// Reader threads still running: at most one, whatever the reconnects.
+    pub fn readerCount(self: *WsEngine) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.live_readers;
     }
 
     fn url(self: *WsEngine, buf: []u8) []const u8 {
@@ -151,51 +181,114 @@ pub const WsEngine = struct {
         self.gpa.destroy(slot);
     }
 
-    /// Dials when there is no connection. Called with `mutex` held.
-    fn ensureConnected(self: *WsEngine, arena: Allocator) !?[]const u8 {
-        if (self.client != null) return null;
-        const client = ws.Client.connect(self.gpa, self.io, self.port, "/") catch |err| {
-            var buf: [64]u8 = undefined;
-            return try std.fmt.allocPrint(arena, "no Harness engine listening at {s} (transport: {t}) — is Harness running?", .{ self.url(&buf), err });
-        };
-        self.generation += 1;
-        self.client = client;
-        const t = std.Thread.spawn(.{}, readLoop, .{ self, client, self.generation }) catch |err| {
-            client.deinit(self.gpa);
-            self.client = null;
-            return try std.fmt.allocPrint(arena, "engine reader: {t}", .{err});
-        };
-        try self.readers.append(self.gpa, t);
-        return null;
+    /// Marks `c` dead and wakes its reader; slots close as the reader ends.
+    /// `mutex` held.
+    fn killLocked(self: *WsEngine, c: *Conn) void {
+        if (!c.dead) {
+            c.dead = true;
+            c.client.shutdown();
+        }
+        if (self.conn == c) self.conn = null;
     }
 
-    fn readLoop(self: *WsEngine, client: *ws.Client, generation: u64) void {
-        var msg: std.ArrayList(u8) = .empty;
-        defer msg.deinit(self.gpa);
+    /// Drops one reference. `mutex` held.
+    fn releaseLocked(self: *WsEngine, c: *Conn) void {
+        c.refs -= 1;
+        if (c.refs > 0) return;
+        c.client.deinit(self.gpa);
+        self.gpa.destroy(c);
+    }
+
+    fn release(self: *WsEngine, c: *Conn) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.releaseLocked(c);
+    }
+
+    const Acquired = union(enum) { conn: *Conn, err: []const u8 };
+
+    /// The live connection with a reference taken, dialing when there is
+    /// none (outside the lock).
+    fn acquire(self: *WsEngine, arena: Allocator) !Acquired {
+        self.mutex.lockUncancelable(self.io);
         while (true) {
-            const op = client.readMessage(self.gpa, &msg) catch break;
+            if (self.closing) {
+                self.mutex.unlock(self.io);
+                return .{ .err = "engine link closed" };
+            }
+            if (self.conn) |c| {
+                c.refs += 1;
+                self.mutex.unlock(self.io);
+                return .{ .conn = c };
+            }
+            if (!self.dialing) break;
+            self.cond.waitUncancelable(self.io, &self.mutex);
+        }
+        self.dialing = true;
+        self.mutex.unlock(self.io);
+
+        const dialed = ws.Client.connect(self.gpa, self.io, self.port, "/");
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.dialing = false;
+        self.cond.broadcast(self.io);
+        const client = dialed catch |err| {
+            var buf: [64]u8 = undefined;
+            return .{ .err = try std.fmt.allocPrint(arena, "no Harness engine listening at {s} (transport: {t}) — is Harness running?", .{ self.url(&buf), err }) };
+        };
+        if (self.closing) {
+            client.deinit(self.gpa);
+            return .{ .err = "engine link closed" };
+        }
+        const c = self.gpa.create(Conn) catch |err| {
+            client.deinit(self.gpa);
+            return err;
+        };
+        self.generation += 1;
+        // The reader's reference and the caller's.
+        c.* = .{ .client = client, .generation = self.generation, .refs = 2 };
+        const t = std.Thread.spawn(.{}, readLoop, .{ self, c }) catch |err| {
+            client.deinit(self.gpa);
+            self.gpa.destroy(c);
+            return .{ .err = try std.fmt.allocPrint(arena, "engine reader: {t}", .{err}) };
+        };
+        t.detach();
+        self.live_readers += 1;
+        self.conn = c;
+        return .{ .conn = c };
+    }
+
+    fn readLoop(self: *WsEngine, c: *Conn) void {
+        const gpa = self.gpa;
+        var msg: std.ArrayList(u8) = .empty;
+        while (true) {
+            const op = c.client.readMessage(gpa, &msg) catch break;
             if (op != .text) continue;
             const id = frameId(msg.items) orelse continue;
-            const copy = self.gpa.dupe(u8, msg.items) catch continue;
+            const copy = gpa.dupe(u8, msg.items) catch continue;
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             if (self.slots.get(id)) |slot| {
-                if (slot.generation == generation) {
-                    slot.frames.append(self.gpa, copy) catch self.gpa.free(copy);
+                if (slot.generation == c.generation) {
+                    slot.frames.append(gpa, copy) catch gpa.free(copy);
                     self.cond.broadcast(self.io);
                     continue;
                 }
             }
-            self.gpa.free(copy);
+            gpa.free(copy);
         }
+        msg.deinit(gpa);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.killLocked(c);
         var it = self.slots.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.*.generation == generation) e.value_ptr.*.closed = true;
+            if (e.value_ptr.*.generation == c.generation) e.value_ptr.*.closed = true;
         }
-        if (self.client == client) self.client = null;
-        client.deinit(self.gpa);
+        self.releaseLocked(c);
+        self.live_readers -= 1;
+        // Last: after this broadcast `deinit` may return and free `self`.
         self.cond.broadcast(self.io);
     }
 
@@ -215,21 +308,37 @@ pub const WsEngine = struct {
 
     const Opened = union(enum) { slot: struct { id: u64, slot: *Slot }, err: []const u8, closed };
 
-    /// Registers a slot and sends the call frame.
+    /// Registers a slot, then sends the call frame without the lock.
     fn open(self: *WsEngine, arena: Allocator, method: []const u8, params_json: []const u8) !Opened {
+        const c = switch (try self.acquire(arena)) {
+            .conn => |c| c,
+            .err => |m| return .{ .err = m },
+        };
+        defer self.release(c);
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (try self.ensureConnected(arena)) |m| return .{ .err = m };
+        if (c.dead) {
+            self.mutex.unlock(self.io);
+            return .closed;
+        }
         const id = self.next_id;
         self.next_id += 1;
-        const slot = try self.gpa.create(Slot);
-        slot.* = .{ .generation = self.generation };
-        try self.slots.put(self.gpa, id, slot);
+        const slot = self.gpa.create(Slot) catch |err| {
+            self.mutex.unlock(self.io);
+            return err;
+        };
+        slot.* = .{ .generation = c.generation };
+        self.slots.put(self.gpa, id, slot) catch |err| {
+            self.gpa.destroy(slot);
+            self.mutex.unlock(self.io);
+            return err;
+        };
+        self.mutex.unlock(self.io);
         const frame = try std.fmt.allocPrint(arena, "{{\"id\":{d},\"method\":{f},\"params\":{s}}}", .{ id, json.fmt(method, .{}), params_json });
-        self.client.?.sendText(frame) catch {
-            _ = self.slots.remove(id);
-            self.freeSlot(slot);
-            if (self.client) |c| c.shutdown();
+        c.client.sendText(frame) catch {
+            self.mutex.lockUncancelable(self.io);
+            self.killLocked(c);
+            self.mutex.unlock(self.io);
+            self.drop(id, false);
             return .closed;
         };
         return .{ .slot = .{ .id = id, .slot = slot } };
@@ -237,60 +346,86 @@ pub const WsEngine = struct {
 
     fn drop(self: *WsEngine, id: u64, send_cancel: bool) void {
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const removed = self.slots.fetchRemove(id) orelse return;
+        const removed = self.slots.fetchRemove(id) orelse {
+            self.mutex.unlock(self.io);
+            return;
+        };
         const slot = removed.value;
-        if (send_cancel and !slot.closed and self.client != null and slot.generation == self.generation) {
+        // The cancel goes out on the slot's own connection, without the lock.
+        const target: ?*Conn = if (send_cancel and !slot.closed) blk: {
+            const c = self.conn orelse break :blk null;
+            if (c.dead or c.generation != slot.generation) break :blk null;
+            c.refs += 1;
+            break :blk c;
+        } else null;
+        self.freeSlot(slot);
+        self.mutex.unlock(self.io);
+        if (target) |c| {
+            defer self.release(c);
             var buf: [64]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{{\"id\":{d},\"cancel\":true}}", .{id})) |frame| {
-                self.client.?.sendText(frame) catch {};
+                c.client.sendText(frame) catch {};
             } else |_| {}
         }
-        self.freeSlot(slot);
     }
 
-    /// Waits for the next frame of `slot`. Null when closed or timed out.
-    fn take(self: *WsEngine, slot: *Slot, deadline: ?Io.Clock.Timestamp) ?[]u8 {
+    const Taken = union(enum) { frame: []u8, closed, timeout };
+
+    /// Waits for the next frame of `slot` until `deadline` (none: forever).
+    fn take(self: *WsEngine, slot: *Slot, deadline: ?Io.Clock.Timestamp) Taken {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         while (slot.frames.items.len == 0 and !slot.closed) {
             if (deadline) |d| {
-                self.cond.waitTimeout(self.io, &self.mutex, .{ .deadline = d }) catch return null;
+                self.cond.waitTimeout(self.io, &self.mutex, .{ .deadline = d }) catch return if (slot.frames.items.len > 0) .{ .frame = slot.frames.orderedRemove(0) } else if (slot.closed) .closed else .timeout;
             } else {
                 self.cond.waitUncancelable(self.io, &self.mutex);
             }
         }
-        if (slot.frames.items.len == 0) return null;
-        return slot.frames.orderedRemove(0);
+        if (slot.frames.items.len == 0) return .closed;
+        return .{ .frame = slot.frames.orderedRemove(0) };
     }
 
-    fn callOnce(self: *WsEngine, arena: Allocator, method: []const u8, params_json: []const u8) !?Result {
+    const Once = union(enum) { result: Result, closed };
+
+    fn callOnce(self: *WsEngine, arena: Allocator, method: []const u8, params_json: []const u8) !Once {
         const opened = try self.open(arena, method, params_json);
         const o = switch (opened) {
             .slot => |s| s,
-            .err => |m| return .{ .err = m },
-            .closed => return null,
+            .err => |m| return .{ .result = .{ .err = m } },
+            .closed => return .closed,
         };
         defer self.drop(o.id, false);
+        const deadline = Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromMilliseconds(@max(0, self.call_timeout_ms)), .clock = .awake });
         while (true) {
-            const raw = self.take(o.slot, null) orelse return null;
+            const raw = switch (self.take(o.slot, deadline)) {
+                .frame => |f| f,
+                .closed => return .closed,
+                .timeout => return .{ .result = .{ .err = try std.fmt.allocPrint(arena, "{s}: no reply from the engine within {d}s", .{ method, @divTrunc(self.call_timeout_ms + 999, 1000) }) } },
+            };
             defer self.gpa.free(raw);
             const frame = try json.parseFromSliceLeaky(json.Value, arena, raw, .{ .allocate = .alloc_always });
             if (frame != .object) continue;
             if (frame.object.get("err")) |e| {
-                return .{ .err = try wireErr(arena, method, if (e == .string) e.string else "error") };
+                return .{ .result = .{ .err = try wireErr(arena, method, if (e == .string) e.string else "error") } };
             }
-            if (frame.object.get("ok")) |v| return .{ .ok = v };
+            if (frame.object.get("ok")) |v| return .{ .result = .{ .ok = v } };
             // A stream answered a unary call: its first item stands in.
-            if (frame.object.get("item")) |v| return .{ .ok = v };
+            if (frame.object.get("item")) |v| return .{ .result = .{ .ok = v } };
         }
     }
 
     fn callFn(ptr: *anyopaque, arena: Allocator, method: []const u8, params_json: []const u8) anyerror!Result {
         const self: *WsEngine = @ptrCast(@alignCast(ptr));
-        if (try self.callOnce(arena, method, params_json)) |r| return r;
+        switch (try self.callOnce(arena, method, params_json)) {
+            .result => |r| return r,
+            .closed => {},
+        }
         // Closed underneath: the engine restarted. Dial once more.
-        if (try self.callOnce(arena, method, params_json)) |r| return r;
+        switch (try self.callOnce(arena, method, params_json)) {
+            .result => |r| return r,
+            .closed => {},
+        }
         return .{ .err = try std.fmt.allocPrint(arena, "{s}: connection closed", .{method}) };
     }
 
@@ -323,11 +458,10 @@ pub const WsEngine = struct {
         const io = s.owner.io;
         const deadline = Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(@max(0, timeout_ms)), .clock = .awake });
         while (true) {
-            const raw = s.owner.take(s.slot, deadline) orelse {
-                s.owner.mutex.lockUncancelable(io);
-                const closed = s.slot.closed;
-                s.owner.mutex.unlock(io);
-                return if (closed) .ended else .timeout;
+            const raw = switch (s.owner.take(s.slot, deadline)) {
+                .frame => |f| f,
+                .closed => return .ended,
+                .timeout => return .timeout,
             };
             defer s.owner.gpa.free(raw);
             const frame = try json.parseFromSliceLeaky(json.Value, arena, raw, .{ .allocate = .alloc_always });

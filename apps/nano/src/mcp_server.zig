@@ -437,6 +437,7 @@ test "daemon unit generation" {
 test {
     _ = @import("mcp/util.zig");
     _ = @import("mcp/engine_link.zig");
+    _ = @import("mcp/engine_link_tests.zig");
     _ = @import("mcp/transcript.zig");
     _ = @import("mcp/peer.zig");
     _ = @import("mcp/rooms.zig");
