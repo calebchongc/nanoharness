@@ -676,16 +676,12 @@ pub fn createWorktree(host: *engine_host.EngineHost, params: json.Value) !RpcOut
     try w.writeByte('{');
     try writeWorktree(w, wt);
     if (setup_space) |space| {
-        const action = for (host.actions.items) |*a| {
-            if (std.mem.eql(u8, a.space_id, space.id) and a.run_on_worktree_create) break a;
-        } else null;
-        if (action != null) {
-            // `launch_project_setup_action` opens a PTY terminal running the
-            // Action; this engine's terminals do not run processes yet, so the
-            // worktree is kept and the launch failure is reported (Rust's
-            // `setup_error` path).
-            try w.print(",\"setupError\":{f}", .{json.fmt("Terminals are not available on this engine, so the setup Action was not started", .{})});
-        }
+        // `launch_project_setup_action`: the space's setup Action runs in a
+        // new terminal in the worktree; a launch failure is reported as
+        // `setupError` and the worktree is kept.
+        const project_root = common.canonicalize(gpa, io, space.path) orelse try gpa.dupe(u8, space.path);
+        defer gpa.free(project_root);
+        try @import("rpcg_terminals.zig").writeWorktreeSetup(host, w, space.id, project_root, wt.path);
     }
     try w.writeByte('}');
     return .{ .unary_json = try aw.toOwnedSlice() };
@@ -1006,14 +1002,16 @@ test "rpcw_worktrees CreateWorktree errors: params, unknown base, ambiguous remo
     defer gone_repo.deinit();
     try expectExecError(try host.handle("CreateWorktree", gone_repo.value), "Worktree repository is unavailable");
 
-    // The matching space succeeds; its setup Action is reported, not faked.
+    // The matching space succeeds and its setup Action starts in a terminal.
+    try f.env.map.put("SHELL", "/bin/sh");
     try host.actions.append(gpa, .{ .id = try gpa.dupe(u8, "act-1"), .space_id = try gpa.dupe(u8, "space-proj"), .name = try gpa.dupe(u8, "Install"), .command = try gpa.dupe(u8, "true"), .icon = try gpa.dupe(u8, "play"), .run_on_worktree_create = true });
     var ok_space = try json.parseFromSlice(json.Value, gpa, try std.fmt.allocPrint(a, "{{\"repoPath\":{f},\"branch\":\"main\",\"spaceId\":\"space-proj\"}}", .{json.fmt(f.repo, .{})}), .{});
     defer ok_space.deinit();
     const created = try host.handle("CreateWorktree", ok_space.value);
     defer gpa.free(created.unary_json);
     try testing.expect(std.mem.indexOf(u8, created.unary_json, "\"name\":\"changes-2\"") != null);
-    try testing.expect(std.mem.indexOf(u8, created.unary_json, "\"setupError\":") != null);
+    try testing.expect(std.mem.indexOf(u8, created.unary_json, "\"setupAction\":{\"actionId\":\"act-1\",\"actionName\":\"Install\",\"terminal\":{\"id\":") != null);
+    try testing.expect(std.mem.indexOf(u8, created.unary_json, "\"setupError\":") == null);
 }
 
 test "rpcw_worktrees runPrepare reports failure and leaves a slow script running" {

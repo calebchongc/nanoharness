@@ -226,6 +226,17 @@ pub const TerminalManager = struct {
             hangUp(l);
         }
         for (self.retired.items) |l| l.closing.store(true, .release);
+        // Join every reader before freeing anything a reader may still read.
+        it = self.sessions.iterator();
+        while (it.next()) |e| {
+            const l = e.value_ptr.live;
+            if (l.thread) |t| t.join();
+            l.thread = null;
+        }
+        for (self.retired.items) |l| {
+            if (l.thread) |t| t.join();
+            l.thread = null;
+        }
         it = self.sessions.iterator();
         while (it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -443,7 +454,8 @@ fn spawnSession(self: *TerminalManager, io: std.Io, opts: OpenOptions) !Result(O
 
     // A command runs from a private script the shell sources.
     var script_path: ?[]u8 = null;
-    errdefer if (script_path) |p| {
+    // Every failure (an error or a reported one) removes the script.
+    defer if (script_path) |p| {
         std.Io.Dir.cwd().deleteFile(io, p) catch {};
         gpa.free(p);
     };

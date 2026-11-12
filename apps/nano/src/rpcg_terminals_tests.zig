@@ -230,3 +230,63 @@ test "rpcg_terminals RunProjectAction checks ownership and runs the Action in a 
     } else return error.ActionNeverRan;
     _ = try f.ok("CloseTerminal", try f.params("{{\"terminalId\":\"{s}\"}}", .{term.get("id").?.string}));
 }
+
+test "rpcg_terminals worktree setup Action runs in the worktree or reports why it couldn't" {
+    if (comptime !terms.supported) return;
+    const f = try initFixture();
+    defer f.deinit();
+    const rt = @import("rpcg_terminals.zig");
+    try f.t.sh("cd repo && git worktree add -q ../setup-wt -b setup-branch");
+    const wt = try f.path("setup-wt");
+    const root = common.canonicalize(f.arena.allocator(), testing.io, f.t.repo).?;
+    try addAction(f, "space-1", "setup", "printf 'SETUP ROOT=%s WT=%s\\n' \"$HARNESS_PROJECT_ROOT\" \"$HARNESS_WORKTREE_PATH\"", true);
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    {
+        f.host.mutex.lockUncancelable(testing.io);
+        defer f.host.mutex.unlock(testing.io);
+        // No setup Action for another space: nothing is written.
+        try rt.writeWorktreeSetup(&f.host, &aw.writer, "space-2", root, wt);
+        try testing.expectEqual(@as(usize, 0), aw.written().len);
+        try rt.writeWorktreeSetup(&f.host, &aw.writer, "space-1", root, wt);
+    }
+    const text = try f.arena.allocator().dupe(u8, aw.written());
+    try testing.expect(std.mem.startsWith(u8, text, ",\"setupAction\":{\"actionId\":\"setup\""));
+    const v = try json.parseFromSliceLeaky(json.Value, f.arena.allocator(), text["\"setupAction\":".len + 1 ..], .{});
+    const id = v.object.get("terminal").?.object.get("id").?.string;
+    var sub = try f.call(21, "SubscribeTerminal", try f.params("{{\"terminalId\":\"{s}\"}}", .{id}));
+    sub.stream_items_json.deinit(testing.allocator);
+    const real_wt = common.canonicalize(f.arena.allocator(), testing.io, wt).?;
+    // The shell may have printed before the subscription: ask again for the replay.
+    var waited: usize = 0;
+    const want = try std.fmt.allocPrint(f.arena.allocator(), "SETUP ROOT={s} WT={s}", .{ root, real_wt });
+    while (waited < 15_000) : (waited += 50) {
+        var r = try f.call(0, "SubscribeTerminal", try f.params("{{\"terminalId\":\"{s}\"}}", .{id}));
+        defer r.stream_items_json.deinit(testing.allocator);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var out: std.ArrayList(u8) = .empty;
+        for (r.stream_items_json.items) |it| {
+            const e = try json.parseFromSliceLeaky(json.Value, arena.allocator(), it, .{});
+            const d = e.object.get("data") orelse continue;
+            const bytes = try arena.allocator().alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(d.string));
+            try std.base64.standard.Decoder.decode(bytes, d.string);
+            try out.appendSlice(arena.allocator(), bytes);
+        }
+        if (std.mem.indexOf(u8, out.items, want) != null) break;
+        try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    } else return error.SetupNeverRan;
+    _ = try f.ok("CloseTerminal", try f.params("{{\"terminalId\":\"{s}\"}}", .{id}));
+
+    // A shell that can't start: the reason is reported, nothing else.
+    try f.t.env.map.put("SHELL", "/nonexistent/synthetic-shell");
+    var failed: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer failed.deinit();
+    {
+        f.host.mutex.lockUncancelable(testing.io);
+        defer f.host.mutex.unlock(testing.io);
+        try rt.writeWorktreeSetup(&f.host, &failed.writer, "space-1", root, wt);
+    }
+    try testing.expect(std.mem.startsWith(u8, failed.written(), ",\"setupError\":\"could not spawn synthetic-shell: "));
+}
