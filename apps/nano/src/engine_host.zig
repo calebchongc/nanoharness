@@ -2347,12 +2347,7 @@ pub const EngineHost = struct {
                     .{json.fmt(path, .{})},
                 ) };
             },
-            .ListDrives => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"drives\":[{\"name\":\"Macintosh HD\",\"path\":\"/\"}]}",
-                ) };
-            },
+            .ListDrives => return @import("rpcw_workspace_files.zig").listDrives(self),
             .ListFolders => {
                 const req_path = if (requireObj(params)) |obj| (requireStr(obj, "path") orelse ".") else ".";
                 return .{ .unary_json = try workspace_files_host.listFoldersJson(self.gpa, self.io, req_path) };
@@ -2865,23 +2860,7 @@ pub const EngineHost = struct {
                     .{ json.fmt(path, .{}), json.fmt(mime, .{}) },
                 ) };
             },
-            .WriteWorkspaceFile => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
-                const content = requireStr(obj, "content") orelse return .{ .err = .{ .bad_params = "missing content" } };
-                if (!workspace_files_host.isSafeRelativePath(path)) {
-                    return .{ .err = .{ .bad_params = "path traversal denied" } };
-                }
-                if (self.io) |io| {
-                    if (requireStr(obj, "chatId")) |cid| {
-                        const root = self.chatWorkspacePath(cid);
-                        if (!std.mem.startsWith(u8, root, "/tmp/parity-project")) {
-                            workspace_files_host.writeWorkspaceFile(self.gpa, io, root, path, content) catch {};
-                        }
-                    }
-                }
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"written\":true}") };
-            },
+            .WriteWorkspaceFile => return @import("rpcw_workspace_files.zig").writeWorkspaceFile(self, params),
             .WatchWorkspaceFiles => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"changed\":[]}"));
             },
