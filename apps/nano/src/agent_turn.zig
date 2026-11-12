@@ -45,6 +45,8 @@ pub const Request = struct {
     cwd: []const u8,
     model: ?[]const u8 = null,
     reasoning: ?[]const u8 = null,
+    /// `modelOptions` (option id → choice) as JSON.
+    model_options_json: ?[]const u8 = null,
     sandbox: Sandbox = .danger_full_access,
     auto_approve: bool = false,
     /// Harness-native session id to resume.

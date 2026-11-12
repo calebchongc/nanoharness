@@ -29,6 +29,7 @@ pub fn adapterFor(harness: []const u8) ?*const agent_turn.Adapter {
         .{ "devin", &@import("agent_acp.zig").devin },
         .{ "grok", &@import("agent_acp.zig").grok },
         .{ "hermes", &@import("agent_acp.zig").hermes },
+        .{ "cursor", &@import("agent_cursor.zig").adapter },
     };
     inline for (map) |e| if (std.mem.eql(u8, harness, e[0])) return e[1];
     return null;
@@ -166,6 +167,7 @@ pub fn dispatchRun(host: *EngineHost, chat_id: []const u8, asst_id: []const u8, 
         .cwd = try a.dupe(u8, cwd),
         .model = if (model) |m| try a.dupe(u8, m) else null,
         .reasoning = if (reasoning) |r| try a.dupe(u8, r) else null,
+        .model_options_json = if (req.get("modelOptions")) |mo| (if (mo == .object) try json.Stringify.valueAlloc(a, mo, .{}) else null) else null,
         .sandbox = autonomy.sandbox,
         .auto_approve = autonomy.auto_approve,
         .resume_id = if (resume_id) |r| try a.dupe(u8, r) else null,

@@ -370,7 +370,8 @@ fn restricted(req: agent_turn.Request) bool {
 fn run(t: *Turn) !void {
     const a = t.arena.allocator();
     const exe = try t.resolveExe("claude", "CLAUDE_CODE_EXECUTABLE", &extra_paths, install_hint);
-    const argv = try buildArgv(a, exe, t.req, null);
+    const opts: ?json.Value = if (t.req.model_options_json) |mo| json.parseFromSliceLeaky(json.Value, a, mo, .{}) catch null else null;
+    const argv = try buildArgv(a, exe, t.req, opts);
     var env = try t.childEnv(exe);
     defer env.deinit();
     const proc = try t.spawn(argv, &env, .{});
