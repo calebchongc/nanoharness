@@ -1598,7 +1598,7 @@ pub const EngineHost = struct {
     /// Insert `full_path -> bytes` into `committed_uploads`, evicting the oldest entry
     /// when `committed_uploads.count() >= max_committed_uploads_cache` (Lean Theorem
     /// `commit_stream_always_bounded`). Takes ownership of `full_path` and `bytes`.
-    fn insertCommittedUploadBounded(self: *EngineHost, full_path: []u8, bytes: []u8) !void {
+    pub fn insertCommittedUploadBounded(self: *EngineHost, full_path: []u8, bytes: []u8) !void {
         if (self.committed_uploads.fetchRemove(full_path)) |old| {
             self.gpa.free(old.key);
             self.gpa.free(old.value);
@@ -2016,55 +2016,7 @@ pub const EngineHost = struct {
                 try gop.value_ptr.appendSlice(self.gpa, decoded);
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
-            .UploadCommit => {
-                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const upload_id = requireStr(obj, "uploadId") orelse return .{ .err = .{ .bad_params = "missing uploadId" } };
-                const raw_name = requireStr(obj, "fileName") orelse "attachment.bin";
-                const base_name = std.fs.path.basename(raw_name);
-                const safe_name = if (base_name.len > 0) base_name else "attachment.bin";
-
-                var bytes: []u8 = &.{};
-                if (self.staged_uploads.fetchRemove(upload_id)) |kv| {
-                    self.gpa.free(kv.key);
-                    var list = kv.value;
-                    errdefer list.deinit(self.gpa);
-                    bytes = try list.toOwnedSlice(self.gpa);
-                } else {
-                    bytes = try self.gpa.dupe(u8, "");
-                }
-                var transferred = false;
-                errdefer if (!transferred) self.gpa.free(bytes);
-
-                const dir_path = if (self.data_dir) |dd|
-                    try std.fmt.allocPrint(self.gpa, "{s}/uploads", .{std.mem.trimEnd(u8, dd, "/")})
-                else
-                    try self.gpa.dupe(u8, "/tmp/harness-zig-live/uploads");
-                defer self.gpa.free(dir_path);
-                if (self.io) |io| {
-                    std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
-                }
-                const full_path = try std.fmt.allocPrint(self.gpa, "{s}/{s}-{s}", .{ dir_path, upload_id, safe_name });
-                errdefer if (!transferred) self.gpa.free(full_path);
-
-                if (self.io) |io| {
-                    if (std.Io.Dir.cwd().createFile(io, full_path, .{ .truncate = true })) |f| {
-                        defer f.close(io);
-                        f.writeStreamingAll(io, bytes) catch {};
-                    } else |_| {}
-                }
-
-                // Allocate reply BEFORE inserting into committed_uploads (Lean Theorem `safe_commit_never_double_frees_or_leaks`).
-                const reply_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"path\":{f}}}",
-                    .{json.fmt(full_path, .{})},
-                );
-                errdefer self.gpa.free(reply_json);
-
-                try self.insertCommittedUploadBounded(full_path, bytes);
-                transferred = true;
-                return .{ .unary_json = reply_json };
-            },
+            .UploadCommit => return @import("rpcw_uploads.zig").commit(self, params),
             .ReadAttachmentChunk => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
@@ -2529,7 +2481,7 @@ pub const EngineHost = struct {
             .ShowImage => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "img-1";
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
                 const path = requireStr(obj, "path") orelse "image.png";
                 const mime = inferAttachmentMime(path);
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -2541,7 +2493,7 @@ pub const EngineHost = struct {
             .ShowVisual => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                const id = requireStr(obj, "id") orelse "vis-1";
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing field `id`" } };
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"attached\":true,\"id\":{f}}}",
@@ -3126,7 +3078,7 @@ pub const EngineHost = struct {
             },
             .OpenTerminal => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                const tid = requireStr(obj, "terminalId") orelse "term-1";
+                const tid = requireStr(obj, "terminalId") orelse requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing field `chatId`" } };
                 const cwd = requireStr(obj, "cwd") orelse "/tmp";
                 const cols: u16 = if (obj.get("cols")) |cv| (if (cv == .integer and cv.integer > 0) @intCast(cv.integer) else 80) else 80;
                 const rows: u16 = if (obj.get("rows")) |rv| (if (rv == .integer and rv.integer > 0) @intCast(rv.integer) else 24) else 24;
@@ -6117,13 +6069,16 @@ test "the Zig engine understands every request harness-nano sends (protocol/desk
 
     var host = try EngineHost.init(testing.allocator, "dev-zig-parity", "Zig Host");
     defer host.deinit();
+    var dir_tmp = testing.tmpDir(.{});
+    defer dir_tmp.cleanup();
+    const dir_path = try dir_tmp.dir.realPathFileAlloc(testing.io, ".", a);
 
     for (v.object.get("requests").?.array.items) |case| {
         const name = case.object.get("name").?.string;
         const method = case.object.get("method").?.string;
         const raw_params = try json.Stringify.valueAlloc(a, case.object.get("params").?, .{});
         const sub1 = try std.mem.replaceOwned(u8, a, raw_params, "$DEVICE", host.device_id);
-        const sub2 = try std.mem.replaceOwned(u8, a, sub1, "$DIR", "/tmp/parity-project");
+        const sub2 = try std.mem.replaceOwned(u8, a, sub1, "$DIR", dir_path);
         const params_val = try json.parseFromSliceLeaky(json.Value, a, sub2, .{});
 
         var outcome = try host.handle(method, params_val);
@@ -6413,6 +6368,12 @@ test "UploadChunk, UploadCommit, ReadAttachmentChunk, and SignIn/SignOut round-t
 
     var host = try EngineHost.init(gpa, "dev-upload", "UploadHost");
     defer host.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    try host.setDataDir(tmp_root);
+    host.io = testing.io;
+    const upload_path = try std.fmt.allocPrint(a, "{s}/uploads/up-123-image.png", .{tmp_root});
 
     // 1. UploadChunk with base64 PNG header bytes ("hello-png")
     const chunk_params = try json.parseFromSliceLeaky(json.Value, a, "{\"uploadId\":\"up-123\",\"seq\":0,\"data\":\"aGVsbG8tcG5n\"}", .{});
@@ -6424,10 +6385,12 @@ test "UploadChunk, UploadCommit, ReadAttachmentChunk, and SignIn/SignOut round-t
     const commit_params = try json.parseFromSliceLeaky(json.Value, a, "{\"uploadId\":\"up-123\",\"fileName\":\"image.png\"}", .{});
     const commit_out = try host.handle("UploadCommit", commit_params);
     defer gpa.free(commit_out.unary_json);
-    try testing.expect(std.mem.indexOf(u8, commit_out.unary_json, "/tmp/harness-zig-live/uploads/up-123-image.png") != null);
+    try testing.expect(std.mem.indexOf(u8, commit_out.unary_json, upload_path) != null);
+    // The sign-in steps below stay offline.
+    host.io = null;
 
     // 3. ReadAttachmentChunk -> returns base64 data + image/png mimeType + done:true
-    const read_params = try json.parseFromSliceLeaky(json.Value, a, "{\"path\":\"/tmp/harness-zig-live/uploads/up-123-image.png\",\"offset\":0}", .{});
+    const read_params = try json.parseFromSliceLeaky(json.Value, a, try std.fmt.allocPrint(a, "{{\"path\":{f},\"offset\":0}}", .{json.fmt(upload_path, .{})}), .{});
     const read_out = try host.handle("ReadAttachmentChunk", read_params);
     defer gpa.free(read_out.unary_json);
     try testing.expect(std.mem.indexOf(u8, read_out.unary_json, "\"mimeType\":\"image/png\"") != null);
@@ -6538,6 +6501,10 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
 
     // 5. Test Lean Theorem `commit_stream_always_bounded`:
     // committing 12 uploads strictly bounds `committed_uploads.count() <= max_committed_uploads_cache` (8).
+    var up_tmp = testing.tmpDir(.{});
+    defer up_tmp.cleanup();
+    try host.setDataDir(try up_tmp.dir.realPathFileAlloc(testing.io, ".", a));
+    host.io = testing.io;
     for (0..12) |i| {
         const up_json = try std.fmt.allocPrint(a, "{{\"uploadId\":\"lru-{d}\",\"seq\":0,\"data\":\"aGVsbG8=\"}}", .{i});
         const up_p = try json.parseFromSliceLeaky(json.Value, a, up_json, .{});
