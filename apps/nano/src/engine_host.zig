@@ -1780,6 +1780,8 @@ pub const EngineHost = struct {
 
     pub fn handleWithId(self: *EngineHost, call_id: u64, method: []const u8, params: json.Value) !RpcOutcome {
         const rpc_method = rpc_method_map.get(method) orelse return .{ .err = .{ .unknown_method = method } };
+        // Calls for another device run there, through the edge's device room.
+        if (try @import("relay_dial.zig").forward(self, method, params)) |forwarded| return forwarded;
         switch (rpc_method) {
             .EngineInfo => {
                 return .{ .unary_json = try std.fmt.allocPrint(
