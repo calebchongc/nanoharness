@@ -655,63 +655,65 @@ fn readLine(c: Context) ?[]const u8 {
 
 const Org = struct { id: []const u8, name: []const u8 };
 
-/// Org-less session: join the only workspace, or pick one (`run_org_onboarding`).
+/// Org-less session (`run_org_onboarding`): no workspaces yet, ask for a name
+/// and create one; one, join it; several, pick one. False when none was chosen.
 fn chooseWorkspace(c: Context, auth: *auth_host.AuthManager, cfg: AuthEnv) !bool {
-    const url = try std.fmt.allocPrint(c.gpa, "{s}/auth/orgs", .{std.mem.trimEnd(u8, cfg.edge_url, "/")});
-    defer c.gpa.free(url);
-    var resp = auth_host.AuthManager.edgeRequestPooled(null, c.gpa, c.io, "GET", url, auth.access_token, &.{}, null) catch |err| {
-        try c.out.print("Could not list workspaces ({t}) — create or select one from the Harness app to continue.\n", .{err});
+    _ = cfg;
+    const listed = auth.listOrgsJson(c.io) catch |err| {
+        try c.out.print("Could not list workspaces ({s}) \u{2014} create or select one from the Harness UI to continue.\n", .{auth.errorText(err)});
         return false;
     };
-    defer resp.deinit(c.gpa);
-    if (resp.status != 200) {
-        try c.out.print("Could not list workspaces (HTTP {d}) — create or select one from the Harness app to continue.\n", .{resp.status});
-        return false;
-    }
-    var parsed = try json.parseFromSlice(json.Value, c.gpa, resp.body, .{});
+    defer c.gpa.free(listed);
+    var parsed = try json.parseFromSlice(json.Value, c.gpa, listed, .{});
     defer parsed.deinit();
-    const items: []const json.Value = switch (parsed.value) {
-        .object => |o| if (o.get("orgs")) |ov| (if (ov == .array) ov.array.items else &.{}) else &.{},
-        .array => |arr| arr.items,
-        else => &.{},
-    };
     var orgs: std.ArrayList(Org) = .empty;
     defer orgs.deinit(c.gpa);
-    for (items) |it| {
-        if (it != .object) continue;
-        const id = for ([_][]const u8{ "organizationId", "id" }) |k| {
-            if (it.object.get(k)) |v| if (v == .string and v.string.len > 0) break v.string;
-        } else continue;
-        const name = if (it.object.get("name")) |v| (if (v == .string) v.string else id) else id;
-        try orgs.append(c.gpa, .{ .id = id, .name = name });
+    for (parsed.value.object.get("orgs").?.array.items) |it| {
+        try orgs.append(c.gpa, .{ .id = it.object.get("organizationId").?.string, .name = it.object.get("name").?.string });
     }
-    const chosen: Org = switch (orgs.items.len) {
+    switch (orgs.items.len) {
         0 => {
-            try c.out.writeAll("No workspaces yet — create one in the Harness app, then run `harness-engine login` again.\n");
-            return false;
-        },
-        1 => blk: {
-            try c.out.print("Joining workspace \"{s}\"…\n", .{orgs.items[0].name});
-            break :blk orgs.items[0];
-        },
-        else => blk: {
-            try c.out.writeAll("\nYour workspaces:\n");
-            for (orgs.items, 1..) |o, i| try c.out.print("  {d}. {s}\n", .{ i, o.name });
+            try c.out.writeAll("No workspaces yet \u{2014} name your new workspace and press enter:\n");
             while (true) {
-                try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
                 try c.out.flush();
-                const line = readLine(c) orelse return false;
-                const n = std.fmt.parseInt(usize, line, 10) catch continue;
-                if (n >= 1 and n <= orgs.items.len) break :blk orgs.items[n - 1];
+                const name = readLine(c) orelse return false;
+                const created = auth.createOrg(c.io, name) catch |err| {
+                    try c.out.print("Creating workspace failed: {s}\n", .{auth.errorText(err)});
+                    continue;
+                };
+                c.gpa.free(created);
+                return auth.phase == .signed_in;
             }
         },
-    };
-    try c.out.flush();
-    auth.selectOrg(c.io, chosen.id) catch |err| {
-        try c.out.print("Joining workspace failed: {t}\n", .{err});
-        return false;
-    };
-    return auth.phase == .signed_in;
+        1 => {
+            try c.out.print("Joining workspace \"{s}\"\u{2026}\n", .{orgs.items[0].name});
+            try c.out.flush();
+            auth.selectOrg(c.io, orgs.items[0].id) catch |err| {
+                try c.out.print("Joining workspace failed: {s}\n", .{auth.errorText(err)});
+                return false;
+            };
+            return auth.phase == .signed_in;
+        },
+        else => {
+            try c.out.writeAll("\nYour workspaces:\n");
+            for (orgs.items, 1..) |o, i| try c.out.print("  {d}. {s}\n", .{ i, o.name });
+            try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
+            while (true) {
+                try c.out.flush();
+                const line = readLine(c) orelse return false;
+                const n = std.fmt.parseInt(usize, line, 10) catch 0;
+                if (n < 1 or n > orgs.items.len) {
+                    try c.out.print("Pick a workspace [1-{d}]:\n", .{orgs.items.len});
+                    continue;
+                }
+                auth.selectOrg(c.io, orgs.items[n - 1].id) catch |err| {
+                    try c.out.print("Joining workspace failed: {s}\n", .{auth.errorText(err)});
+                    continue;
+                };
+                return auth.phase == .signed_in;
+            }
+        },
+    }
 }
 
 /// `harness-engine login`: the paste-code sign-in (and workspace choice),
@@ -1225,4 +1227,40 @@ test "sync readout matches the Rust CLI's lines" {
             "Chat short: no room (dialing or edge-less)\n",
         out.written(),
     );
+}
+
+test "fix-sec 5: login with no workspaces asks for a name and creates one" {
+    const gpa = testing.allocator;
+    const sec = @import("sec_tests.zig");
+    const jwt_org_1 = "e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ.sig";
+    var edge: sec.MockEdge = .{ .server = try sec.listenLoopback(), .routes = &.{
+        .{ .path = "GET /auth/orgs", .status = 200, .body = "{\"orgs\":[]}" },
+        .{ .path = "POST /auth/orgs", .status = 200, .body = "{\"organizationId\":\"org_1\"}" },
+        .{ .path = "POST /auth/refresh", .status = 200, .body = "{\"accessToken\":\"" ++ jwt_org_1 ++ "\",\"refreshToken\":\"harness_rt_rotated\"}" },
+    } };
+    try edge.start();
+    defer edge.deinit();
+    var ubuf: [64]u8 = undefined;
+    const edge_url = edge.url(&ubuf);
+
+    var env = try syntheticEnv("/nonexistent-synthetic-data");
+    defer env.deinit();
+    try env.put("HARNESS_EDGE_URL", edge_url);
+    try env.put("HARNESS_CODEGRAFF_API_BASE", "https://oauth.example.invalid");
+    try env.put("HARNESS_CODEGRAFF_CLIENT_ID", "cg_client_synthetic");
+    var auth = try auth_host.AuthManager.init(gpa);
+    defer auth.deinit();
+    try auth.configureCodegraff(edge_url, "cg_client_synthetic", "https://oauth.example.invalid", null);
+    auth.refresh_token = try gpa.dupe(u8, "harness_rt_synthetic");
+    auth.access_token = try gpa.dupe(u8, "e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0.sig");
+    auth.phase = .needs_organization;
+    auth.signed_in = false;
+
+    // A blank line is asked again; the name creates the workspace and joins it.
+    var cap: Captured = .init("\n  \nAcme\n");
+    defer cap.deinit();
+    try testing.expect(try chooseWorkspace(cap.ctx(&env, 1, true), &auth, AuthEnv.from(&env)));
+    try testing.expect(std.mem.indexOf(u8, cap.text(), "No workspaces yet \u{2014} name your new workspace and press enter:") != null);
+    try testing.expectEqualStrings("org_1", auth.org_id.?);
+    try testing.expectEqual(auth_host.AuthPhase.signed_in, auth.phase);
 }
