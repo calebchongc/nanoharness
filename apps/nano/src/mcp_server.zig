@@ -202,6 +202,44 @@ pub fn route(a: Allocator, line_raw: []const u8) !Routed {
     return .{ .reply = try errorResponse(a, .null, invalid_request, "missing method") };
 }
 
+/// The longest request line read. A `show_visual` script alone may be
+/// 64 KiB and prompts can be far longer; a line past this is discarded
+/// through its newline and refused with -32600, and serving goes on.
+pub const max_line_bytes: usize = 16 * 1024 * 1024;
+
+/// One line of stdin, read by `nextLine`.
+pub const Line = union(enum) {
+    /// Without its newline; valid until the next call.
+    line: []const u8,
+    /// Longer than the cap: already discarded through its newline.
+    too_long,
+    /// End of input.
+    end,
+};
+
+/// Reads one newline-terminated line into `buf` (cleared first), whatever
+/// `in`'s own buffer size, holding at most `cap` bytes of it.
+pub fn nextLine(in: *std.Io.Reader, buf: *std.Io.Writer.Allocating, cap: usize) error{ ReadFailed, OutOfMemory }!Line {
+    buf.clearRetainingCapacity();
+    const n = in.streamDelimiterLimit(&buf.writer, '\n', .limited(cap + 1)) catch |err| switch (err) {
+        error.ReadFailed => return error.ReadFailed,
+        error.WriteFailed => return error.OutOfMemory,
+        error.StreamTooLong => {
+            _ = in.discardDelimiterInclusive('\n') catch |e| switch (e) {
+                error.EndOfStream => {},
+                error.ReadFailed => return error.ReadFailed,
+            };
+            return .too_long;
+        },
+    };
+    // The newline is next, or the input ended.
+    _ = in.takeByte() catch |err| switch (err) {
+        error.EndOfStream => if (n == 0) return .end,
+        error.ReadFailed => return error.ReadFailed,
+    };
+    return .{ .line = buf.written() };
+}
+
 /// One process's MCP server: the engine link, the tools, and the stdout lock.
 pub const Server = struct {
     gpa: Allocator,
@@ -209,8 +247,11 @@ pub const Server = struct {
     tools: tools.Tools,
     out: *std.Io.Writer,
     out_lock: Io.Mutex = .init,
-    workers: std.ArrayList(std.Thread) = .empty,
-    workers_lock: Io.Mutex = .init,
+    max_line: usize = max_line_bytes,
+    /// Requests being answered on their own (detached) threads.
+    in_flight: usize = 0,
+    flight_lock: Io.Mutex = .init,
+    idle: Io.Condition = .init,
 
     fn write(self: *Server, line: []const u8) void {
         self.out_lock.lockUncancelable(self.io);
@@ -237,22 +278,65 @@ pub const Server = struct {
         }
     }
 
+    /// Answers `raw` on a thread of its own, counted until it finishes; a
+    /// finished request leaves nothing behind.
+    fn dispatch(self: *Server, raw: []u8) void {
+        self.flight_lock.lockUncancelable(self.io);
+        self.in_flight += 1;
+        self.flight_lock.unlock(self.io);
+        const t = std.Thread.spawn(.{}, work, .{ self, raw }) catch return self.work(raw);
+        t.detach();
+    }
+
+    fn work(self: *Server, raw: []u8) void {
+        self.answer(raw);
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        self.in_flight -= 1;
+        if (self.in_flight == 0) self.idle.broadcast(self.io);
+    }
+
+    /// Requests still being answered.
+    pub fn inFlight(self: *Server) usize {
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        return self.in_flight;
+    }
+
+    fn waitIdle(self: *Server) void {
+        self.flight_lock.lockUncancelable(self.io);
+        defer self.flight_lock.unlock(self.io);
+        while (self.in_flight > 0) self.idle.waitUncancelable(self.io, &self.flight_lock);
+    }
+
     /// Reads requests until stdin closes, then lets in-flight ones finish.
     pub fn serve(self: *Server, in: *std.Io.Reader) !void {
+        defer self.waitIdle();
+        var buf: std.Io.Writer.Allocating = .init(self.gpa);
+        defer buf.deinit();
         while (true) {
-            const line = (in.takeDelimiter('\n') catch break) orelse break;
-            if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
-            const copy = try self.gpa.dupe(u8, line);
-            const t = std.Thread.spawn(.{}, answer, .{ self, copy }) catch {
-                self.answer(copy);
-                continue;
+            const next = nextLine(in, &buf, self.max_line) catch |err| switch (err) {
+                error.ReadFailed => break,
+                error.OutOfMemory => return err,
             };
-            self.workers_lock.lockUncancelable(self.io);
-            defer self.workers_lock.unlock(self.io);
-            try self.workers.append(self.gpa, t);
+            switch (next) {
+                .end => break,
+                .too_long => {
+                    // Give back what the refused line took.
+                    buf.deinit();
+                    buf = .init(self.gpa);
+                    var arena = std.heap.ArenaAllocator.init(self.gpa);
+                    defer arena.deinit();
+                    const a = arena.allocator();
+                    const why = try std.fmt.allocPrint(a, "request line longer than {d} bytes", .{self.max_line});
+                    self.write(try errorResponse(a, .null, invalid_request, why));
+                },
+                .line => |line| {
+                    if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
+                    self.dispatch(try self.gpa.dupe(u8, line));
+                },
+            }
         }
-        for (self.workers.items) |t| t.join();
-        self.workers.deinit(self.gpa);
     }
 };
 
@@ -353,9 +437,11 @@ test "daemon unit generation" {
 test {
     _ = @import("mcp/util.zig");
     _ = @import("mcp/engine_link.zig");
+    _ = @import("mcp/engine_link_tests.zig");
     _ = @import("mcp/transcript.zig");
     _ = @import("mcp/peer.zig");
     _ = @import("mcp/rooms.zig");
+    _ = @import("mcp/unicode_alnum.zig");
     _ = @import("mcp/bots.zig");
     _ = @import("mcp/tools.zig");
     _ = @import("mcp/tests.zig");

@@ -120,7 +120,14 @@ const World = struct {
         \\ "unreadFrom":{"alpha":1},"redacted":{"email":1},"stripped":0}
     ,
     room_post_status: i64 = 200,
+    /// The transcript `WatchDocMessages` resets to; null: a greeting.
+    doc_reset: ?[]const u8 = null,
+    /// Replies the edge gives, by HTTP method and path suffix; checked
+    /// before the defaults below.
+    room_replies: []const RoomReply = &.{},
     writes: std.ArrayList([2][]const u8) = .empty,
+
+    const RoomReply = struct { method: []const u8, path_end: []const u8, status: i64, body: []const u8 };
 
     fn engine(self: *World) link.Engine {
         return .{ .ptr = self, .vtable = &.{ .call = callFn, .subscribe = subFn } };
@@ -173,6 +180,14 @@ const World = struct {
         const eq = std.mem.eql;
         const m = u.str(params, "method") orelse "";
         const path = u.str(params, "path") orelse "";
+        for (self.room_replies) |r| {
+            if (!eq(u8, m, r.method) or !std.mem.endsWith(u8, path, r.path_end)) continue;
+            if (eq(u8, m, "POST")) try self.writes.append(self.a, .{ "RoomRequest", try self.a.dupe(u8, params_json) });
+            var o = u.obj(a);
+            try o.put("status", u.i(r.status));
+            try o.put("body", try json.parseFromSliceLeaky(Value, a, r.body, .{ .allocate = .alloc_always }));
+            return .{ .ok = o.value() };
+        }
         var status: i64 = 200;
         const body: []const u8 = if (eq(u8, m, "GET") and eq(u8, path, "rooms"))
             "{\"rooms\":[{\"id\":\"room_0123456789abcdef01234567\",\"name\":\"build\"}]}"
@@ -217,6 +232,7 @@ const World = struct {
         if (eq(u8, method, "WatchQueue")) return std.fmt.allocPrint(a, "{{\"items\":{s}}}", .{self.queue_items});
         if (eq(u8, method, "WatchDocMessages")) {
             _ = params;
+            if (self.doc_reset) |reset| return std.fmt.allocPrint(a, "{{\"reset\":{s}}}", .{reset});
             return
             \\{"reset":[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"hi"}]},
             \\          {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"complete","parts":[{"kind":"text","id":"t","text":"hello back"}]}]}
@@ -487,7 +503,49 @@ fn sval(v: Value, path: []const []const u8) ?[]const u8 {
 
 // ---- protocol --------------------------------------------------------------------------
 
-test "mcp catalog: the checked-in fixture is the Rust server's tool list" {
+/// `protocol/mcp-tools.json`, read from the repository at test time.
+fn sharedCatalog(a: Allocator) ![]const Value {
+    const protocol_dir = @import("parity_options").protocol_dir;
+    const path = try std.fs.path.join(a, &.{ protocol_dir, "..", "mcp-tools.json" });
+    const text = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, a, .limited(1 << 20));
+    return (try json.parseFromSliceLeaky(Value, a, text, .{})).array.items;
+}
+
+test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, order, descriptions and input schemas" {
+    const f = try WorldFixture.create(.{ .chat_id = "chat-beta-2" });
+    defer f.destroy();
+    const a = f.arena.allocator();
+    const shared = try sharedCatalog(a);
+    try testing.expectEqual(@as(usize, 31), shared.len);
+    for (shared) |t| {
+        // Exactly these keys, so nothing else could be served.
+        try testing.expectEqual(@as(usize, 3), t.object.count());
+        try testing.expect(u.str(t, "name") != null and u.str(t, "description") != null);
+        try testing.expect(u.get(t, "inputSchema").? == .object);
+    }
+    // The embedded copy is the file, byte for byte.
+    const protocol_dir = @import("parity_options").protocol_dir;
+    const raw = try std.Io.Dir.cwd().readFileAlloc(testing.io, try std.fs.path.join(a, &.{ protocol_dir, "..", "mcp-tools.json" }), a, .limited(1 << 20));
+    try testing.expectEqualStrings(raw, tools.catalog_json);
+
+    // From a chat: every tool, in the file's order, each exactly as written.
+    const served = u.array(u.get(try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(1), "tools/list", .null), .{}), "result").?, "tools").?;
+    try testing.expectEqual(shared.len, served.len);
+    for (shared, served) |want, got| try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, got));
+    // From a terminal: the same, without the two that publish into a chat.
+    f.t.origin = .{};
+    const plain = u.array(u.get(try json.parseFromSliceLeaky(Value, a, try mcp.handleRequest(&f.t, a, u.i(2), "tools/list", .null), .{}), "result").?, "tools").?;
+    var k: usize = 0;
+    for (shared) |want| {
+        const name = u.str(want, "name").?;
+        if (std.mem.eql(u8, name, "show_image") or std.mem.eql(u8, name, "show_visual")) continue;
+        try testing.expectEqualStrings(try u.stringify(a, want), try u.stringify(a, plain[k]));
+        k += 1;
+    }
+    try testing.expectEqual(plain.len, k);
+}
+
+test "mcp catalog: the shared catalog is the Rust server's tool list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -602,6 +660,154 @@ test "mcp protocol: stdio serving answers concurrently and finishes in-flight re
     try testing.expect(std.mem.indexOf(u8, written, "\"id\":1,\"result\":{\"protocolVersion\"") != null);
     try testing.expect(std.mem.indexOf(u8, written, "\"id\":2,\"result\":{\"content\"") != null);
     try testing.expect(std.mem.indexOf(u8, written, "-32700") != null);
+}
+
+/// The id-sorted lines `serve` wrote, each parsed.
+fn servedLines(a: Allocator, written: []const u8) ![]const Value {
+    var out: std.ArrayList(Value) = .empty;
+    var it = std.mem.splitScalar(u8, written, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try out.append(a, try json.parseFromSliceLeaky(Value, a, line, .{}));
+    }
+    std.mem.sort(Value, out.items, {}, struct {
+        fn lt(_: void, x: Value, y: Value) bool {
+            return (u.int(x, "id") orelse -1) < (u.int(y, "id") orelse -1);
+        }
+    }.lt);
+    return out.items;
+}
+
+test "mcp protocol: a 1 MiB request line is answered; a line over the cap is refused and serving goes on" {
+    const f = try WorldFixture.create(.{});
+    defer f.destroy();
+    const gpa = testing.allocator;
+    const a = f.arena.allocator();
+    // A 1 MiB argument, then a line one byte over the 16 MiB cap, then a ping.
+    const pad = try a.alloc(u8, 1024 * 1024);
+    @memset(pad, 'p');
+    const over = try a.alloc(u8, mcp.max_line_bytes + 1);
+    @memset(over, 'x');
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(gpa);
+    try input.print(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"list_models\",\"arguments\":{{\"harness\":\"claude-code\",\"pad\":\"{s}\"}}}}}}\n", .{pad});
+    try input.appendSlice(gpa, over);
+    try input.appendSlice(gpa, "\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}");
+    // Through a 64 KiB buffer, as stdin is read.
+    var small: [64 * 1024]u8 = undefined;
+    var stdin_like = std.testing.Reader.init(&small, &.{.{ .buffer = input.items }});
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var server: mcp.Server = .{ .gpa = gpa, .io = testing.io, .tools = f.t, .out = &out.writer };
+    try server.serve(&stdin_like.interface);
+    const lines = try servedLines(a, out.written());
+    try testing.expectEqual(@as(usize, 3), lines.len);
+    // The refusal has no id; it sorts first.
+    try testing.expect(u.get(lines[0], "id").? == .null);
+    try testing.expectEqual(@as(i64, -32600), u.int(u.get(lines[0], "error").?, "code").?);
+    try testing.expectEqualStrings("request line longer than 16777216 bytes", sval(lines[0], &.{ "error", "message" }).?);
+    try testing.expectEqual(@as(i64, 1), u.int(lines[1], "id").?);
+    try testing.expectEqualStrings("claude-code", sval(lines[1], &.{ "result", "structuredContent", "harness" }).?);
+    try testing.expectEqual(@as(i64, 3), u.int(lines[2], "id").?);
+    try testing.expect(u.get(lines[2], "result") != null);
+}
+
+/// Stdin that hands over one line at a time, each only after every
+/// earlier request was answered, and notes how many were still in flight.
+const PacedInput = struct {
+    interface: std.Io.Reader,
+    lines: []const []const u8,
+    next: usize = 0,
+    offset: usize = 0,
+    server: *mcp.Server = undefined,
+    out: *std.Io.Writer.Allocating = undefined,
+    max_in_flight_between: usize = 0,
+    waited_too_long: bool = false,
+
+    fn init(buffer: []u8, lines: []const []const u8) PacedInput {
+        return .{ .lines = lines, .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 } };
+    }
+
+    fn answered(self: *PacedInput) usize {
+        self.server.out_lock.lockUncancelable(testing.io);
+        defer self.server.out_lock.unlock(testing.io);
+        return std.mem.count(u8, self.out.written(), "\n");
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *PacedInput = @alignCast(@fieldParentPtr("interface", r));
+        if (self.next == self.lines.len) return error.EndOfStream;
+        if (self.offset == 0 and self.next > 0) {
+            var waited: u32 = 0;
+            while (self.answered() < self.next) : (waited += 5) {
+                if (waited >= 5000) {
+                    self.waited_too_long = true;
+                    return error.EndOfStream;
+                }
+                std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+            }
+            // A worker retires right after writing its reply.
+            if (@hasDecl(mcp.Server, "inFlight")) {
+                var retired: u32 = 0;
+                while (self.server.inFlight() != 0) : (retired += 5) {
+                    if (retired >= 2000) {
+                        self.max_in_flight_between = @max(self.max_in_flight_between, self.server.inFlight());
+                        break;
+                    }
+                    std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+                }
+            }
+        }
+        const line = self.lines[self.next];
+        const n = try w.write(limit.sliceConst(line[self.offset..]));
+        self.offset += n;
+        if (self.offset == line.len) {
+            self.next += 1;
+            self.offset = 0;
+        }
+        return n;
+    }
+};
+
+test "mcp protocol: a finished request leaves no thread or record behind during a long session" {
+    // Serving keeps a count of requests in flight, not a list of threads
+    // that only EOF would join.
+    try testing.expect(!@hasField(mcp.Server, "workers"));
+    const f = try WorldFixture.create(.{});
+    defer f.destroy();
+    const a = f.arena.allocator();
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (0..25) |k| try lines.append(a, try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"ping\"}}\n", .{k + 1}));
+    var buf: [256]u8 = undefined;
+    var input = PacedInput.init(&buf, lines.items);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var server: mcp.Server = .{ .gpa = testing.allocator, .io = testing.io, .tools = f.t, .out = &out.writer };
+    input.server = &server;
+    input.out = &out;
+    try server.serve(&input.interface);
+    try testing.expect(!input.waited_too_long);
+    try testing.expectEqual(@as(usize, 25), std.mem.count(u8, out.written(), "\n"));
+    try testing.expectEqual(@as(usize, 0), input.max_in_flight_between);
+    if (@hasDecl(mcp.Server, "inFlight")) try testing.expectEqual(@as(usize, 0), server.inFlight());
+}
+
+test "mcp protocol: line reading keeps a line of exactly the cap and refuses one byte more" {
+    const gpa = testing.allocator;
+    var buf: std.Io.Writer.Allocating = .init(gpa);
+    defer buf.deinit();
+    var small: [2]u8 = undefined;
+    var r = std.testing.Reader.init(&small, &.{.{ .buffer = "abcd\nabcde\nab\r\n\nlast" }});
+    try testing.expectEqualStrings("abcd", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expect((try mcp.nextLine(&r.interface, &buf, 4)) == .too_long);
+    try testing.expectEqualStrings("ab\r", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expectEqualStrings("", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expectEqualStrings("last", (try mcp.nextLine(&r.interface, &buf, 4)).line);
+    try testing.expect((try mcp.nextLine(&r.interface, &buf, 4)) == .end);
+    // An over-cap line the input ends inside.
+    var tail = std.Io.Reader.fixed("abcdefgh");
+    try testing.expect((try mcp.nextLine(&tail, &buf, 4)) == .too_long);
+    try testing.expect((try mcp.nextLine(&tail, &buf, 4)) == .end);
 }
 
 // ---- chat tools against the in-process engine ---------------------------------------------
@@ -782,8 +988,16 @@ test "mcp create_chat: writes the row, records the parent, validates harness, mo
     try testing.expectEqualStrings("feat", u.str(cp, "branch").?);
     try testing.expectEqualStrings("workspace-write", sval(cp, &.{ "config", "sandbox" }).?);
     try testing.expectEqualStrings("Spawned", u.str(f.rec.last("Mutate").?, "title").?);
-    // The engine has the row now.
-    try testing.expectEqualStrings("Spawned", sval(try ok(try f.call("get_chat", try std.fmt.allocPrint(f.arena.allocator(), "{{\"chat\":\"{s}\"}}", .{new_id}))), &.{"title"}).?);
+    // The engine has the row now, with its parent and host device.
+    const stored = try ok(try f.call("get_chat", try std.fmt.allocPrint(f.arena.allocator(), "{{\"chat\":\"{s}\"}}", .{new_id})));
+    try testing.expectEqualStrings("Spawned", u.str(stored, "title").?);
+    try testing.expectEqualStrings("chat-beta-2", u.str(stored, "parentChatId").?);
+    try testing.expectEqualStrings("dev-local", u.str(stored, "deviceId").?);
+    try testing.expectEqualStrings("chat-beta-2", f.chat(new_id).parent_chat_id.?);
+    // Listed among the parent's children.
+    const kids = u.array(try ok(try f.call("list_chats", "{\"parent\":\"Beta\"}")), "chats").?;
+    try testing.expectEqual(@as(usize, 1), kids.len);
+    try testing.expectEqualStrings(new_id, u.str(kids[0], "id").?);
 
     // A first prompt runs right away; from a chat, the wait is a snapshot.
     const run = try ok(try f.call("create_chat", "{\"device\":\"Laptop\",\"harness\":\"graff\",\"prompt\":\"say hi\",\"wait\":true}"));
@@ -956,6 +1170,48 @@ test "mcp wait rules: a send in flight waits for the turn past its baseline" {
     try testing.expectEqual(@as(?tools.TurnOutcome, .awaitingInput), w4.observe(asking));
 }
 
+test "mcp wait rules: a completion marker counts as a string or a number, and a coalesced watch that never shows working completes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = struct {
+        fn row(al: Allocator, marker: []const u8, at: []const u8) !Value {
+            return json.parseFromSliceLeaky(Value, al, try std.fmt.allocPrint(al, "{{\"status\":\"idle\",\"updatedAt\":\"2026-11-10T00:00:{s}Z\",\"lastCompletedTurn\":{s}}}", .{ at, marker }), .{});
+        }
+    }.row;
+    // Each encoding: the baseline, the same marker again, and the next turn's
+    // marker arriving straight away (the working rows coalesced away).
+    const cases = [_][3][]const u8{
+        .{ "\"asst-1\"", "\"asst-1\"", "\"asst-2\"" },
+        .{ "7", "7", "8" },
+    };
+    for (cases) |c| {
+        const base = try p(a, c[0], "00");
+        const same = try p(a, c[1], "00");
+        const next = try p(a, c[2], "09");
+        // The stream.
+        var w: tools.TurnWatch = .{ .baseline = base, .expect_turn = true };
+        try testing.expectEqual(@as(?tools.TurnOutcome, null), w.observe(same));
+        try testing.expectEqual(@as(?tools.TurnOutcome, .completed), w.observe(next));
+        try testing.expect(!w.saw_working);
+        // A first send (no baseline row): a marker at all is a finished turn.
+        var first: tools.TurnWatch = .{ .baseline = null, .expect_turn = true };
+        try testing.expectEqual(@as(?tools.TurnOutcome, .completed), first.observe(next));
+        // The zero-timeout snapshot.
+        try testing.expectEqual(tools.TurnOutcome.completed, tools.snapshotOutcome(next, base, true));
+        try testing.expectEqual(tools.TurnOutcome.timedOut, tools.snapshotOutcome(same, base, true));
+        if (@hasDecl(tools, "turnMarker")) try testing.expect(tools.turnMarker(next) != null);
+    }
+    // Raw values: a string never equals the number it spells, and null is
+    // the same as no marker.
+    var mixed: tools.TurnWatch = .{ .baseline = try p(a, "\"7\"", "00"), .expect_turn = true };
+    try testing.expectEqual(@as(?tools.TurnOutcome, .completed), mixed.observe(try p(a, "7", "00")));
+    const none = try json.parseFromSliceLeaky(Value, a, "{\"status\":\"idle\",\"updatedAt\":\"2026-11-10T00:00:00Z\"}", .{});
+    var nulls: tools.TurnWatch = .{ .baseline = none, .expect_turn = true };
+    try testing.expectEqual(@as(?tools.TurnOutcome, null), nulls.observe(try p(a, "null", "00")));
+    if (@hasDecl(tools, "turnMarker")) try testing.expect(tools.turnMarker(try p(a, "null", "00")) == null);
+}
+
 test "mcp commands: interrupt, respond, dismiss, rename and archive reach the engine" {
     const f = try HostFixture.create(.{});
     defer f.destroy();
@@ -998,8 +1254,32 @@ test "mcp commands: interrupt, respond, dismiss, rename and archive reach the en
 test "mcp respond_to_input: the current pending question is found in the transcript" {
     const w = try WorldFixture.create(.{});
     defer w.destroy();
-    // The World transcript has no question; inject one through a send's view.
-    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q\",\"labels\":[\"a\"]}]}"), "chat chat-alp has no pending question");
+    // An older answered question, then the one still open.
+    w.world.doc_reset =
+        \\[{"id":"u1","role":"user","createdAt":1,"deviceId":"dev-local","parts":[{"kind":"text","id":"t","text":"ship it"}]},
+        \\ {"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"streaming","parts":[
+        \\   {"kind":"input","id":"i1","requestId":"req-old","questions":[{"id":"q0","prompt":"Start?"}],"resolved":true},
+        \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":false}]}]
+    ;
+    try testing.expectEqualStrings("req-7", sval(try ok(try w.call("get_chat", "{\"chat\":\"Alpha\"}")), &.{ "pendingInput", "requestId" }).?);
+    const answered = try ok(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"));
+    try testing.expectEqualStrings("req-7", u.str(answered, "requestId").?);
+    const sent = w.lastWrite("QueueCommand").?;
+    try testing.expectEqualStrings("chat-alpha-1", u.str(sent, "chatId").?);
+    try testing.expectEqualStrings("respondInput", sval(sent, &.{ "command", "kind" }).?);
+    try testing.expectEqualStrings("req-7", sval(sent, &.{ "command", "requestId" }).?);
+    const ans = u.array(u.get(sent, "command").?, "answers").?;
+    try testing.expectEqualStrings("q1", u.str(ans[0], "questionId").?);
+    try testing.expectEqualStrings("Yes", u.array(ans[0], "labels").?[0].string);
+    const dismissed = try ok(try w.call("dismiss_input", "{\"chat\":\"Alpha\"}"));
+    try testing.expectEqualStrings("req-7", u.str(dismissed, "requestId").?);
+    try testing.expectEqualStrings("req-7", sval(w.lastWrite("QueueCommand").?, &.{ "command", "requestId" }).?);
+    // Once answered, nothing is pending.
+    w.world.doc_reset =
+        \\[{"id":"a1","role":"assistant","createdAt":2,"deviceId":"dev-local","status":"complete","parts":[
+        \\   {"kind":"input","id":"i2","requestId":"req-7","questions":[{"id":"q1","prompt":"Push to main?"}],"resolved":true}]}]
+    ;
+    try expectErr(try w.call("respond_to_input", "{\"chat\":\"Alpha\",\"answers\":[{\"question_id\":\"q1\",\"labels\":[\"Yes\"]}]}"), "chat chat-alp has no pending question");
 }
 
 // ---- publishing -------------------------------------------------------------------------
@@ -1061,7 +1341,7 @@ test "mcp post_room: queues framed peer mail for mentioned chats and reports red
     const queued = w.lastWrite("QueueMessage").?;
     try testing.expectEqualStrings("chat-alpha-1", u.str(queued, "chatId").?);
     const text = u.str(queued, "text").?;
-    try testing.expect(peer.isRoomDelivery(text));
+    try testing.expect(peer.isRoomDelivery(w.arena.allocator(), text));
     try testing.expect(std.mem.indexOf(u8, text, "[room message from beta · room build #3 · agent, advisory]: @alpha the build is green") != null);
 
     // The room's refusals come back readable, and are not retried.
@@ -1111,13 +1391,43 @@ test "mcp rooms: list, create, join, read, inbox, release, archive, destroy and 
     try expectErr(try w.call("room_inbox", "{}"), "room tools speak for a Harness chat; this server has no HARNESS_CHAT_ID");
 }
 
-test "mcp rooms: the Zig engine's RoomRequest reply is passed through as it is" {
-    const f = try HostFixture.create(.{ .chat_id = "chat-beta-2" });
-    defer f.destroy();
-    // The engine answers status 200 with a string body; nothing is invented.
-    const listed = try ok(try f.call("list_rooms", "{}"));
-    try testing.expect(u.get(listed, "rooms").? == .null);
-    try expectErrStarts(try f.call("read_room", "{\"room\":\"build\"}"), "no room named \"build\" that you can see");
+test "mcp rooms: the edge's refusals read as errors, and a reply that is not an object is never a success" {
+    const w = try WorldFixture.create(.{ .chat_id = "chat-beta-2", .device_id = "dev-local" });
+    defer w.destroy();
+    // The edge's own replies (`edge/src/index.ts`: `{error, message}` with
+    // the RoomError status): a credential in a post, a claim someone else
+    // holds, and a destroy by a member who is not an owner.
+    w.world.room_replies = &.{
+        .{ .method = "POST", .path_end = "/post", .status = 422, .body = "{\"error\":\"secret_detected\",\"message\":\"the post looks like it contains a credential (api key)\"}" },
+        .{ .method = "POST", .path_end = "/release", .status = 409, .body = "{\"error\":\"claim_held\",\"message\":\"task-1 is held or done by someone else\"}" },
+        .{ .method = "POST", .path_end = "/destroy", .status = 403, .body = "{\"error\":\"owner_only\",\"message\":\"owner_only\"}" },
+    };
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"key=sk-synthetic\"}"), "room request failed (422): secret_detected: the post looks like it contains a credential (api key)");
+    try expectErr(try w.call("release_claim", "{\"room\":\"build\",\"claim_key\":\"task-1\"}"), "room request failed (409): claim_held: task-1 is held or done by someone else");
+    try expectErr(try w.call("destroy_room", "{\"room\":\"build\"}"), "room request failed (403): owner_only");
+    // A refused post queued nothing for anyone.
+    try testing.expect(w.lastWrite("QueueMessage") == null);
+
+    // A 2xx whose body is not an object: every room tool fails rather than
+    // answering nulls, and a post never reports seq 0 as sent.
+    w.world.room_replies = &.{
+        .{ .method = "GET", .path_end = "rooms", .status = 200, .body = "\"ok\"" },
+    };
+    try expectErr(try w.call("list_rooms", "{}"), "room request failed (200): the room's reply is not a JSON object");
+    try expectErr(try w.call("read_room", "{\"room\":\"build\"}"), "room request failed (200): the room's reply is not a JSON object");
+    w.world.room_replies = &.{
+        .{ .method = "POST", .path_end = "/post", .status = 200, .body = "[]" },
+        .{ .method = "GET", .path_end = "rooms/inbox", .status = 204, .body = "null" },
+    };
+    const before = w.world.writes.items.len;
+    try expectErr(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha done\"}"), "room request failed (200): the room's reply is not a JSON object");
+    // Not retried (the room answered), and nobody was woken.
+    try testing.expectEqual(before + 1, w.world.writes.items.len);
+    try testing.expect(w.lastWrite("QueueMessage") == null);
+    try expectErr(try w.call("room_inbox", "{}"), "room request failed (204): the room's reply is not a JSON object");
+    // The edge's real success replies still read through.
+    w.world.room_replies = &.{};
+    try testing.expectEqual(@as(i64, 3), u.int(try ok(try w.call("post_room", "{\"room\":\"build\",\"text\":\"@alpha done\"}")), "seq").?);
 }
 
 // ---- bots --------------------------------------------------------------------------------------
@@ -1156,6 +1466,62 @@ test "mcp list_bots: each bot's routines and which are due" {
     // A project hosted elsewhere.
     try f.setup("{\"op\":\"createSpace\",\"spaceId\":\"space-far\",\"deviceId\":\"dev-far\",\"path\":\"/far/repo\"}");
     try expectErr(try f.call("list_bots", "{\"project\":\"space-far\"}"), "bots are files in the project folder, and repo is hosted on another device; ask a chat on that device");
+}
+
+test "mcp list_bots: rows are type-checked as the Rust structs declare them" {
+    const f = try HostFixture.create(.{ .chat_id = "chat-alpha-1" });
+    defer f.destroy();
+    try f.bots.set("due --json", "[]");
+    try f.bots.set("routine list --json", "[]");
+    const refused = "graff bot list did not print the JSON this Harness reads";
+    // `model: String` and `yolo: bool` default when absent, never when null
+    // or another type.
+    for ([_][]const u8{
+        "[{\"name\":\"t\",\"job\":\"j\",\"model\":null}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"model\":7}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"yolo\":\"yes\"}]",
+        "[{\"name\":\"t\",\"job\":\"j\",\"yolo\":null}]",
+        "[\"t\"]",
+    }) |out| {
+        try f.bots.set("list --json", out);
+        try expectErr(try f.call("list_bots", "{}"), refused);
+    }
+    try f.bots.set("list --json", "[{\"name\":\"t\",\"job\":\"j\"}]");
+    // `runs: u32`.
+    for ([_][]const u8{ "\"2\"", "-1", "4294967296", "1.5", "null" }) |runs| {
+        try f.bots.set("routine list --json", try std.fmt.allocPrint(f.arena.allocator(), "[{{\"bot\":\"t\",\"id\":\"r\",\"instruction\":\"i\",\"when\":\"daily\",\"message\":\"m\",\"runs\":{s}}}]", .{runs}));
+        try expectErr(try f.call("list_bots", "{}"), "graff bot routine list did not print the JSON this Harness reads");
+    }
+    try f.bots.set("routine list --json", "[{\"bot\":\"t\",\"id\":\"r\",\"instruction\":\"i\",\"when\":\"daily\",\"message\":\"m\",\"runs\":4294967295}]");
+    const v = try ok(try f.call("list_bots", "{}"));
+    const bot = u.array(v, "bots").?[0];
+    try testing.expect(u.get(bot, "model").? == .null);
+    try testing.expect(!u.boolean(bot, "skipsApprovals").?);
+    try testing.expectEqual(@as(i64, 4294967295), u.int(u.array(bot, "routines").?[0], "runs").?);
+}
+
+test "mcp times: chrono's AutoSi form, to the nanosecond" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][2][]const u8{
+        .{ "2026-11-10T00:00:01Z", "2026-11-10T00:00:01Z" },
+        .{ "2026-11-10T00:00:01.000Z", "2026-11-10T00:00:01Z" },
+        .{ "2026-11-10T00:00:01.5Z", "2026-11-10T00:00:01.500Z" },
+        .{ "2026-11-10T00:00:01.120Z", "2026-11-10T00:00:01.120Z" },
+        .{ "2026-11-10T00:00:01.123456Z", "2026-11-10T00:00:01.123456Z" },
+        .{ "2026-11-10T00:00:01.000001Z", "2026-11-10T00:00:01.000001Z" },
+        .{ "2026-11-10T00:00:01.123456789Z", "2026-11-10T00:00:01.123456789Z" },
+        .{ "2026-11-10T00:00:01.1234567891Z", "2026-11-10T00:00:01.123456789Z" },
+        .{ "2026-11-10T08:00:01.25+08:00", "2026-11-10T00:00:01.250Z" },
+        .{ "not a time", "not a time" },
+    };
+    for (cases) |c| {
+        var o = u.obj(a);
+        try o.put("at", u.s(c[0]));
+        try testing.expectEqualStrings(c[1], (try tools.timeValue(a, o.value(), "at")).string);
+    }
+    try testing.expect((try tools.timeValue(a, u.obj(a).value(), "at")) == .null);
 }
 
 test "mcp run_bot and run_due_bots: graff chats that open with the bot's standing text" {

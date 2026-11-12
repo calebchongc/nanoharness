@@ -92,21 +92,21 @@ pub fn fromSender(text: []const u8, origin: []const u8) bool {
     return std.mem.endsWith(u8, label, suffix);
 }
 
-/// A person's prompt: neither a peer envelope nor a room delivery.
-pub fn isHumanPrompt(text: []const u8) bool {
-    return !std.mem.startsWith(u8, text, prefix) and !isRoomDelivery(text);
+/// A person's prompt: neither a peer envelope nor a room delivery. `a`
+/// holds the delivery tag while it is checked (an arena).
+pub fn isHumanPrompt(a: Allocator, text: []const u8) bool {
+    return !std.mem.startsWith(u8, text, prefix) and !isRoomDelivery(a, text);
 }
 
-/// `room_delivery::is_delivery`: opens with a well-formed delivery tag.
-pub fn isRoomDelivery(text: []const u8) bool {
+/// `room_delivery::is_delivery`: opens with a well-formed delivery tag. The
+/// tag is parsed into `a`, so a long room or member name still parses.
+pub fn isRoomDelivery(a: Allocator, text: []const u8) bool {
     const open = "<!--harness-room ";
     const close = " -->";
     if (!std.mem.startsWith(u8, text, open)) return false;
     const rest = text[open.len..];
     const end = std.mem.indexOf(u8, rest, close) orelse return false;
-    var buf: [4096]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const tag = json.parseFromSliceLeaky(json.Value, fba.allocator(), rest[0..end], .{}) catch return false;
+    const tag = json.parseFromSliceLeaky(json.Value, a, rest[0..end], .{}) catch return false;
     // `RoomOrigin`'s required fields.
     return u.str(tag, "room_id") != null and u.str(tag, "room_name") != null and
         u.int(tag, "seq") != null and u.str(tag, "from_member") != null and
@@ -205,7 +205,7 @@ pub const RelayLedger = struct {
         const r = self.read(a, file) orelse return 0;
         var prompted_since = false;
         for (messages) |m| {
-            if (m.isRole("user") and m.created_at > r.at and isHumanPrompt(m.text.items)) prompted_since = true;
+            if (m.isRole("user") and m.created_at > r.at and isHumanPrompt(a, m.text.items)) prompted_since = true;
         }
         if (now_ms - r.at > entry_ttl_ms or prompted_since) {
             Io.Dir.cwd().deleteFile(self.io, file) catch {};
@@ -242,10 +242,18 @@ pub const RunResult = union(enum) {
     failed: []const u8,
 };
 
-/// Runs `argv` in `cwd` with `stdin_text` piped in, collecting its output;
-/// the child is killed when `timeout_ms` passes.
+/// Output kept from a CLI: past this the child is killed and the run fails.
+pub const max_stdout_bytes: usize = 4 * 1024 * 1024;
+pub const max_stderr_bytes: usize = 1024 * 1024;
+
+/// Runs `argv` in `cwd` with `stdin_text` piped in, collecting its output.
+/// The deadline covers everything, the stdin write included (it goes from a
+/// thread of its own, so a child that never reads cannot block it); the
+/// child is killed when the deadline passes or its output grows past the
+/// caps.
 pub fn runCli(a: Allocator, io: Io, argv: []const []const u8, cwd: ?[]const u8, stdin_text: ?[]const u8, timeout_ms: i64) !RunResult {
     if (comptime !std.process.can_spawn) return .{ .failed = "this platform cannot run the graff CLI" };
+    const deadline: Io.Timeout = (Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }).toDeadline(io);
     var child = std.process.spawn(io, .{
         .argv = argv,
         .cwd = if (cwd) |c| .{ .path = c } else .inherit,
@@ -253,21 +261,34 @@ pub fn runCli(a: Allocator, io: Io, argv: []const []const u8, cwd: ?[]const u8, 
         .stdout = .pipe,
         .stderr = .pipe,
     }) catch |err| return .{ .failed = try std.fmt.allocPrint(a, "could not run {s}: {t}", .{ argv[0], err }) };
-    defer child.kill(io);
+    var feeder: ?std.Thread = null;
+    // Kill first, so a feeder blocked on a child that stopped reading ends.
+    defer {
+        child.kill(io);
+        if (feeder) |t| t.join();
+    }
     if (stdin_text) |text| {
         if (child.stdin) |f| {
-            f.writeStreamingAll(io, text) catch {};
-            f.close(io);
             child.stdin = null;
+            const Feed = struct {
+                fn run(fio: Io, file: Io.File, bytes: []const u8) void {
+                    file.writeStreamingAll(fio, bytes) catch {};
+                    file.close(fio);
+                }
+            };
+            feeder = std.Thread.spawn(.{}, Feed.run, .{ io, f, text }) catch blk: {
+                Feed.run(io, f, text);
+                break :blk null;
+            };
         }
     }
-    const deadline: Io.Timeout = (Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }).toDeadline(io);
     var mr_buf: Io.File.MultiReader.Buffer(2) = undefined;
     var mr: Io.File.MultiReader = undefined;
     mr.init(a, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
     defer mr.deinit();
     while (mr.fill(64, deadline)) |_| {
-        if (mr.reader(0).buffered().len > 4 * 1024 * 1024 or mr.reader(1).buffered().len > 1024 * 1024) break;
+        if (mr.reader(0).buffered().len > max_stdout_bytes or mr.reader(1).buffered().len > max_stderr_bytes)
+            return .{ .failed = try std.fmt.allocPrint(a, "{s} printed more than {d} MiB", .{ argv[0], max_stdout_bytes / (1024 * 1024) }) };
     } else |err| switch (err) {
         error.EndOfStream => {},
         error.Timeout => return .{ .failed = "timeout" },
@@ -463,6 +484,56 @@ test "mcp graff cli: output, failure text and the enforced timeout" {
 
     const slow = try runCli(a, testing.io, &.{ "/bin/sh", "-c", "sleep 5" }, null, null, 200);
     try testing.expectEqualStrings("timeout", slow.failed);
+}
+
+fn awakeMs() i64 {
+    return @intCast(Io.Clock.awake.now(testing.io).toMilliseconds());
+}
+
+test "mcp graff cli: the deadline covers a stdin the child never reads, and too much output kills the child" {
+    if (comptime !std.process.can_spawn) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 1 MiB on stdin to a child that never reads it: far past a pipe's buffer.
+    const big = try a.alloc(u8, 1024 * 1024);
+    @memset(big, 'x');
+    const t0 = awakeMs();
+    const stuck = try runCli(a, testing.io, &.{ "/bin/sh", "-c", "sleep 5" }, null, big, 300);
+    try testing.expect(stuck == .failed);
+    try testing.expectEqualStrings("timeout", stuck.failed);
+    try testing.expect(awakeMs() - t0 < 3000);
+    // More than 4 MiB of output, then a child that would keep running.
+    const t1 = awakeMs();
+    const loud = try runCli(a, testing.io, &.{ "/bin/sh", "-c", "dd if=/dev/zero bs=1000000 count=5 2>/dev/null; sleep 5" }, null, null, 10_000);
+    try testing.expect(loud == .failed);
+    try testing.expectEqualStrings("/bin/sh printed more than 4 MiB", loud.failed);
+    try testing.expect(awakeMs() - t1 < 3000);
+}
+
+test "mcp peer: a room delivery with a long room name is not a person's prompt and keeps the relay ledger" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const long_name = try a.alloc(u8, 6000);
+    @memset(long_name, 'r');
+    const text = try @import("rooms.zig").deliveryText(a, "room_0123456789abcdef01234567", long_name, 4, "alpha", "status");
+    try testing.expect(isRoomDelivery(a, text));
+    try testing.expect(!isHumanPrompt(a, text));
+    // A ledger entry, then that delivery arriving later: the chain stands.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/peer-relay", .{tmp.sub_path});
+    const ledger: RelayLedger = .{ .io = testing.io, .dir = dir };
+    const now: i64 = 2_000_000;
+    try testing.expectEqual(@as(?[]const u8, null), try ledger.record(a, "chat-r", 3, "sender", now));
+    var msgs = try userMessages(a, text);
+    msgs[0].created_at = now + 5;
+    try testing.expectEqual(@as(u32, 3), ledger.inbound(a, "chat-r", msgs, now + 10));
+    // A person's prompt does clear it.
+    var human = try userMessages(a, "a new human task");
+    human[0].created_at = now + 20;
+    try testing.expectEqual(@as(u32, 0), ledger.inbound(a, "chat-r", human, now + 30));
 }
 
 test "mcp graff peer: only a working graff chat hosted on this device is addressable" {

@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const u = @import("util.zig");
 const tools = @import("tools.zig");
 const peer = @import("peer.zig");
+const unicode_alnum = @import("unicode_alnum.zig");
 const Ctx = tools.Ctx;
 const Value = json.Value;
 const decode = tools.decode;
@@ -81,15 +82,6 @@ fn projectOf(c: *Ctx, cwd: ?[]const u8) !?[]const u8 {
     };
 }
 
-fn isAlnum(cp: u21) bool {
-    if (cp < 0x80) return std.ascii.isAlphanumeric(@intCast(cp));
-    // Non-ASCII letters and digits; symbols, punctuation and emoji are not.
-    return switch (cp) {
-        0x80...0xBF, 0xD7, 0xF7, 0x2000...0x2BFF, 0x3000...0x303F, 0xFE00...0xFE0F, 0xFF00...0xFF0F, 0x1F000...0x1FAFF, 0xE0000...0xE007F => false,
-        else => true,
-    };
-}
-
 /// A chat's member name: its title as one @-able word, else `chat-<id>`.
 pub fn memberName(a: Allocator, title: ?[]const u8, chat_id: []const u8) ![]const u8 {
     const t = title orelse "";
@@ -98,7 +90,8 @@ pub fn memberName(a: Allocator, title: ?[]const u8, chat_id: []const u8) ![]cons
     while (idx < t.len) {
         const n = @min(std.unicode.utf8ByteSequenceLength(t[idx]) catch 1, t.len - idx);
         const cp = std.unicode.utf8Decode(t[idx .. idx + n]) catch '-';
-        if (isAlnum(cp) or cp == '_' or cp == '.') {
+        // `char::is_alphanumeric`, from the checked-in Unicode table.
+        if (unicode_alnum.isAlphanumeric(cp) or cp == '_' or cp == '.') {
             if (cp < 0x80) try mapped.append(a, std.ascii.toLower(@intCast(cp))) else try mapped.appendSlice(a, t[idx .. idx + n]);
         } else try mapped.append(a, '-');
         idx += n;
@@ -467,13 +460,69 @@ test "mcp rooms: member names are one mentionable word" {
     try testing.expectEqualStrings("chat-abc", try memberName(a, "🙂", "abc"));
 }
 
+/// Titles whose member names the Rust server gives (`member_name`, Rust
+/// 1.97.1 with Unicode 17.0.0): letters, marks and numbers beyond ASCII,
+/// symbols that are not alphanumeric, unassigned and private-use code points.
+const member_name_vector = [_][2][]const u8{
+    .{ "\u{bd}\u{20}\u{64}\u{6f}\u{6e}\u{65}", "\u{bd}-done" },
+    .{ "\u{78}\u{b2}\u{20}\u{2b}\u{20}\u{79}\u{b2}", "x\u{b2}-y\u{b2}" },
+    .{ "\u{aa}\u{62}\u{63}", "\u{aa}bc" },
+    .{ "\u{43}\u{61}\u{66}\u{e9}\u{20}\u{2116}\u{35}", "caf\u{e9}-5" },
+    .{ "\u{2115}\u{20}\u{6e}\u{61}\u{74}\u{75}\u{72}\u{61}\u{6c}\u{73}", "\u{2115}-naturals" },
+    .{ "\u{2460}\u{20}\u{66}\u{69}\u{72}\u{73}\u{74}", "\u{2460}-first" },
+    .{ "\u{3007}\u{20}\u{7a}\u{65}\u{72}\u{6f}", "\u{3007}-zero" },
+    .{ "\u{65e5}\u{3005}\u{20}\u{6e}\u{6f}\u{74}\u{65}\u{73}", "\u{65e5}\u{3005}-notes" },
+    .{ "\u{65}\u{301}\u{63}\u{6c}\u{61}\u{69}\u{72}", "e-clair" },
+    .{ "\u{915}\u{94d}\u{937}\u{924}\u{94d}\u{930}\u{93f}\u{92f}", "\u{915}-\u{937}\u{924}-\u{930}\u{93f}\u{92f}" },
+    .{ "\u{216b}\u{20}\u{72}\u{6f}\u{6d}\u{61}\u{6e}", "\u{216b}-roman" },
+    .{ "\u{e000}\u{70}\u{72}\u{69}\u{76}\u{61}\u{74}\u{65}", "private" },
+    .{ "\u{7a}\u{65}\u{72}\u{6f}\u{200d}\u{77}\u{69}\u{64}\u{74}\u{68}", "zero-width" },
+    .{ "\u{1c5}\u{65}\u{6d}\u{61}\u{6c}", "\u{1c5}emal" },
+    .{ "\u{ff21}\u{ff42}\u{ff43}\u{ff03}\u{ff11}", "\u{ff21}\u{ff42}\u{ff43}-\u{ff11}" },
+    .{ "\u{1f642}\u{20}\u{6f}\u{6b}\u{20}\u{1f642}", "ok" },
+    .{ "\u{1d7d8}\u{1d7d9}\u{20}\u{6d}\u{61}\u{74}\u{68}", "\u{1d7d8}\u{1d7d9}-math" },
+    .{ "\u{663}\u{20}\u{61}\u{72}\u{61}\u{62}\u{69}\u{63}", "\u{663}-arabic" },
+    .{ "\u{61}\u{2e}\u{62}\u{5f}\u{63}", "a.b_c" },
+    .{ "\u{2e}\u{2e}\u{2e}\u{64}\u{6f}\u{74}\u{73}\u{2e}\u{2e}\u{2e}", "dots" },
+    .{ "\u{3a3}\u{3af}\u{3c3}\u{3c5}\u{3c6}\u{3bf}\u{3c2}\u{20}\u{3a3}\u{38a}\u{3a3}\u{3a5}\u{3a6}\u{39f}\u{3a3}", "\u{3a3}\u{3af}\u{3c3}\u{3c5}\u{3c6}\u{3bf}\u{3c2}-\u{3a3}\u{38a}\u{3a3}\u{3a5}\u{3a6}\u{39f}\u{3a3}" },
+    .{ "\u{130}\u{73}\u{74}\u{61}\u{6e}\u{62}\u{75}\u{6c}", "\u{130}stanbul" },
+    .{ "\u{1c4}", "\u{1c4}" },
+    .{ "\u{378}\u{75}\u{6e}\u{61}\u{73}\u{73}\u{69}\u{67}\u{6e}\u{65}\u{64}", "unassigned" },
+    .{ "\u{2139}\u{20}\u{69}\u{6e}\u{66}\u{6f}", "\u{2139}-info" },
+    .{ "\u{61}\u{20}\u{d7}\u{20}\u{62}\u{20}\u{f7}\u{20}\u{63}", "a-b-c" },
+    .{ "\u{a0}\u{6e}\u{62}\u{73}\u{70}\u{2007}\u{66}\u{69}\u{67}\u{75}\u{72}\u{65}", "nbsp-figure" },
+    .{ "\u{61}\u{62}\u{1f3fb}", "ab" },
+    .{ "\u{fb01}\u{20}\u{6c}\u{69}\u{67}\u{61}\u{74}\u{75}\u{72}\u{65}", "\u{fb01}-ligature" },
+    .{ "\u{24b6}\u{20}\u{63}\u{69}\u{72}\u{63}\u{6c}\u{65}\u{64}", "\u{24b6}-circled" },
+    .{ "\u{16ee}\u{20}\u{72}\u{75}\u{6e}\u{69}\u{63}", "\u{16ee}-runic" },
+    .{ "\u{10348}\u{20}\u{67}\u{6f}\u{74}\u{68}\u{69}\u{63}", "\u{10348}-gothic" },
+    .{ "\u{2177}\u{20}\u{73}\u{6d}\u{61}\u{6c}\u{6c}", "\u{2177}-small" },
+    .{ "\u{bc}\u{be}", "\u{bc}\u{be}" },
+    .{ "\u{78}\u{345}\u{79}", "x\u{345}y" },
+};
+
+test "mcp rooms: member names match the Rust server's for titles beyond ASCII" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (member_name_vector) |v| {
+        const got = try memberName(a, v[0], "abcdef123456");
+        if (!std.mem.eql(u8, v[1], got)) std.debug.print("title {s}: want {s}, got {s}\n", .{ v[0], v[1], got });
+        try testing.expectEqualStrings(v[1], got);
+    }
+    // At most 40 characters, counted as characters, not bytes.
+    const long = try a.alloc(u8, 50 * "\u{e9}".len);
+    for (0..50) |k| @memcpy(long[k * 2 ..][0..2], "\u{e9}");
+    try testing.expectEqualStrings("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}", try memberName(a, long, "abcdef123456"));
+}
+
 test "mcp rooms: a delivery opens with a tag the peer rules recognise" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const text = try deliveryText(a, "room_0123456789abcdef01234567", "build -->", 7, "alpha", "hello");
-    try testing.expect(peer.isRoomDelivery(text));
-    try testing.expect(!peer.isHumanPrompt(text));
+    try testing.expect(peer.isRoomDelivery(a, text));
+    try testing.expect(!peer.isHumanPrompt(a, text));
     try testing.expect(std.mem.indexOf(u8, text, "build --\\u003e") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n[room message from alpha · room build --> #7 · agent, advisory]: hello\n\n(Another agent posted this") != null);
 }

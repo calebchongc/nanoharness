@@ -202,6 +202,41 @@ fn digits(text: []const u8, at: usize, n: usize) ?i64 {
     return std.fmt.parseInt(i64, text[at .. at + n], 10) catch null;
 }
 
+/// An instant to the nanosecond: whole seconds since the epoch, and the
+/// nanoseconds past them.
+pub const Instant = struct { secs: i64, nanos: u32 };
+
+/// An RFC 3339 timestamp to the nanosecond, in UTC: fractional digits past
+/// the ninth are dropped, as chrono drops them.
+pub fn parseRfc3339(text: []const u8) ?Instant {
+    const y = digits(text, 0, 4) orelse return null;
+    if (text.len < 19 or text[4] != '-' or text[7] != '-' or (text[10] != 'T' and text[10] != 't' and text[10] != ' ')) return null;
+    const mo = digits(text, 5, 2) orelse return null;
+    const d = digits(text, 8, 2) orelse return null;
+    const h = digits(text, 11, 2) orelse return null;
+    const mi = digits(text, 14, 2) orelse return null;
+    const sec = digits(text, 17, 2) orelse return null;
+    var idx: usize = 19;
+    var nanos: u32 = 0;
+    if (idx < text.len and text[idx] == '.') {
+        idx += 1;
+        var scale: u32 = 100_000_000;
+        while (idx < text.len and std.ascii.isDigit(text[idx])) : (idx += 1) {
+            nanos += @as(u32, text[idx] - '0') * scale;
+            scale /= 10;
+        }
+    }
+    var offset_min: i64 = 0;
+    if (idx < text.len and (text[idx] == '+' or text[idx] == '-')) {
+        const oh = digits(text, idx + 1, 2) orelse return null;
+        const om = digits(text, idx + 4, 2) orelse return null;
+        offset_min = oh * 60 + om;
+        if (text[idx] == '-') offset_min = -offset_min;
+    }
+    const days = daysFromCivil(y, mo, d);
+    return .{ .secs = (days * 86_400 + h * 3600 + mi * 60 + sec) - offset_min * 60, .nanos = nanos };
+}
+
 /// Epoch millis of an RFC 3339 timestamp (`2026-09-01T00:00:00Z`,
 /// fractional seconds and numeric offsets accepted).
 pub fn parseRfc3339Ms(text: []const u8) ?i64 {
@@ -253,6 +288,7 @@ test "mcp util: rfc3339 round trip, short ids and unicode trimming" {
     try testing.expectEqual(@as(?i64, 1_700_000_000_123), parseRfc3339Ms("2023-11-14T22:13:20.123Z"));
     try testing.expectEqual(@as(?i64, 1_700_000_000_000), parseRfc3339Ms("2023-11-14T23:13:20+01:00"));
     try testing.expectEqual(@as(?i64, null), parseRfc3339Ms("yesterday"));
+    try testing.expectEqual(Instant{ .secs = 1_700_000_000, .nanos = 123_456_789 }, parseRfc3339("2023-11-14T22:13:20.1234567891Z").?);
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("2023-11-14T22:13:20Z", isoSecs(&buf, 1_700_000_000_000));
     try testing.expectEqualStrings("abcdefgh", short("abcdefgh-1234"));

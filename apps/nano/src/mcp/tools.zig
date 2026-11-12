@@ -18,9 +18,10 @@ pub const rooms = @import("rooms.zig");
 pub const bots = @import("bots.zig");
 const Value = json.Value;
 
-/// The checked-in catalog: the Rust server's tools, names, descriptions and
-/// input schemas, in its order.
-pub const catalog_json = @embedFile("tools.json");
+/// The tool catalog, `protocol/mcp-tools.json` (the one shared copy): the
+/// Rust server's tools, names, descriptions and input schemas, in its
+/// order. `tools/list` serves it unchanged.
+pub const catalog_json = @import("mcp_tools_json").json;
 
 /// Default and ceiling for blocking waits.
 const default_wait_ms: i64 = 600_000;
@@ -288,6 +289,9 @@ pub const Ctx = struct {
             if (std.mem.eql(u8, message, code)) return c.fail("room request failed ({d}): {s}", .{ status, code });
             return c.fail("room request failed ({d}): {s}: {s}", .{ status, code, message });
         }
+        // Every room route answers an object; anything else is not a reply
+        // the tools can read, and must not pass as an empty success.
+        if (rbody != .object) return c.fail("room request failed ({d}): the room's reply is not a JSON object", .{status});
         return rbody;
     }
 
@@ -426,15 +430,19 @@ pub fn sessionFor(all: []const Value, chat: Value) ?Value {
     return best;
 }
 
-/// chrono's `DateTime<Utc>` serialization (`AutoSi`): whole seconds bare,
-/// milliseconds as three digits.
+/// chrono's `DateTime<Utc>` serialization (`SecondsFormat::AutoSi`, `Z`):
+/// whole seconds bare, else the fewest of 3, 6 or 9 fraction digits that
+/// hold the time exactly.
 pub fn timeValue(a: Allocator, v: Value, key: []const u8) !Value {
     const raw = u.str(v, key) orelse return .null;
-    const at = u.parseRfc3339Ms(raw) orelse return u.s(raw);
+    const at = u.parseRfc3339(raw) orelse return u.s(raw);
     var buf: [32]u8 = undefined;
-    const secs = u.isoSecs(&buf, at);
-    if (@mod(at, 1000) == 0) return u.s(try a.dupe(u8, secs));
-    return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>3}Z", .{ secs[0 .. secs.len - 1], @as(u64, @intCast(@mod(at, 1000))) }));
+    const secs = u.isoSecs(&buf, at.secs * 1000);
+    const whole = secs[0 .. secs.len - 1];
+    if (at.nanos == 0) return u.s(try a.dupe(u8, secs));
+    if (at.nanos % 1_000_000 == 0) return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>3}Z", .{ whole, at.nanos / 1_000_000 }));
+    if (at.nanos % 1_000 == 0) return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>6}Z", .{ whole, at.nanos / 1_000 }));
+    return u.s(try std.fmt.allocPrint(a, "{s}.{d:0>9}Z", .{ whole, at.nanos }));
 }
 
 pub const Status = struct { label: []const u8, age_secs: ?i64 };
@@ -1391,12 +1399,44 @@ pub const TurnOutcome = enum {
     timedOut,
 };
 
+/// A session row's completion marker, as the engine sent it: the Zig
+/// engine writes the turn's entry id (a string), an edge op or an older
+/// engine a counter (a number). Absent and `null` are both "none".
+pub fn turnMarker(row: Value) ?Value {
+    const v = u.get(row, "lastCompletedTurn") orelse return null;
+    return if (v == .null) null else v;
+}
+
+/// Raw JSON equality of two markers: same type and value, so a string and
+/// a number never match.
+fn sameMarker(x: Value, y: Value) bool {
+    if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
+    return switch (x) {
+        .string => |t| std.mem.eql(u8, t, y.string),
+        .number_string => |t| std.mem.eql(u8, t, y.number_string),
+        .integer => |n| n == y.integer,
+        .float => |f| f == y.float,
+        .bool => |v| v == y.bool,
+        .null => true,
+        // Not a marker any engine sends; compare the compact text.
+        .array, .object => {
+            var bx: [512]u8 = undefined;
+            var by: [512]u8 = undefined;
+            var wx: std.Io.Writer = .fixed(&bx);
+            var wy: std.Io.Writer = .fixed(&by);
+            json.Stringify.value(x, .{}, &wx) catch return false;
+            json.Stringify.value(y, .{}, &wy) catch return false;
+            return std.mem.eql(u8, wx.buffered(), wy.buffered());
+        },
+    };
+}
+
 fn sameTurn(x: ?Value, y: ?Value) bool {
-    const xs = if (x) |v| u.str(v, "lastCompletedTurn") else null;
-    const ys = if (y) |v| u.str(v, "lastCompletedTurn") else null;
-    if (xs == null and ys == null) return true;
-    if (xs == null or ys == null) return false;
-    return std.mem.eql(u8, xs.?, ys.?);
+    const xm = if (x) |v| turnMarker(v) else null;
+    const ym = if (y) |v| turnMarker(v) else null;
+    if (xm == null and ym == null) return true;
+    if (xm == null or ym == null) return false;
+    return sameMarker(xm.?, ym.?);
 }
 
 fn advancedPast(row: Value, baseline: ?Value) bool {
@@ -1412,7 +1452,7 @@ pub fn snapshotOutcome(row: ?Value, baseline: ?Value, expect_turn: bool) TurnOut
     if (std.mem.eql(u8, st, "awaitingInput")) return .awaitingInput;
     if (std.mem.eql(u8, st, "errored")) return .errored;
     if (std.mem.eql(u8, st, "idle")) {
-        const has_turn = u.str(r, "lastCompletedTurn") != null;
+        const has_turn = turnMarker(r) != null;
         if (!expect_turn or (has_turn and (baseline == null or !sameTurn(baseline, r)))) return .completed;
     }
     return .timedOut;
@@ -1450,7 +1490,7 @@ pub const TurnWatch = struct {
             const turn_changed = if (w.baseline) |b|
                 !sameTurn(b, session)
             else if (w.expect_turn)
-                u.str(session, "lastCompletedTurn") != null
+                turnMarker(session) != null
             else
                 true;
             w.last = session;

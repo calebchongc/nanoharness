@@ -71,3 +71,20 @@ runner; the vectors were checked against its encoder's rules (`JSON.stringify` k
   dialer moving `token` from the query into an `Authorization: Bearer` header. Dialer rules; the relay skips them.
 
 Not covered: socket timing (the 10 s ping, 25 s silence lease, reconnect backoff) and RPC payloads.
+
+# MCP tool catalog
+
+`mcp-tools.json` is the Harness MCP server's tool list as `tools/list` serves it: each tool's `name`, `description`
+and `inputSchema`, in order. It is the one copy. The Zig server (`apps/nano/src/mcp/tools.zig`) embeds it at build
+time (`apps/nano/mcp_tools_build.zig`) and serves it unchanged, leaving out `show_image` and `show_visual` when it
+does not speak for a chat.
+
+| Implementation | Runner | Run it |
+| --- | --- | --- |
+| Zig (`apps/nano`) | `apps/nano/src/mcp/tests.zig`, "mcp catalog" | `cd apps/nano && zig build test -Dtest-filter="mcp catalog"` |
+
+The runner reads this file from the repository and checks that `tools/list` answers exactly what it holds: the same
+tools in the same order, with the same descriptions and input schemas.
+
+The Rust server (`crates/mcp`) keeps its own catalog in code. The Rust tree is frozen as the behaviour reference, so it
+has no runner here; the file was taken from it, and a change to a tool is made in this file.
