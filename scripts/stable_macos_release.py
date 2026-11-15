@@ -33,10 +33,12 @@ import urllib.request
 from pathlib import Path
 
 
-REPO = "justrach/harness"
+REPO = "justrach/nanoharness"
 ROOT = Path(__file__).resolve().parent.parent
 COMPANION_PLATFORMS = (
+    "linux-aarch64.pkg.tar.zst",
     "linux-aarch64.tar.gz",
+    "linux-x86_64.pkg.tar.zst",
     "linux-x86_64.tar.gz",
     "windows-x86_64.exe",
     "windows-x86_64.zip",
@@ -132,14 +134,16 @@ def has_exact_graff_version(output: str, expected: str) -> bool:
     return any(version.removeprefix("v") == expected for version in versions)
 
 
-def bundle_hashes(bundle: Path) -> tuple[str, str]:
+def bundle_hashes(bundle: Path) -> tuple[str, ...]:
     return (
         sha256(bundle / "Contents/MacOS/harness"),
+        sha256(bundle / "Contents/MacOS/harness-nano"),
+        sha256(bundle / "Contents/MacOS/harness-engine"),
         sha256(bundle / "Contents/Resources/bin/graff"),
     )
 
 
-def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, str]:
+def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, ...]:
     require(bundle.is_dir(), f"missing app bundle: {bundle}")
     actual = run(
         "plutil", "-extract", "CFBundleShortVersionString", "raw",
@@ -151,6 +155,14 @@ def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, s
         bundle / "Contents/Info.plist",
     ).strip()
     require(bundle_id == "harness.codegraff.app", f"unexpected app ID: {bundle_id}")
+    for exe in (
+        bundle / "Contents/MacOS/harness",
+        bundle / "Contents/MacOS/harness-nano",
+        bundle / "Contents/MacOS/harness-engine",
+        bundle / "Contents/Resources/bin/harness-github-runners",
+    ):
+        require(exe.is_file(), f"{bundle} missing executable {exe.relative_to(bundle)}")
+        check_developer_id(exe)
     check_developer_id(bundle)
     run("xcrun", "stapler", "validate", bundle)
     check_graff_version(bundle, graff_version)
@@ -159,7 +171,7 @@ def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, s
 
 def check_app_tarball(
     archive: Path, version: str, graff_version: str
-) -> tuple[str, str]:
+) -> tuple[str, ...]:
     with tempfile.TemporaryDirectory(prefix="harness-release-check-") as temp:
         with tarfile.open(archive, "r:gz") as stream:
             members = stream.getmembers()
@@ -176,7 +188,7 @@ def check_app_tarball(
         return check_bundle(Path(temp) / "Harness.app", version, graff_version)
 
 
-def check_dmg(dmg: Path, version: str, graff_version: str) -> tuple[str, str]:
+def check_dmg(dmg: Path, version: str, graff_version: str) -> tuple[str, ...]:
     require(dmg.is_file(), f"missing DMG: {dmg}")
     run("hdiutil", "verify", dmg)
     run("codesign", "--verify", "--strict", "--verbose=2", dmg)
@@ -274,6 +286,7 @@ def prepare(args: argparse.Namespace) -> None:
         shutil.copy2(out / target.format(version=version), out / alias)
     manifest = make_manifest(version, out)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (out / "latest.txt").write_text(version)
     print(f"Prepared {len(manifest['files'])} verified assets and manifest at {out}")
     print("No GitHub release or tag was changed.")
 
@@ -302,6 +315,7 @@ def check_remote_digests(version: str, manifest: dict) -> None:
     require(len(releases) == 1, f"expected one v{version} release, found {len(releases)}")
     remote = {asset["name"]: asset.get("digest") for asset in releases[0]["assets"]}
     require("manifest.json" in remote, "the release has no manifest.json")
+    require("latest.txt" in remote, "the release has no latest.txt")
     for name, entry in manifest["files"].items():
         require(
             remote.get(name) == f"sha256:{entry['sha256']}",
@@ -329,13 +343,16 @@ def upload(args: argparse.Namespace) -> None:
         require(notes.is_file(), f"missing release notes: {notes}")
         run(
             "gh", "release", "create", f"v{version}", "-R", REPO, "--draft",
-            "--verify-tag", "--title", f"Harness v{version}", "--notes-file", notes,
+            "--verify-tag", "--title", f"NanoHarness v{version}", "--notes-file", notes,
         )
         release = release_state(version)
     require(release is not None and release["tagName"] == f"v{version}", "release tag mismatch")
     require(release["isDraft"] and not release["isPrerelease"],
             "upload requires an unpublished stable draft release")
-    files = [dist / name for name in expected_names(version)] + [dist / "manifest.json"]
+    files = (
+        [dist / name for name in expected_names(version)]
+        + [dist / "manifest.json", dist / "latest.txt"]
+    )
     run("gh", "release", "upload", f"v{version}", *files, "-R", REPO, "--clobber")
     check_remote_digests(version, manifest)
     print(f"Uploaded {len(files)} assets to the draft v{version} release and checked "

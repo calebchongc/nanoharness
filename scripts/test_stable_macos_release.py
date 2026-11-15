@@ -41,7 +41,7 @@ class StableMacosReleaseTests(unittest.TestCase):
 
     def test_every_platform_the_updaters_download_is_a_release_asset(self):
         names = set(expected_names("1.2.3"))
-        # crates/update: macOS app tarball, Linux tarballs, Windows exe.
+        # updates_host.zig: macOS app tarball, Linux tarballs, Windows exe.
         for name in [
             "harness-1.2.3-macos-arm64-app.tar.gz",
             "harness-1.2.3-linux-x86_64.tar.gz",

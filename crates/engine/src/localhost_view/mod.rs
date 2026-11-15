@@ -62,8 +62,7 @@ const SWAPPING: &str = "Not attached to an active page";
 /// The most pages open at once.
 const MAX_TABS: usize = 8;
 /// The most servers listed.
-#[cfg(feature = "preview")]
-const MAX_SERVERS: usize = 30;
+pub(crate) const MAX_SERVERS: usize = 30;
 
 /// One frame of a page, as a viewer gets it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -809,55 +808,11 @@ impl LocalhostView {
     }
 
     /// Servers listening on this computer's loopback that answer HTTP.
-    #[cfg(feature = "preview")]
     pub async fn servers(&self) -> Vec<LocalServer> {
-        let listeners = tokio::task::spawn_blocking(harness_preview::discovery::listeners)
-            .await
-            .unwrap_or_default();
         let own = std::process::id();
-        let mut seen = std::collections::HashSet::new();
-        let candidates: Vec<_> = listeners
-            .into_iter()
-            .filter(|l| l.pid != own)
-            .filter(|l| l.address.ip().is_loopback() || l.address.ip().is_unspecified())
-            .filter(|l| seen.insert(l.address.port()))
-            .collect();
-        let probes = candidates.into_iter().map(|l| async move {
-            let probe = std::net::SocketAddr::new(
-                if l.address.is_ipv6() && !l.address.ip().is_unspecified() {
-                    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
-                } else {
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-                },
-                l.address.port(),
-            );
-            harness_preview::discovery::is_http(probe)
-                .await
-                .then(|| LocalServer {
-                    port: l.address.port(),
-                    url: format!("http://localhost:{}", l.address.port()),
-                    name: harness_preview::discovery::framework(&l.args).0.to_string(),
-                    folder: l
-                        .cwd
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .filter(|n| !n.is_empty()),
-                })
-        });
-        let mut servers: Vec<LocalServer> = futures::future::join_all(probes)
+        tokio::task::spawn_blocking(move || crate::zig_helper::scan_local_servers(own))
             .await
-            .into_iter()
-            .flatten()
-            .collect();
-        servers.sort_by_key(|s| s.port);
-        servers.truncate(MAX_SERVERS);
-        servers
-    }
-
-    /// Servers listening on this computer's loopback that answer HTTP.
-    #[cfg(not(feature = "preview"))]
-    pub async fn servers(&self) -> Vec<LocalServer> {
-        Vec::new()
+            .unwrap_or_default()
     }
 
     /// Close every page and the browser.

@@ -2,7 +2,7 @@
   <img src="docs/brand/harness-icon.png" width="108" height="108" alt="Harness app icon">
 </p>
 
-<h1 align="center">Harness</h1>
+<h1 align="center">NanoHarness</h1>
 
 <p align="center">
   <strong>One native workspace for your coding agents.</strong><br>
@@ -48,8 +48,9 @@ socket is up, turn Exo on in **Settings → Agents**.
   <br><sub>Installed agents appear in <strong>Settings → Agents</strong>. Sign in when you want another trusted device to follow or control a session.</sub>
 </p>
 
-Harness starts in local mode without an account. The desktop app uses Rust and
-GPUI; its iOS companion is a SwiftUI viewport for synced sessions.
+NanoHarness starts in local mode without an account. The desktop app is built in
+Zig on [nanoui](https://github.com/justrach/nanoui); its iOS companion is a
+SwiftUI viewport for synced sessions.
 
 ## Get started
 
@@ -75,7 +76,7 @@ The Linux sidebar browser needs the
 ### Arch Linux
 
 Download `harness-VERSION-linux-x86_64.pkg.tar.zst` (or `-aarch64`) from
-[Releases](https://github.com/justrach/harness/releases) and install with
+[Releases](https://github.com/justrach/nanoharness/releases) and install with
 `sudo pacman -U ./harness-VERSION-linux-x86_64.pkg.tar.zst`. A Vulkan driver is
 required for rendering. Pacman installs are never self-updated — reinstall the
 new `.pkg.tar.zst` on each release.
@@ -171,3 +172,11 @@ and so do organizations that meet none of these tests. Versions up
 to v0.2.108 keep the license they shipped with. Unsure? Treat yourself as
 covered and get in touch.
 Contact [rach@standardharness.com](mailto:rach@standardharness.com).
+
+### Upstream license notice ([zeronsh/zeron](https://github.com/zeronsh/zeron))
+
+Earlier portions of the workspace and engine stack were adapted from
+[Zeron (`zeronsh/zeron`)](https://github.com/zeronsh/zeron), Copyright (c) 2026
+Wing, under the MIT License. The original MIT permission and warranty notice is
+retained verbatim in [`third_party/licenses/Zeron-MIT.txt`](third_party/licenses/Zeron-MIT.txt)
+alongside [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -5,20 +5,16 @@ edition.workspace = true
 license-file.workspace = true
 publish.workspace = true
 
-[features]
-default = ["preview", "visual"]
-preview = ["dep:harness-preview"]
-visual = ["dep:harness-visual"]
+[[bin]]
+name = "harness-engine"
+path = "src/bin/harness-engine.rs"
 
 [dependencies]
-harness-preview = { workspace = true, optional = true }
-harness-visual = { workspace = true, optional = true }
 harness-proto.workspace = true
 harness-doc.workspace = true
 harness-sync.workspace = true
 harness-adapters.workspace = true
 harness-rpc.workspace = true
-harness-update.workspace = true
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -29,6 +25,8 @@ rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 notify.workspace = true
@@ -51,6 +49,7 @@ subtle = "2"
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+mimalloc.workspace = true
 # The browse pairing key lives in the login Keychain, not a file.
 security-framework = "3"
 # Keep-awake holds an IOKit power assertion named by CFStrings.
@@ -68,8 +67,6 @@ harness-sync = { workspace = true, features = ["mock-server"] }
 
 [[test]]
 name = "previews"
-required-features = ["preview"]
 
 [[test]]
 name = "show_visual"
-required-features = ["visual"]

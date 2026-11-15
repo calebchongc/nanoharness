@@ -26,13 +26,14 @@ cd "$ROOT"
 # `app-dev` optimizes the workspace crates so the bundle renders at release-
 # like cost; HARNESS_DEV_PROFILE=dev trades that for the fastest rebuilds.
 PROFILE="${HARNESS_DEV_PROFILE:-app-dev}"
-"$ROOT/scripts/heavy-build.sh" cargo build -p harness --profile "$PROFILE"
+"$ROOT/scripts/heavy-build.sh" cargo build -p harness-engine --bin harness-engine --profile "$PROFILE"
 TARGET_DIR="$("$ROOT/scripts/heavy-build.sh" cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 [[ "$PROFILE" == "dev" ]] && PROFILE_DIR=debug || PROFILE_DIR="$PROFILE"
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$TARGET_DIR/$PROFILE_DIR/harness" "$CONTENTS/MacOS/harness"
+install -m 755 "$TARGET_DIR/$PROFILE_DIR/harness-engine" "$CONTENTS/MacOS/harness-engine"
 (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build)
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness" "$CONTENTS/MacOS/harness"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$CONTENTS/MacOS/harness-nano"
 # Bundle graff like the release does (scripts/package-macos.sh), from
 # GRAFF_BINARY or the graff on PATH, so the bundled/managed path is exercised.

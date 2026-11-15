@@ -15,6 +15,7 @@ test {
     _ = @import("steer_order.zig");
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
+    _ = @import("tests_engine_start.zig");
     _ = @import("diff.zig");
     _ = @import("tests_diff_availability.zig");
     _ = @import("tests_git.zig");
@@ -69,6 +70,11 @@ test {
     _ = @import("view_settings_appearance.zig");
     _ = @import("view_drag.zig");
     _ = @import("view_settings_mcp.zig");
+    _ = @import("extension_panel.zig");
+    _ = @import("view_settings_extensions.zig");
+    _ = @import("tests_ui_extensions.zig");
+    _ = @import("github_runners_plugin.zig");
+    _ = @import("github_runners_json.zig");
     _ = @import("bots.zig");
     _ = @import("view_bots.zig");
     _ = @import("tests_ui_bots.zig");
@@ -169,6 +175,7 @@ test {
     _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
+    _ = @import("tests_ui_project_shortcuts.zig");
     _ = @import("tests_ui_resize.zig");
     _ = @import("tests_ui_strip_folder_search.zig");
     _ = @import("tests_tab_layout.zig");
@@ -180,4 +187,16 @@ test {
     _ = @import("ascii_field.zig");
     _ = @import("member_card.zig");
     _ = @import("view_settings_profile.zig");
+    _ = @import("tests_custom_themes.zig");
+    if (@import("builtin").os.tag != .windows) {
+        _ = @import("mcp_server.zig");
+        _ = @import("preview/catalog.zig");
+        _ = @import("preview/discovery.zig");
+        _ = @import("preview/proxy.zig");
+        _ = @import("preview/service.zig");
+        _ = @import("updates_host.zig");
+        _ = @import("engine_cli.zig");
+        _ = @import("engine_daemon.zig");
+        _ = @import("cli_main.zig");
+    }
 }

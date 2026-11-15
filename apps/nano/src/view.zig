@@ -2,7 +2,7 @@
 //! on the left, the open chat on the right with its header in the title
 //! bar's row, and over both the title bar's buttons: the sidebar toggle,
 //! back and forward through the tabs, and a new tab. A split tab shows its
-//! panes side by side (⌘D) or stacked (⌘⇧D), each its share of the column.
+//! panes side by side (⌘D) or stacked via the panel menu.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -148,6 +148,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
+    // Replies can arrive after select() marked the chat seen. Clear their
+    // Done check before drawing the sidebar, including on window activation.
+    if (c.input.window_active and selectedChatVisible(a)) {
+        if (a.selected) |id| a.markSeen(id);
+    }
     a.view.in_pre_tree = false;
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
@@ -296,6 +301,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_updates.zig").updatesPopover(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
+    @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
     // First-run setup, over the whole window.
@@ -323,7 +329,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_usage.open or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none;
+        v.updates_popover or v.star_menu or v.account_usage.open or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -378,6 +384,12 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     focused(c, a, k);
 }
 
+fn selectedChatVisible(a: *const App) bool {
+    return !a.view.settings_open and !a.view.write_open and
+        a.bots.page == .none and a.view.setup == null and
+        (a.view.strip.expanded == null or a.view.strip.expanded.? == .chat);
+}
+
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The Write page takes the pane: the transcript and composer step aside.
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
@@ -385,6 +397,7 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     const parent = c.stack.items[c.stack.items.len - 1];
     defer @import("view_image_preview.zig").draw(c, a, k, c.rects.get(c.node(parent).id));
+    @import("view_backdrop.zig").draw(c, a, k);
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
@@ -574,7 +587,7 @@ fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]con
     return false;
 }
 
-/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D and ⌘⇧D split the chat, ⌘[ and
+/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D splits the chat, ⌘[ and
 /// ⌘] step through its panes (through tabs with none), ⌥⌘ and ⌃⌘ with an
 /// arrow focus and resize them, ⌃⌘= evens them, ⌘⇧↩ zooms one; ⌘W closes
 /// the pane, then the tab; Escape closes what is open
@@ -633,6 +646,22 @@ fn keys(c: *ui.Context, a: *App) void {
             if (a.view.github_ci.size_menu) |m| a.gpa.free(m);
             a.view.github_ci.size_menu = null;
             a.view.github_ci.size_anchor = null;
+            a.redraw();
+            return;
+        }
+        if (a.view.updates_popover and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.updates_popover = false;
+            a.redraw();
+            return;
+        }
+        if (a.view.account_usage.open and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.account_usage.open = false;
+            a.view.account_usage.card = null;
+            a.redraw();
+            return;
+        }
+        if (a.view.star_menu and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.star_menu = false;
             a.redraw();
             return;
         }
@@ -729,7 +758,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
     if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
-    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
+    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
     if (boundShortcut(c, a, "archiveSession")) {
         if (a.selected) |sel| a.setArchived(sel, true);
     }
@@ -785,6 +814,7 @@ fn keys(c: *ui.Context, a: *App) void {
         a.picker = .none;
         a.view.filter_menu = false;
         a.view.more_menu = false;
+        if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a);
         a.view.account_menu = false;
         a.view.account_usage.open = false;
         a.view.account_usage.card = null;

@@ -71,8 +71,12 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     options(c, a, k);
     caption(c, k, "Theme");
     themeCard(c, a, k);
+    caption(c, k, "Custom themes & animated backdrops");
+    customThemeCard(c, a, k);
     caption(c, k, "Window and background");
     windowCard(c, a, k);
+    caption(c, k, "Workspace mode");
+    workspaceModeCard(c, a, k);
     caption(c, k, "Conversation");
     {
         const cd = card(c, k);
@@ -85,7 +89,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
         }
         {
-            const r = set.row(c, k, false, false).control();
+            const r = set.row(c, k, true, false).control();
             defer r.end();
             _ = kit.focusRing(c, r, k.accent, 2);
             set.tile(c, k, .@"file-image");
@@ -96,35 +100,106 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 a.redraw();
             }
         }
-        {
-            const r = set.row(c, k, true, false);
-            defer r.end();
-            set.tile(c, k, .widget);
-            words(c, k, "Developer mode (⇧⌘M)", "Turn every hierarchy layer on at once, or return to Zen mode (all off). Individual controls below can also be switched on or off independently.", 32);
-            if (switch_(c, k, a.settings.uiMode() == .developer, 0)) a.settings.toggleUiMode();
-        }
-        {
-            const motion = @import("motion_rules.zig");
-            const profile = a.settings.hierarchyProfile();
-            const items = [_]struct { part: motion.MovingPart, icon: icons.Name, title: []const u8, desc: []const u8 }{
-                .{ .part = .open_workspaces_tree, .icon = .@"split-columns", .title = "Open workspaces tree", .desc = "Show open workspace sessions and nested split panes above the session list." },
-                .{ .part = .git_checkout_chrome, .icon = .@"git-branch", .title = "Git & branch controls", .desc = "Show local/worktree checkout pickers, branch selectors, and pull request footer chips." },
-                .{ .part = .prompt_rail, .icon = .list, .title = "Prompt rail", .desc = "Show the right-margin jump rail for navigating long conversations by prompt." },
-                .{ .part = .action_toolbar, .icon = .@"action-play", .title = "Actions toolbar", .desc = "Show project build, test, and run buttons in the session header." },
-            };
-            for (items) |it| {
-                const r = set.row(c, k, true, false);
-                defer r.end();
-                set.tile(c, k, it.icon);
-                words(c, k, it.title, it.desc, 32);
-                if (switch_(c, k, profile.partEnabled(it.part), 0)) a.settings.toggleMovingPart(it.part);
-            }
-        }
     }
     caption(c, k, "Motion");
     motionCard(c, a, k);
     fonts(c, a, k);
     import_view.warning(c, a, k);
+}
+
+fn customThemeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const cd = card(c, k);
+    defer cd.end();
+    {
+        const r = set.row(c, k, false, false);
+        defer r.end();
+        set.tile(c, k, .@"magic-stick-3");
+        words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 108);
+        if (compactAction(c, k, "Open studio")) @import("view_custom_theme_studio.zig").open(a);
+    }
+    ui.div(c).wFull().h(1).bg(k.border.alpha(0.55)).end();
+    {
+        const body = ui.div(c).column().wFull().px(18).pt(14).pb(16);
+        defer body.end();
+        @import("view_custom_theme_studio.zig").studioBody(c, a, k, @max(220, set.inner_w - 38), false);
+    }
+}
+
+fn workspaceModeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const motion = @import("motion_rules.zig");
+    const ui_mode = a.settings.uiMode();
+    const dev = ui_mode == .developer;
+    const profile = a.settings.hierarchyProfile();
+    const base_profile = motion.HierarchyProfile.ofMode(ui_mode);
+    const customized = !std.meta.eql(profile, base_profile);
+
+    const cd = card(c, k);
+    defer cd.end();
+    {
+        const hdr = ui.div(c).row().wFull().px(20).py(16).gap(12).itemsCenter();
+        defer hdr.end();
+        set.tile(c, k, if (dev) .terminal else .@"magic-stick-3");
+        {
+            const info = ui.div(c).column().grow().w(0).gap(3);
+            defer info.end();
+            ui.text(c, "Mode preset", set.st(c, 13.5, .{ .weight = .medium, .color = k.text }));
+            const desc = if (customized)
+                (if (dev) "Customized Developer layout · individual parts overridden" else "Customized Zen layout · individual parts overridden")
+            else if (dev)
+                "Developer mode · full workspaces tree, project groups, git footer & rail"
+            else
+                "Zen mode · calm single flat session list without hierarchy clutter";
+            ui.text(c, desc, .{ .size = 12, .line_height = 17, .color = k.muted, .wrap = true });
+        }
+        {
+            const right = ui.div(c).row().gap(8).itemsCenter();
+            defer right.end();
+            if (customized) {
+                if (compactAction(c, k, "Reset")) {
+                    a.settings.applyUiMode(ui_mode);
+                    a.redraw();
+                }
+            }
+            kit.kbdHint(c, k, "⇧⌘M");
+            const seg = ui.div(c).row().p(3).gap(3).rounded(8).bg(k.ink(if (k.dark) 0.08 else 0.055));
+            defer seg.end();
+            inline for (.{
+                .{ motion.UiMode.zen, "settings-mode-zen", icons.Name.@"magic-stick-3", "Zen", !dev },
+                .{ motion.UiMode.developer, "settings-mode-developer", icons.Name.terminal, "Developer", dev },
+            }) |item| {
+                ui.key(c, item[1]);
+                var pill = ui.div(c).row().h(28).px(10).gap(5).center().rounded(6).control();
+                pill = if (item[4])
+                    pill.bg(if (k.frosted) k.card else k.background).border(k.border_strong).borderW(1)
+                else
+                    pill.hover(k.selected);
+                defer pill.end();
+                icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
+                ui.text(c, item[3], .{ .size = 12, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
+                if (pill.clicked()) {
+                    a.settings.applyUiMode(item[0]);
+                    a.redraw();
+                }
+            }
+        }
+    }
+
+    const items = [_]struct { part: motion.MovingPart, icon: icons.Name, title: []const u8, desc: []const u8 }{
+        .{ .part = .open_workspaces_tree, .icon = .@"split-columns", .title = "Open workspaces tree", .desc = "Show open workspace sessions and nested split panes above the session list." },
+        .{ .part = .git_checkout_chrome, .icon = .@"git-branch", .title = "Git & branch controls", .desc = "Show local/worktree checkout pickers, branch selectors, and pull request footer chips." },
+        .{ .part = .prompt_rail, .icon = .list, .title = "Prompt rail", .desc = "Show the right-margin jump rail for navigating long conversations by prompt." },
+        .{ .part = .action_toolbar, .icon = .@"action-play", .title = "Actions toolbar", .desc = "Show project build, test, and run buttons in the session header." },
+        .{ .part = .grouped_sections, .icon = .@"folder-with-files", .title = "Grouped sidebar sections", .desc = "Group sessions under workspace folders instead of a single flat Zen list." },
+        .{ .part = .row_tech_badges, .icon = .@"file-code", .title = "Row branch & agent badges", .desc = "Show git branch names and agent badges inside sidebar session rows." },
+        .{ .part = .multi_axis_filters, .icon = .tuning, .title = "Project & activity filters", .desc = "Show workspace, status, and sort filter menus above the session list." },
+    };
+    for (items) |it| {
+        const r = set.row(c, k, true, false);
+        defer r.end();
+        set.tile(c, k, it.icon);
+        words(c, k, it.title, it.desc, 32);
+        if (switch_(c, k, profile.partEnabled(it.part), 0)) a.settings.toggleMovingPart(it.part);
+    }
 }
 
 fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u8, trailing: f32) void {
@@ -137,10 +212,7 @@ fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u8, t
 fn switch_(c: *ui.Context, k: theme.Colors, on: bool, ml: f32) bool {
     const box = ui.div(c).row().pl(ml);
     defer box.end();
-    const track = ui.div(c).row().w(32).h(18).roundedFull().bg(if (on) k.text else k.ink(0.15)).pl(if (on) 16 else 2).itemsCenter();
-    defer track.end();
-    _ = c.leaf(.{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .radius = 7, .background = if (on) k.on_solid else k.ink(0.7) }, .none, null);
-    return track.clicked();
+    return kit.toggleSwitch(c, k, on);
 }
 
 fn caption(c: *ui.Context, k: theme.Colors, label: []const u8) void {
@@ -189,6 +261,32 @@ fn options(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
+pub const default_light_id = "codegraff-light";
+pub const default_dark_id = "codegraff-dark";
+
+pub fn isSystemDefault(a: *const App) bool {
+    const scene = a.settings.backdropScene();
+    const clean_scene = scene.len == 0 or std.mem.eql(u8, scene, "auto") or std.mem.eql(u8, scene, "off") or std.mem.eql(u8, scene, "none");
+    return mode(a) == .system and
+        std.mem.eql(u8, a.settings.themeId(false), default_light_id) and
+        std.mem.eql(u8, a.settings.themeId(true), default_dark_id) and
+        clean_scene;
+}
+
+pub fn applySystemDefault(a: *App) void {
+    setMode(a, .system);
+    a.settings.setTheme(false, default_light_id);
+    a.settings.setTheme(true, default_dark_id);
+    a.settings.setBackdropScene("auto");
+    a.redraw();
+}
+
+pub fn toggleLightDark(a: *App) void {
+    const currently_dark = a.dark orelse nanoui.isDark();
+    setMode(a, if (currently_dark) .light else .dark);
+    a.redraw();
+}
+
 pub fn setMode(a: *App, m: Mode) void {
     a.settings.setText("appearance", @tagName(m));
     a.dark = switch (m) {
@@ -229,8 +327,24 @@ fn bar(c: *ui.Context, w: f32, color: Color) void {
 fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
-    inline for (.{ .{ .sun, "Light theme", false }, .{ .moon, "Dark theme", true } }, 0..) |t, i| {
-        const r = set.row(c, k, i == 0, false);
+    {
+        const r = set.row(c, k, true, false);
+        defer r.end();
+        set.tile(c, k, .monitor);
+        words(c, k, "Default system theme", "Follow macOS Light and Dark automatically with Harness's built-in desktop palette.", 124);
+        ui.spacer(c);
+        ui.key(c, "settings-default-system-theme");
+        if (isSystemDefault(a)) {
+            const pill = ui.div(c).row().h(28).px(10).gap(5).itemsCenter().rounded(7).border(k.accent.alpha(0.45)).borderW(1).bg(k.accent_wash);
+            defer pill.end();
+            icons.icon(c, .check, 12, k.accent, 0);
+            ui.text(c, "Active", .{ .size = 11.5, .line_height = 11.5 * phi, .weight = .medium, .color = k.accent });
+        } else {
+            if (compactAction(c, k, "Use default")) applySystemDefault(a);
+        }
+    }
+    inline for (.{ .{ .sun, "Light theme", false }, .{ .moon, "Dark theme", true } }) |t| {
+        const r = set.row(c, k, false, false);
         defer r.end();
         set.tile(c, k, t[0]);
         words(c, k, t[1], "Used whenever this appearance is active.", 218);
@@ -313,6 +427,13 @@ pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
     for (themes.all()) |v| if (v.dark == dark) {
         count += 1;
     };
+    const custom_themes = @import("custom_themes.zig");
+    for (custom_themes.userPresets()) |p| if (p.variant.dark == dark) {
+        count += 1;
+    };
+    for (custom_themes.curated()) |p| if (p.variant.dark == dark) {
+        count += 1;
+    };
     const heading_h = c.text.lineHeight(set.st(c, 10, .{ .weight = .medium })) + 10;
     const row_h = @max(18, c.text.lineHeight(set.st(c, 13, .{}))) + 10;
     const rows_h = @as(f32, @floatFromInt(count)) * (row_h + 1) - 1;
@@ -335,29 +456,47 @@ pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer ui.end(c);
     const picked = a.settings.themeId(dark);
     for (themes.all()) |*v| if (v.dark == dark) {
-        ui.key(c, c.print("theme-{s}", .{v.id}));
-        const active = std.mem.eql(u8, v.id, picked);
-        const base = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
-        // `menu_row`'s hover is a listener's: a menu opening under a still
-        // pointer doesn't light the row there.
-        const lh = kit.listenerHover(&a.view.hovers, if (active) base.bg(if (k.is_harp) k.active else k.selected) else base, k.hover);
-        const row = lh.div;
-        defer row.end();
-        const hot = lh.hovered;
-        preview(c, k, v.colors);
-        {
-            const n = ui.div(c).row().grow().w(0).clip();
-            defer n.end();
-            ui.text(c, v.name, set.st(c, 13, .{ .color = if (active or hot) k.text else k.text.alpha(0.9) }));
-        }
-        if (active) icons.icon(c, .check, 14, k.accent, 0);
-        if (row.clicked()) {
-            a.settings.setTheme(dark, v.id);
-            a.view.theme_menu = null;
-            c.changed = true;
-            a.redraw();
-        }
+        themeMenuRow(c, a, k, picked, dark, v, false);
     };
+    for (custom_themes.userPresets()) |*p| if (p.variant.dark == dark) {
+        themeMenuRow(c, a, k, picked, dark, &p.variant, true);
+    };
+    for (custom_themes.curated()) |*p| if (p.variant.dark == dark) {
+        themeMenuRow(c, a, k, picked, dark, &p.variant, true);
+    };
+}
+
+fn themeMenuRow(c: *ui.Context, a: *App, k: theme.Colors, picked: []const u8, dark: bool, v: *const themes.Variant, has_backdrop: bool) void {
+    ui.key(c, c.print("theme-{s}", .{v.id}));
+    const active = std.mem.eql(u8, v.id, picked);
+    const is_default = std.mem.eql(u8, v.id, default_light_id) or std.mem.eql(u8, v.id, default_dark_id);
+    const base = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+    const lh = kit.listenerHover(&a.view.hovers, if (active) base.bg(if (k.is_harp) k.active else k.selected) else base, k.hover);
+    const row = lh.div;
+    defer row.end();
+    const hot = lh.hovered;
+    preview(c, k, v.colors);
+    {
+        const n = ui.div(c).row().grow().w(0).clip();
+        defer n.end();
+        ui.text(c, v.name, set.st(c, 13, .{ .color = if (active or hot) k.text else k.text.alpha(0.9) }));
+    }
+    if (is_default) ui.text(c, "Default", set.st(c, 11, .{ .color = k.muted.alpha(0.75) }));
+    if (active) icons.icon(c, .check, 14, k.accent, 0);
+    if (row.clicked()) {
+        a.settings.setTheme(dark, v.id);
+        if (has_backdrop) {
+            a.settings.setBackdropScene("auto");
+        } else {
+            const cur_scene = a.settings.backdropScene();
+            if (!std.mem.eql(u8, cur_scene, "off") and !std.mem.eql(u8, cur_scene, "none")) {
+                a.settings.setBackdropScene("auto");
+            }
+        }
+        a.view.theme_menu = null;
+        c.changed = true;
+        a.redraw();
+    }
 }
 
 /// One accent: a 30-point chip over a 2-point underline in its colour when

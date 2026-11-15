@@ -2616,21 +2616,12 @@ fn apply_reasoning_update(
 }
 
 /// Only the bounded visual runtime evaluates source; never on an async executor thread.
-#[cfg(feature = "visual")]
 async fn check_visual_script(script: String) -> Result<(), EngineError> {
-    tokio::task::spawn_blocking(move || harness_visual::check(&script))
+    crate::zig_helper::visual_check(&script)
         .await
-        .map_err(|_| EngineError::Other("visual validation worker failed".into()))?
         .map_err(|_| {
             EngineError::Other("visual script failed bounded first-render validation".into())
         })
-}
-
-#[cfg(not(feature = "visual"))]
-async fn check_visual_script(_script: String) -> Result<(), EngineError> {
-    Err(EngineError::Other(
-        "visual validation is disabled in this build".into(),
-    ))
 }
 
 /// How long a run of streaming deltas may sit in [`DeltaCoalescer`] before
@@ -3790,6 +3781,9 @@ async fn drive_run(
             if let Err(err) = doc_ref.update_context_savings(*savings) {
                 tracing::warn!(%chat_id, error = %err, "context savings write failed");
             }
+            continue;
+        }
+        if matches!(&event, AgentEvent::PlanUsage { .. }) {
             continue;
         }
         if let AgentEvent::ReasoningChanged { reasoning } = &event {

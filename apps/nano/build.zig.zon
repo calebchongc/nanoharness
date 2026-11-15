@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .nanoui = .{
-            // Pinned source and local renderer changes: vendor/nanoui/PROVENANCE.md.
-            .path = "vendor/nanoui",
+            // Pinned first-party source and local renderer changes: nanoui/PROVENANCE.md.
+            .path = "nanoui",
         },
         .http_zig = .{
             .url = "git+https://github.com/justrach/http-zig#5b0324bb3ab49fe18947b2f17fe7649760e1540a",
@@ -18,10 +18,10 @@
         },
     },
     .paths = .{
-        "build.zig",                            "build.zig.zon",                      "src",                         "assets",                  "native_math",                 "math_archive.zig",
+        "build.zig",                      "build.zig.zon",                "src",                  "assets",            "native_math",           "math_archive.zig",
         // Keep the local dependency's declared source/license footprint, not
         // its build output or lazily downloaded platform dependencies.
-        "vendor/nanoui/build.zig",              "vendor/nanoui/build.zig.zon",        "vendor/nanoui/src",           "vendor/nanoui/tools/ios", "vendor/nanoui/tools/android", "vendor/nanoui/LICENSE",
-        "vendor/nanoui/THIRD_PARTY_NOTICES.md", "vendor/nanoui/third_party/licenses", "vendor/nanoui/PROVENANCE.md",
+        "nanoui/build.zig",               "nanoui/build.zig.zon",         "nanoui/src",           "nanoui/tools/ios",  "nanoui/tools/android",  "nanoui/LICENSE",
+        "nanoui/THIRD_PARTY_NOTICES.md",  "nanoui/third_party/licenses",  "nanoui/PROVENANCE.md",
     },
 }

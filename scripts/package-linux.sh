@@ -21,17 +21,18 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "debug" ]]; then
-  cargo build -p harness
-  BIN="$ROOT/target/debug/harness"
+  cargo build -p harness-engine --bin harness-engine
+  ENGINE_BIN="$ROOT/target/debug/harness-engine"
 else
-  cargo build --profile "$PROFILE" -p harness
-  BIN="$ROOT/target/$PROFILE/harness"
+  cargo build --profile "$PROFILE" -p harness-engine --bin harness-engine
+  ENGINE_BIN="$ROOT/target/$PROFILE/harness-engine"
 fi
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
-install -m 755 "$BIN" "$STAGE/harness"
+install -m 755 "$ENGINE_BIN" "$STAGE/harness-engine"
 (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness" "$STAGE/harness"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$STAGE/harness-nano"
 install -m 644 "$ROOT/dist/harness.desktop" "$STAGE/harness.desktop"
 install -m 644 "$ROOT/dist/harness.png" "$STAGE/harness.png"
@@ -47,6 +48,7 @@ cat >"$STAGE/install.sh" <<'INSTALL'
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -Dm755 "$HERE/harness" "$HOME/.local/bin/harness"
+install -Dm755 "$HERE/harness-engine" "$HOME/.local/bin/harness-engine"
 install -Dm755 "$HERE/harness-nano" "$HOME/.local/bin/harness-nano"
 install -Dm644 "$HERE/harness.desktop" "$HOME/.local/share/applications/harness.desktop"
 install -Dm644 "$HERE/harness.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/harness.png"

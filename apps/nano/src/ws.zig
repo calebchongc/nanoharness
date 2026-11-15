@@ -56,6 +56,18 @@ pub const Client = struct {
         return self;
     }
 
+    /// Upgrades an already connected `stream` (taken over: closed on error).
+    pub fn upgrade(gpa: Allocator, io: Io, stream: net.Stream, port: u16, path: []const u8) Error!*Client {
+        errdefer stream.close(io);
+        const self = try gpa.create(Client);
+        errdefer gpa.destroy(self);
+        self.* = .{ .io = io, .stream = stream, .rd = undefined, .wr = undefined };
+        self.rd = net.Stream.Reader.init(stream, io, &self.rbuf);
+        self.wr = net.Stream.Writer.init(stream, io, &self.wbuf);
+        try handshake(io, &self.rd.interface, &self.wr.interface, port, path);
+        return self;
+    }
+
     /// Closes the socket; a reader blocked on it wakes with an error.
     pub fn deinit(self: *Client, gpa: Allocator) void {
         self.stream.close(self.io);

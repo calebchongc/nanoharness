@@ -237,11 +237,23 @@ pub const View = struct {
         active: bool = false,
         origin: nanoui.ui.Point = .{},
     } = .{},
+    /// Cached listed archived count from `lists()` so `zenFooter` avoids a second O(N*M) scan.
+    cached_archived_count: usize = 0,
+    /// Custom Themes & Animated Backdrops studio modal state (`/custom-theme`).
+    custom_theme_open: bool = false,
+    custom_theme_generating: bool = false,
+    custom_theme_req_id: ?[]u8 = null,
+    custom_theme_prompt: nanoui.ui.TextBuffer = .{},
+    custom_theme_error: std.ArrayList(u8) = .empty,
+    custom_theme_list_dirty: bool = false,
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
         v.project_setup.deinit();
         v.open_chooser.deinit();
+        @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
+        if (v.custom_theme_req_id) |id| gpa.free(id);
+        v.custom_theme_error.deinit(gpa);
         @import("text_buffer.zig").deinit(&v.search.query);
         @import("text_buffer.zig").deinit(&v.strip.query);
         v.tool_ui.deinit(gpa);
@@ -437,6 +449,7 @@ pub const App = struct {
     /// A draft's execution target; never changes this machine's identity.
     new_device: ?[]u8 = null,
     new_reasoning: ?[]u8 = null,
+    new_orchestrator: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
     /// The model chip's picker is open.
@@ -488,6 +501,8 @@ pub const App = struct {
     settings: @import("settings.zig").Store,
     /// Settings › MCP servers, kept between visits.
     mcp: @import("view_settings_mcp.zig").Mcp,
+    /// Settings › Extensions: bounded native plugin panels.
+    extensions: @import("view_settings_extensions.zig").State = .{},
     /// graff Bots: the user's standing roles, and the page shown for them.
     bots: @import("bots.zig").Bots,
     /// The workspace's scope, the Harness account and the Codegraff
@@ -601,6 +616,7 @@ pub const App = struct {
         a.cloud_sandboxes.deinit();
         a.settings.deinit();
         a.mcp.deinit(a.gpa);
+        a.extensions.deinit(a.gpa);
         a.bots.deinit(a.gpa);
         a.view.deinit(a.gpa);
         question.deinit(a);
@@ -620,6 +636,7 @@ pub const App = struct {
         if (a.device_id) |d| a.gpa.free(d);
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
+        if (a.new_orchestrator) |o| a.gpa.free(o);
         if (a.new_device) |id| a.gpa.free(id);
         if (a.new_ref) |r| a.gpa.free(r);
         a.gpa.free(a.models_for);
@@ -646,6 +663,7 @@ pub const App = struct {
     pub const pickReasoning = agent.pickReasoning;
     pub const pickModelAndReasoning = agent.pickModelAndReasoning;
     pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
+    pub const applyLiveOrchestrator = agent.applyLiveOrchestrator;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
@@ -1012,7 +1030,16 @@ pub const App = struct {
             if (at.panel_tab) |ix| a.showPaneTab(ix);
             return;
         }
-        const project = a.findChat(chat_id).?.space_id;
+        const chat = a.findChat(chat_id).?;
+        const project = chat.space_id;
+        // Reading history is not a project-pane replacement. Keep the live
+        // workspace (including its split and drafts) visible in its own tab.
+        if (chat.archived) {
+            a.newWorkspaceSession();
+            a.tabs.setCurrent(chat_id);
+            a.select(chat_id, project);
+            return;
+        }
         const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
             a.tabs.active
         else for (0..a.tabs.items.items.len) |ix| {
@@ -1437,6 +1464,9 @@ pub const App = struct {
     }
 
     fn archiveClosedAfter(a: *App, id: []const u8, may_archive: bool, queued: bool) void {
+        // Closing an archived view cannot archive it again, nor did a busy
+        // status prevent archival. Do not show the live-session warning.
+        if (a.findChat(id)) |chat| if (chat.archived) return;
         const ac = @import("archive_close.zig");
         const st = workspace.statusOf(a.sessions.items, id);
         var sending = false;
@@ -1936,7 +1966,27 @@ pub const App = struct {
             a.composer.clear();
             return @import("view_palette.zig").toggle(a, .replace_current);
         }
+        if (std.mem.eql(u8, prompt, "/zen")) {
+            a.composer.clear();
+            a.settings.toggleUiMode();
+            return a.redraw();
+        }
+        if (std.mem.eql(u8, prompt, "/custom-theme") or std.mem.startsWith(u8, prompt, "/custom-theme ")) {
+            const raw_arg = if (prompt.len > "/custom-theme".len) std.mem.trim(u8, prompt["/custom-theme".len..], " \t\r\n") else "";
+            var arg_buf: [512]u8 = undefined;
+            const n = @min(raw_arg.len, arg_buf.len);
+            if (n > 0) @memcpy(arg_buf[0..n], raw_arg[0..n]);
+            a.composer.clear();
+            const studio = @import("view_custom_theme_studio.zig");
+            if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
+        }
         if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
+            a.space != null and a.newChatSpace() == null)
+        {
+            a.setNotice("This project's details are not available yet. Wait for sync or choose another project.");
+            return a.redraw();
+        }
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
@@ -1963,6 +2013,7 @@ pub const App = struct {
         var harness: ?[]const u8 = null;
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
+        var orchestrator: ?[]const u8 = null;
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
@@ -1970,6 +2021,7 @@ pub const App = struct {
                 harness = c.harness;
                 model = c.model;
                 reasoning = c.reasoning;
+                orchestrator = c.orchestrator;
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -1989,10 +2041,12 @@ pub const App = struct {
             harness = if (plain) t.harness else a.new_harness;
             model = if (plain) t.model else a.new_model;
             reasoning = a.new_reasoning;
+            orchestrator = if (plain) null else t.orchestrator;
             const config: requests.Config = .{
                 .harness = harness.?,
                 .model = model,
                 .reasoning = reasoning,
+                .modelOptions = .{ .orchestrator = orchestrator },
                 .chatMode = if (plain) true else null,
             };
             // A chat with no project names its device instead.
@@ -2012,6 +2066,7 @@ pub const App = struct {
             .harness = harness,
             .model = model,
             .reasoning = reasoning,
+            .modelOptions = .{ .orchestrator = orchestrator },
             .cwd = cwd,
             .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));

@@ -179,11 +179,13 @@ fn deviceOrEmpty(a: *const App, id: ?[]const u8) []const u8 {
 pub fn activate(a: *App, e: Entry) void {
     const p = &a.view.palette;
     if (e == .theme) {
-        @import("view_settings_appearance.zig").setMode(a, switch (e.theme) {
-            .system => .system,
-            .light => .light,
-            .dark => .dark,
-        });
+        const appearance = @import("view_settings_appearance.zig");
+        switch (e.theme) {
+            .toggle => appearance.toggleLightDark(a),
+            .system => appearance.applySystemDefault(a),
+            .light => appearance.setMode(a, .light),
+            .dark => appearance.setMode(a, .dark),
+        }
         return a.redraw();
     }
     const replace = p.navigation == .replace_current;
@@ -193,6 +195,10 @@ pub fn activate(a: *App, e: Entry) void {
         .new_project => @import("app_open_chooser.zig").open(a, .new_project),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
+        .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
+        .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |preset| {
+            @import("view_custom_theme_studio.zig").applyPreset(a, preset.*);
+        },
         .ui_mode => |m| {
             a.settings.applyUiMode(m);
             a.redraw();
@@ -551,10 +557,12 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                 .new_project => .folder,
                 .settings => .@"settings-minimalistic",
                 .theme => |m| switch (m) {
+                    .toggle => if (k.dark) .sun else .moon,
                     .system => .monitor,
                     .light => .sun,
                     .dark => .moon,
                 },
+                .custom_theme_studio, .custom_theme => .@"magic-stick-3",
                 .ui_mode => |m| switch (m) {
                     .zen => .@"magic-stick-3",
                     .developer => .terminal,
@@ -576,7 +584,16 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                 defer t.end();
                 kit.highlightText(c, k, e.label().?, st, room, query);
             }
-            if (hint) |h| kit.kbdHint(c, k, h);
+            if (hint) |h| kit.kbdHint(c, k, h) else if (e == .theme and e.theme == .toggle) {
+                ui.text(c, if (k.dark) "Dark → Light" else "Light → Dark", .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.75) });
+            } else if (e == .theme and e.theme == .system) {
+                const sys_active = @import("view_settings_appearance.zig").isSystemDefault(a);
+                ui.text(c, if (sys_active) "Active" else "Auto · System", .{ .size = 11, .line_height = 11 * phi, .color = if (sys_active) k.accent else k.muted.alpha(0.75) });
+            } else if (e == .custom_theme) {
+                if (@import("custom_themes.zig").findPreset(e.custom_theme)) |preset| {
+                    ui.text(c, c.print("{s} · {s}", .{ if (preset.variant.dark) "Dark" else "Light", preset.backdrop.motif.label() }), .{ .size = 11, .line_height = 11 * phi, .color = k.muted.alpha(0.75) });
+                }
+            }
         },
     }
     if (r.hovered()) c.cursor_hand = true;

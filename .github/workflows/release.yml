@@ -5,8 +5,6 @@ name: release
 #   - Arch Linux packages (.pkg.tar.zst, x86_64 + aarch64) via scripts/package-arch.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows portable zip (x86_64) via scripts/package-windows.ps1
-#   - TUI tarballs (macOS arm64, Linux x86_64 + aarch64) via the tui-release
-#     workflow, called after publish so a TUI failure cannot hold up the app
 # then create a GitHub Release AND upload everything to the
 # `harness-releases` R2 bucket (served at edge.codegraff.com/releases/* for
 # `curl -fsSL https://edge.codegraff.com/install.sh | sh`), bumping latest.txt.
@@ -45,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       # Package install overlaps the toolchain and cache restore; the job
       # waits for it before the first compile.
-      - name: gpui system deps
+      - name: linux system deps
         id: system-deps
         background: true
         run: |
@@ -71,7 +69,7 @@ jobs:
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - wait: system-deps
       - name: Native visual sandbox regressions
-        run: cargo test --locked -p harness-visual
+        run: (cd apps/nano && zig build test-visual)
       - name: package
         run: |
           scripts/package-linux.sh
@@ -118,8 +116,29 @@ jobs:
   #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
+  macos-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - id: pick
+        env:
+          HEARTBEAT: ${{ vars.HARNESS_MAC_HEARTBEAT }}
+        run: |
+          now=$(date +%s)
+          if [[ "$HEARTBEAT" =~ ^[0-9]+$ ]] && [ $((now - HEARTBEAT)) -lt 150 ]; then
+            echo "label=harness-macos-arm64" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS release job to local M3 worker (heartbeat $((now - HEARTBEAT))s old)"
+          else
+            echo "label=macos-latest" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS release job to GitHub cloud macos-latest (heartbeat=${HEARTBEAT:-unset})"
+          fi
+
   macos:
-    runs-on: macos-latest # Apple silicon
+    needs: macos-runner
+    runs-on: ${{ needs.macos-runner.outputs.label || 'macos-latest' }}
+    timeout-minutes: 90
     outputs:
       signed: ${{ steps.signing.outputs.enabled }}
     env:
@@ -174,11 +193,22 @@ jobs:
           # Allow codesign to use the imported key without a UI prompt.
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$pass" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
+          existing=()
+          while IFS= read -r kc; do
+            [ -n "$kc" ] && [ "$kc" != "$keychain" ] && existing+=("$kc")
+          done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
+          if [ "${#existing[@]}" -gt 0 ]; then
+            security list-keychains -d user -s "$keychain" "${existing[@]}"
+          else
+            security list-keychains -d user -s "$keychain"
+          fi
           identity="$(security find-identity -v -p codesigning "$keychain" \
             | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
           [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
-          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+          {
+            echo "CODESIGN_IDENTITY=$identity"
+            echo "CODESIGN_KEYCHAIN=$keychain"
+          } >>"$GITHUB_ENV"
       - name: notary credentials
         if: steps.signing.outputs.enabled == 'true'
         run: |
@@ -190,7 +220,7 @@ jobs:
           } >>"$GITHUB_ENV"
       - name: package dmg
         if: steps.signing.outputs.enabled == 'true'
-        run: scripts/package-macos.sh
+        run: ./scripts/heavy-build.sh scripts/package-macos.sh
       - name: verify signed stable macOS distribution
         if: steps.signing.outputs.enabled == 'true'
         run: |
@@ -205,6 +235,22 @@ jobs:
             target/package/*.dmg
             target/package/*.tar.gz
           if-no-files-found: error
+      - name: clean up signing credentials
+        if: always() && steps.signing.outputs.enabled == 'true'
+        run: |
+          rm -f "${NOTARY_KEY_PATH:-}" "$RUNNER_TEMP/cert.p12"
+          if [ -n "${CODESIGN_KEYCHAIN:-}" ]; then
+            kept=()
+            while IFS= read -r kc; do
+              [ -n "$kc" ] && [ "$kc" != "$CODESIGN_KEYCHAIN" ] && kept+=("$kc")
+            done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
+            if [ "${#kept[@]}" -gt 0 ]; then
+              security list-keychains -d user -s "${kept[@]}"
+            else
+              security list-keychains -d user -s
+            fi
+            security delete-keychain "$CODESIGN_KEYCHAIN" 2>/dev/null || rm -f "$CODESIGN_KEYCHAIN"
+          fi
 
   windows:
     runs-on: windows-2022
@@ -229,11 +275,13 @@ jobs:
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Native visual sandbox regressions
-        run: cargo test --locked -p harness-visual
-      - name: Windows workspace and portable-update regressions
         run: |
-          cargo test --locked -p harness-update
-          if ($LASTEXITCODE -ne 0) { throw 'Windows updater tests failed' }
+          Push-Location apps/nano
+          zig build test-visual
+          if ($LASTEXITCODE -ne 0) { throw 'Visual sandbox tests failed' }
+          Pop-Location
+      - name: Windows workspace regressions
+        run: |
           cargo test --locked -p harness-engine --test workspace_files
           if ($LASTEXITCODE -ne 0) { throw 'Windows workspace-file tests failed' }
       - name: Native Nano regressions
@@ -318,21 +366,10 @@ jobs:
               --file "$f" --remote
           done
           # manifest.json: version + per-artifact sha256 — the auto-updater
-          # (crates/update) verifies downloads against it. Published before
+          # (apps/nano/src/updates_host.zig) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
           npx wrangler@4 r2 object put harness-releases/manifest.json \
             --file manifest.json --remote
           printf '%s' "$VERSION" > latest.txt
           npx wrangler@4 r2 object put harness-releases/latest.txt \
             --file latest.txt --remote
-
-  # The TUI builds last, attached to the just-published release; it is a heavy
-  # build, so it must never block the app artifacts publish already uploaded.
-  tui:
-    needs: publish
-    permissions:
-      contents: write
-    uses: ./.github/workflows/tui-release.yml
-    secrets: inherit
-    with:
-      tag: ${{ github.ref_name }}

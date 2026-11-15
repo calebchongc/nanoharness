@@ -7,11 +7,6 @@ Copyright (c) 2026 Wing. The original MIT license, including its permission
 and warranty notice, is retained verbatim in
 [`third_party/licenses/Zeron-MIT.txt`](third_party/licenses/Zeron-MIT.txt).
 The Harness license does not erase the MIT rights in that upstream material.
-The content-reference parser, HTML document wrapper, carousel and scoped design
-controls in `crates/ui/src/markdown/content_reference.rs` and
-`crates/ui/src/browser/{document.rs,visualize.js,visualize-controls.js}` also adapt
-Zeron's MIT-licensed design stack (zeronsh/zeron #933–#935, authored in the
-sheauhuu/zeron fork). The same retained MIT notice applies.
 
 The CodeGraff emblem and workshop/context illustrations reproduced in
 `docs/brand/` come from [justrach/codegraff](https://github.com/justrach/codegraff)
@@ -23,28 +18,6 @@ the complete notice is retained in
 These images are credited to CodeGraff and are not claimed as original Harness
 contributions. The Harness app icon was created for this project with its
 visual language aligned to the CodeGraff emblem.
-
-Harness bundles the following syntax-highlighting components. Unless noted otherwise, their parsers and queries are consumed from the pinned Rust crates listed in `Cargo.lock`. The Kotlin highlight query is maintained as Harness source code and is not attributed to the grammar crate.
-
-| Component | Version | License | Source |
-| --- | --- | --- | --- |
-| Tree-sitter | 0.26.11 | MIT | https://github.com/tree-sitter/tree-sitter |
-| Tree-sitter highlight | 0.26.11 | MIT | https://github.com/tree-sitter/tree-sitter |
-| Tree-sitter Rust grammar and queries | 0.24.2 | MIT | https://github.com/tree-sitter/tree-sitter-rust |
-| Tree-sitter JavaScript grammar and queries | 0.25.0 | MIT | https://github.com/tree-sitter/tree-sitter-javascript |
-| Tree-sitter TypeScript grammar and queries | 0.23.2 | MIT | https://github.com/tree-sitter/tree-sitter-typescript |
-| Tree-sitter Python, Go, JSON, Bash, HTML, CSS, C, C++, C#, Java, Ruby and PHP grammars and queries | pinned in `Cargo.lock` | MIT | https://github.com/tree-sitter |
-| Tree-sitter TOML, Markdown, YAML, Swift, SQL, Lua, Nix, Make and Containerfile grammars and queries | pinned in `Cargo.lock` | MIT-compatible; see each crate | Crate repositories recorded in `Cargo.lock` |
-| Tree-sitter Kotlin grammar | 1.1.0 | MIT | https://github.com/tree-sitter-grammars/tree-sitter-kotlin |
-
-Harness also vendors the GPUI editor foundations below. Each crate is Apache-2.0; the license text ships beside the sources in `vendor/`.
-
-| Component | Version | License | Source |
-| --- | --- | --- | --- |
-| GPUI (`vendor/zui`) | pinned in `vendor/zui` | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-base | 0.5.2 | Apache-2.0 | https://github.com/longbridge/gpui-component |
-| mermaid-rs-renderer | 0.3.1 | MIT | https://github.com/1jehuang/mermaid-rs-renderer |
-| Ropey | 2.0.0-beta.1 | MIT | https://github.com/cessen/ropey |
 
 Harness's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
@@ -63,15 +36,15 @@ The notice identifies the original LaTeX graphics bundle and its source.
 Harness bundles the SVG icon set and filename/folder associations from
 [Symbols](https://github.com/miguelsolorio/vscode-symbols/tree/296ef1b62287fb2315cb5651e552e09e8c8e1de8).
 Symbols is MIT licensed. The complete upstream license and copyright notice is
-retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
+retained at `apps/nano/assets/file-icons/LICENSE.symbols`.
 
 ## Model maker marks
 
-The model picker's maker marks (`crates/ui/assets/icons/maker-*.svg`) are the
+The model picker's maker marks (`apps/nano/assets/icons/maker-*.svg`) are the
 monochrome SVGs from [LobeHub Icons](https://github.com/lobehub/lobe-icons)
 (`@lobehub/icons-static-svg` 1.95.1), reduced to a fixed 24px frame. LobeHub
 Icons is MIT licensed, Copyright (c) 2023 LobeHub; the complete license is
-retained at `crates/ui/assets/icons/LICENSE.lobehub`. The marks identify each
+retained at `apps/nano/assets/icons/LICENSE.lobehub`. The marks identify each
 model's maker and imply no affiliation or endorsement.
 
 The additional gateway/runtime marks (except MLX/oMLX) use the same upstream
@@ -162,42 +135,6 @@ The common MIT permission notice for the adaptations above follows:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-## mermaid-rs-renderer
-
-MIT License
-
-Copyright (c) 2026 mermaid-rs-renderer contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-## Native browser host
-
-The macOS browser uses [Wry 0.56.0](https://github.com/tauri-apps/wry/tree/wry-v0.56.0)
-(MIT OR Apache-2.0) to host the system WebKit engine, with the `objc2` family
-of bindings (MIT) and `block2` (MIT). Exact versions and transitive dependencies
-are pinned in `Cargo.lock`. The browser integration is independently written
-Harness code.
-
-The Zui native overlay renderer adapts Apache-2.0 GPUI code from
-[`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
-Attribution is retained in the pinned Zui dependency’s `NOTICE`.
-
 ## Simulator streaming helper
 
 Settings → Simulators streams a Mac's iOS Simulators to the phone through
@@ -228,5 +165,5 @@ SIL Open Font License 1.1; the notices are retained in
 Session emoji names, aliases, categories and Unicode sequences are derived from
 [emoji-datasource](https://github.com/iamcal/emoji-data/tree/v16.0.0),
 Copyright (c) 2013 Cal Henderson, under the MIT License.
-The complete license is in `crates/ui/assets/session-emoji/LICENSE`; source URLs
+The complete license is in `apps/nano/assets/session-emoji/LICENSE`; source URLs
 and hashes are in the adjacent `SOURCE.json`. No emoji artwork is bundled.

@@ -7,13 +7,13 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
-      - 'apps/harness/**'
       - 'apps/nano/**'
       - 'apps/parity/**'
       - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
-      - 'vendor/zui/**'
+      - 'scripts/ci-changed-scopes.py'
+      - 'scripts/test-ci-changed-scopes.py'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
@@ -25,13 +25,13 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.cargo/**'
-      - 'apps/harness/**'
       - 'apps/nano/**'
       - 'apps/parity/**'
       - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
-      - 'vendor/zui/**'
+      - 'scripts/ci-changed-scopes.py'
+      - 'scripts/test-ci-changed-scopes.py'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
@@ -55,12 +55,35 @@ defaults:
     shell: pwsh
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      win_ui: ${{ steps.scope.outputs.win_ui }}
+      win_app: ${{ steps.scope.outputs.win_app }}
+      win_engine: ${{ steps.scope.outputs.win_engine }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        shell: bash
+        run: |
+          python3 scripts/test-ci-changed-scopes.py
+          python3 scripts/ci-changed-scopes.py \
+            --event-name "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --github-output "$GITHUB_OUTPUT"
+
   # The suites run as three parallel groups of about equal length instead of
   # one serial job: each group compiles only what its tests need, on its own
   # runner and cache. `tests` below is the single check that passes only when
-  # all three do.
+  # all three do (treating intentionally skipped groups as allowed).
   ui:
     name: tests (ui)
+    needs: changes
+    if: needs.changes.outputs.win_ui == 'true'
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -74,6 +97,8 @@ jobs:
 
   app:
     name: tests (app and packaging)
+    needs: changes
+    if: needs.changes.outputs.win_app == 'true'
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -89,11 +114,17 @@ jobs:
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Build application
-        run: cargo build --release --locked -p harness
+        run: |
+          cargo build --release --locked -p harness-engine --bin harness-engine
+          Push-Location apps/nano
+          zig build -Doptimize=ReleaseSafe cli
+          if ($LASTEXITCODE -ne 0) { throw 'Nano CLI build failed' }
+          Pop-Location
+          Copy-Item ./apps/nano/zig-out/bin/harness.exe ./target/release/harness.exe
       - name: Verify portable packaging
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download" -CargoProfile release
-      - name: Application and updater tests
-        run: cargo test --release --locked -p harness -p harness-update -p harness-observe
+      - name: Application and engine tests
+        run: cargo test --release --locked -p harness-engine --test desktop_requests
       - name: GUI subsystem and redirected CLI output
         run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
@@ -134,6 +165,8 @@ jobs:
 
   engine:
     name: tests (engine and adapters)
+    needs: changes
+    if: needs.changes.outputs.win_engine == 'true'
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -165,14 +198,15 @@ jobs:
 
   tests:
     if: ${{ always() }}
-    needs: [ui, app, engine]
+    needs: [changes, ui, app, engine]
     runs-on: ubuntu-latest
     steps:
       - name: All Windows test groups passed
         shell: bash
         run: |
+          [ "${{ needs.changes.result }}" = success ] || { echo "changes job ended: ${{ needs.changes.result }}"; exit 1; }
           for result in "${{ needs.ui.result }}" "${{ needs.app.result }}" "${{ needs.engine.result }}"; do
-            [ "$result" = success ] || { echo "a Windows test group ended: $result"; exit 1; }
+            [ "$result" = success ] || [ "$result" = skipped ] || { echo "a Windows test group ended: $result"; exit 1; }
           done
 
   native-gui:
@@ -188,18 +222,12 @@ jobs:
           path: target/release
       - name: App lifecycle tests
         run: ./scripts/test-windows-lifecycle.ps1
-      - name: Rendering tests
-        run: ./scripts/test-windows-rendering.ps1
       - name: Upload GUI test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-native-probes
           path: |
-            target/windows-render-*/capture.png
-            target/windows-render-*/measurements.json
-            target/windows-render-*/stdout.txt
-            target/windows-render-*/stderr.txt
             target/windows-lifecycle-*/result.txt
             target/windows-lifecycle-*/run-*.txt
           if-no-files-found: warn

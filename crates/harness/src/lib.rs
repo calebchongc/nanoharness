@@ -256,7 +256,6 @@ mod run_environment;
 pub(crate) use run_environment::apply_run_environment;
 mod scratch;
 pub mod shell_env;
-pub mod tui_bundle;
 pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;
@@ -538,9 +537,10 @@ pub use acp::AcpHarness;
 pub use acp::exo_bridge::serve as serve_exo_acp;
 pub use acp::graff_bot::bot_command as graff_bot_command;
 pub use acp::graff_client::set_device_name as set_graff_device_name;
+pub use acp::graff_extensions::command as graff_extensions_command;
 pub use acp::graff_login::login_command as graff_login_command;
-pub use acp::graff_mcp::mcp_command as graff_mcp_command;
 pub use acp::graff_login::logout_command as graff_logout_command;
+pub use acp::graff_mcp::mcp_command as graff_mcp_command;
 pub use acp::graff_worktree::{
     GraffWorktreeAction, GraffWorktreeOutcome, GraffWorktreeResult, run_graff_worktree_action,
 };

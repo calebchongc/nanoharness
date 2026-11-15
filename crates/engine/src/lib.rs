@@ -25,6 +25,7 @@ pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod codegraff_auth;
+pub mod custom_theme_gen;
 mod device_login;
 pub mod diff_sync;
 pub mod doc_host;
@@ -32,6 +33,7 @@ pub mod external_history;
 pub mod git_actions;
 pub mod github_repository;
 mod graff_logins;
+mod graff_usage;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -40,6 +42,8 @@ pub mod local_import;
 pub mod localhost_view;
 pub mod mcp_servers;
 mod model_catalogs;
+pub mod native_extensions;
+pub mod preview_bridge;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -53,9 +57,11 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 mod transcript_history;
+pub mod update_bridge;
 pub mod uploads;
 pub mod workspace_files;
 pub mod workspace_host;
+pub mod zig_helper;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership, lost_session_marker};
@@ -155,8 +161,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
-    #[cfg(feature = "preview")]
-    pub previews: harness_preview::PreviewService,
+    pub previews: preview_bridge::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -179,7 +184,7 @@ pub struct EngineCore {
     links: std::sync::Mutex<Option<Arc<harness_rpc::LinkCache>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
-    updater: std::sync::Mutex<Option<harness_update::Updater>>,
+    updater: std::sync::Mutex<Option<update_bridge::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Holds the Mac awake while agents work (see [`keep_awake`]); owned so
@@ -300,15 +305,12 @@ impl EngineCore {
         let localhost_view = localhost_view::LocalhostView::new(device_name.clone());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
-        #[cfg(feature = "preview")]
-        let previews = harness_preview::PreviewService::new(
+        let previews = preview_bridge::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),
             device_name,
         )
-        .map_err(|e| EngineError::Other(e.to_string()))?;
-        #[cfg(not(feature = "preview"))]
-        let _ = device_name;
+        .map_err(EngineError::Other)?;
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
@@ -377,7 +379,6 @@ impl EngineCore {
             workspace_files,
             terminals,
             project_actions,
-            #[cfg(feature = "preview")]
             previews,
             change_requests,
             diff_sync,
@@ -469,14 +470,14 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
-    pub fn set_updater(&self, updater: harness_update::Updater) {
+    pub fn set_updater(&self, updater: update_bridge::Updater) {
         *self
             .updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
     }
 
-    pub fn updater(&self) -> Option<harness_update::Updater> {
+    pub fn updater(&self) -> Option<update_bridge::Updater> {
         self.updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -551,11 +552,8 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_simulators(self.simulators.clone())
-        .with_localhost_view(self.localhost_view.clone());
-        #[cfg(feature = "preview")]
-        {
-            rpc = rpc.with_previews(self.previews.clone());
-        }
+        .with_localhost_view(self.localhost_view.clone())
+        .with_previews(self.previews.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -575,7 +573,6 @@ impl EngineCore {
     /// draining. Connected sockets remain authorized by their handshake, so
     /// clearing credentials alone is not a security boundary.
     pub fn disconnect_edge(&self) {
-        #[cfg(feature = "preview")]
         self.previews.stop();
         if let Some(links) = self.links() {
             links.disconnect_all();
@@ -596,7 +593,6 @@ impl EngineCore {
         // boot resumes it) must not wait behind anything else. A caller with
         // a deadline (the app quitting, a service stop) can be cut off later.
         self.sessions.shutdown().await;
-        #[cfg(feature = "preview")]
         self.previews.shutdown().await;
         self.terminals.shutdown();
         self.simulators.shutdown().await;
@@ -926,7 +922,7 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
-        #[cfg(feature = "preview")]
+        let _ = preview_org;
         {
             let preview_workspace = core.workspace.clone();
             let preview_device = core.device_id.clone();
@@ -939,21 +935,14 @@ impl Engine {
                     .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
                     .collect()
             });
-            let preview_signaling = edge_enabled.then(|| harness_preview::signaling::Config {
-                edge_url: config.edge_url.clone(),
-                org_id: preview_org,
-                tokens: Arc::new(auth.clone()),
-            });
-            core.previews.start(projects, preview_signaling).await;
+            core.previews.start(projects).await;
         }
-        #[cfg(not(feature = "preview"))]
-        let _ = preview_org;
         core.start_keep_awake();
         core.harness_updates.start();
         // Installed desktop bundles and managed servers use a public stable
         // release feed, so update checks also run for local-only, signed-out
         // workspaces.
-        let install = harness_update::detect_install();
+        let install = update_bridge::detect_install();
         let check_updates =
             edge_enabled || install.supports_desktop_update() || install.checks_releases();
         if check_updates {
@@ -961,12 +950,12 @@ impl Engine {
             // headless installs apply + restart themselves (HARNESS_AUTO_UPDATE=0 opts
             // out) — gated on quiescence so a restart never lands under a live run or
             // open PTY.
-            let quiescent: harness_update::QuiescentCheck = {
+            let quiescent: update_bridge::QuiescentCheck = {
                 let sessions = core.sessions.clone();
                 let terminals = core.terminals.clone();
                 Arc::new(move || !sessions.any_active() && !terminals.any_open())
             };
-            let updater = harness_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+            let updater = update_bridge::Updater::spawn(config.edge_url.clone(), Some(quiescent));
             if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
                 let updater_for_tokens = updater.clone();
                 let wake = tokio::spawn(async move {
@@ -1059,7 +1048,7 @@ impl Engine {
                     tracing::info!("headless shutdown requested over IPC");
                 }
             }
-            _ = harness_update::reexec_requested() => {
+            _ = update_bridge::reexec_requested() => {
                 tracing::info!("update installed; stopping to restart into it");
             }
             _ = wait_for_signed_out(&mut auth_state), if workspace_scope == WorkspaceScope::Synced => {

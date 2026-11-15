@@ -8,18 +8,33 @@ if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTT
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    cargo build --profile $CargoProfile --locked -p harness
-    if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+    cargo build --profile $CargoProfile --locked -p harness-engine --bin harness-engine
+    if ($LASTEXITCODE -ne 0) { throw 'Windows engine build failed' }
     # The CRT is statically linked (.cargo/config.toml); a leftover
     # VCRUNTIME140 import would break clean installs without the VC++ redist.
-    $exe = "./target/$CargoProfile/harness.exe"
-    if ([System.Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)) -match 'VCRUNTIME140') {
-        throw 'harness.exe still imports VCRUNTIME140.dll — expected a static CRT'
+    $engineExe = "./target/$CargoProfile/harness-engine.exe"
+    if ([System.Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($engineExe)) -match 'VCRUNTIME140') {
+        throw 'harness-engine.exe still imports VCRUNTIME140.dll — expected a static CRT'
     }
+    # Nano loads the native WebView2 loader dynamically. Building its module
+    # does not run nanoui's install step, so ship the loader explicitly.
+    $sdkVersion = '1.0.2903.40'
+    $sdk = Join-Path $root "target/webview2-$sdkVersion"
+    $loader = Join-Path $sdk 'build/native/x64/WebView2Loader.dll'
+    if (-not (Test-Path -LiteralPath $loader)) {
+        $archive = "$sdk.zip"
+        Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$sdkVersion/microsoft.web.webview2.$sdkVersion.nupkg" -OutFile $archive
+        Expand-Archive -LiteralPath $archive -DestinationPath $sdk -Force
+    }
+    Push-Location (Join-Path $root 'apps/nano')
+    try {
+        zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
+        if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
+    } finally { Pop-Location }
     # Explicit pipes also work for the GUI-subsystem executable in CI. A
     # PowerShell collection match does not populate the scalar $Matches map.
     $probe = [Diagnostics.ProcessStartInfo]::new()
-    $probe.FileName = (Resolve-Path -LiteralPath "./target/$CargoProfile/harness.exe").Path
+    $probe.FileName = (Resolve-Path -LiteralPath './apps/nano/zig-out/bin/harness.exe').Path
     $probe.Arguments = '--version'
     $probe.UseShellExecute = $false
     $probe.CreateNoWindow = $true
@@ -42,22 +57,8 @@ try {
     $out = Join-Path $root 'target/package'
     $stage = Join-Path $out "harness-$version-windows-x86_64"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item -LiteralPath "./target/$CargoProfile/harness.exe" -Destination (Join-Path $stage 'harness.exe')
-    # Nano loads the native WebView2 loader dynamically. Building its module
-    # does not run nanoui's install step, so ship the loader explicitly.
-    $sdkVersion = '1.0.2903.40'
-    $sdk = Join-Path $root "target/webview2-$sdkVersion"
-    $loader = Join-Path $sdk 'build/native/x64/WebView2Loader.dll'
-    if (-not (Test-Path -LiteralPath $loader)) {
-        $archive = "$sdk.zip"
-        Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$sdkVersion/microsoft.web.webview2.$sdkVersion.nupkg" -OutFile $archive
-        Expand-Archive -LiteralPath $archive -DestinationPath $sdk -Force
-    }
-    Push-Location (Join-Path $root 'apps/nano')
-    try {
-        zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
-        if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
-    } finally { Pop-Location }
+    Copy-Item -LiteralPath $engineExe -Destination (Join-Path $stage 'harness-engine.exe')
+    Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness.exe' -Destination (Join-Path $stage 'harness.exe')
     Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness-nano.exe' -Destination (Join-Path $stage 'harness-nano.exe')
     Copy-Item -LiteralPath './apps/nano/zig-out/bin/WebView2Loader.dll' -Destination $stage
     foreach ($name in @('harness.exe', 'harness-nano.exe')) {
@@ -79,7 +80,7 @@ try {
         Copy-Item -LiteralPath $webviewLicense -Destination (Join-Path $stage 'licenses/Microsoft.Web.WebView2.txt')
     }
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
-    Copy-Item -LiteralPath "./target/$CargoProfile/harness.exe" -Destination "$stage.exe"
+    Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness.exe' -Destination "$stage.exe"
     $files = @{}
     foreach ($artifact in @("$stage.exe", "$stage.zip")) {
         $file = Split-Path $artifact -Leaf

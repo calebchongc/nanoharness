@@ -102,6 +102,8 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
                 const top_hot = top_back.hovered();
                 icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
                 ui.text(c, "Back to chats", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
+                ui.spacer(c);
+                kit.kbdHint(c, k, "esc");
                 if (top_back.clicked()) close(a);
                 top_back.end();
             } else {
@@ -253,6 +255,13 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 a.view.settings_search_focus = true;
                 a.redraw();
             }
+            ui.key(c, "settings-page-esc");
+            const esc_btn = kit.pressFeedback(ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06)).control());
+            const esc_hot = esc_btn.hovered();
+            ui.text(c, "Close", st(c, 13, .{ .color = if (esc_hot) k.text else k.muted }));
+            kit.kbdHint(c, k, "esc");
+            if (esc_btn.clicked()) close(a);
+            esc_btn.end();
         }
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
@@ -266,6 +275,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
             .appearance => @import("view_settings_appearance.zig").page(c, a, k),
             .mcp => @import("view_settings_mcp.zig").page(c, a, k),
+            .extensions => @import("view_settings_extensions.zig").page(c, a, k),
             .appshots => @import("view_settings_appshots.zig").page(c, a, k),
             .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
             .harnesses => @import("view_settings_agents.zig").page(c, a, k),
@@ -355,9 +365,7 @@ pub fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u
 pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, enabled: bool) bool {
     const target = ui.div(c).row().size(40, 40).center();
     defer target.end();
-    const track = ui.div(c).row().w(32).h(18).roundedFull().bg(if (on) k.text else k.ink(0.15)).pl(if (on) 16 else 2).itemsCenter();
-    defer track.end();
-    _ = c.leaf(.{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .radius = 7, .background = if (on) k.on_solid else k.ink(0.7) }, .none, null);
+    _ = kit.toggleSwitch(c, k, on);
     return enabled and target.clicked();
 }
 

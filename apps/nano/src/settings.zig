@@ -19,6 +19,7 @@ pub const Section = enum {
     harnesses,
     agents,
     mcp,
+    extensions,
     github_ci,
     devices,
     appshots,
@@ -41,6 +42,7 @@ pub const Section = enum {
             .appshots => "Appshots",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
+            .extensions => "Extensions",
             .github_ci => "GitHub CI",
         };
     }
@@ -50,7 +52,7 @@ pub const Section = enum {
         return switch (s) {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
-            .harnesses, .agents, .mcp, .github_ci => "Agents",
+            .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
             .devices, .appshots, .archived => "Devices and data",
         };
     }
@@ -67,7 +69,7 @@ pub const Section = enum {
             .notifications => .bell,
             .shortcuts => .keyboard,
             .archived => .@"archive-minimalistic",
-            .mcp => .@"remote-server",
+            .mcp, .extensions => .@"remote-server",
             .github_ci => .@"pull-request",
         };
     }
@@ -437,6 +439,36 @@ pub const Store = struct {
         s.write("themeSelection", .{ .object = obj });
     }
 
+    /// Selected animated backdrop preset id (`"auto"`, `"none"`, `"off"`, or a scene id).
+    pub fn backdropScene(s: *const Store) []const u8 {
+        return s.text("customThemeBackdrop") orelse "auto";
+    }
+
+    pub fn setBackdropScene(s: *Store, scene: []const u8) void {
+        s.setText("customThemeBackdrop", scene);
+    }
+
+    /// Backdrop animation intensity (`"off"`, `"static"`, `"subtle"`, `"gentle"`).
+    pub fn backdropMotionKey(s: *const Store) []const u8 {
+        return s.text("customThemeMotion") orelse "gentle";
+    }
+
+    pub fn setBackdropMotionKey(s: *Store, motion: []const u8) void {
+        s.setText("customThemeMotion", motion);
+    }
+
+    /// Opacity multiplier applied to procedural animated canvas backdrops.
+    pub fn backdropOpacity(s: *const Store) f32 {
+        const raw = s.number("customThemeOpacity") orelse 0.72;
+        const clamped = if (std.math.isFinite(raw)) std.math.clamp(raw, 0.15, 1.0) else 0.72;
+        return @floatCast(clamped);
+    }
+
+    pub fn setBackdropOpacity(s: *Store, alpha: f64) void {
+        const clamped = if (std.math.isFinite(alpha)) std.math.clamp(alpha, 0.15, 1.0) else 0.72;
+        s.setNumber("customThemeOpacity", clamped);
+    }
+
     pub fn setText(s: *Store, key: []const u8, value: []const u8) void {
         s.remember(key, .{ .string = value });
         if (std.mem.eql(u8, key, "followUpBehavior")) {
@@ -798,8 +830,17 @@ pub const Store = struct {
         return p;
     }
 
+    /// Sticky explicit mode (`baseUiMode`) unless all moving parts match the
+    /// opposite profile, so toggling one customization never kicks out of Zen.
     pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
-        return s.hierarchyProfile().effectiveMode();
+        const rules = @import("motion_rules.zig");
+        const base = s.baseUiMode();
+        const opposite: rules.UiMode = switch (base) {
+            .zen => .developer,
+            .developer => .zen,
+        };
+        if (std.meta.eql(s.hierarchyProfile(), rules.HierarchyProfile.ofMode(opposite))) return opposite;
+        return base;
     }
 
     pub fn applyUiMode(s: *Store, mode: @import("motion_rules.zig").UiMode) void {
@@ -1123,6 +1164,7 @@ test "sections in the GPUI app's order, groups and saved keys" {
     try testing.expectEqualStrings("Agents", Section.harnesses.label());
     try testing.expectEqualStrings("Devices and data", Section.archived.group());
     try testing.expectEqual(@as(?Section, .github_ci), Section.fromKey("github-ci"));
+    try testing.expectEqual(@as(?Section, .extensions), Section.fromKey("extensions"));
     try testing.expectEqual(@as(?Section, null), Section.fromKey("nope"));
     try testing.expectEqualStrings("soundCompletionEnabled", comptime camel("sound_completion_enabled"));
 }

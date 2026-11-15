@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const icons_svg = b.createModule(.{ .root_source_file = icons_root });
     const file_icons_data = @import("file_icons_build.zig").module(b);
     const card_scenes_data = @import("card_scenes_build.zig").module(b);
+    const mcp_tools_json = @import("mcp_tools_build.zig").module(b);
     // The desktop catalog: GPUI deliberately recolors its Codegraff themes
     // without changing the mobile palette. crates/theme checks this export.
     const theme_files = b.addWriteFiles();
@@ -161,7 +162,36 @@ pub fn build(b: *std.Build) void {
         .{ .name = "file_icons_data", .module = file_icons_data },
         .{ .name = "card_scenes_data", .module = card_scenes_data },
         .{ .name = "themes_json", .module = themes_json },
+        .{ .name = "mcp_tools_json", .module = mcp_tools_json },
     };
+
+    const cli_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "luau_c", .module = luau_c },
+        .{ .name = "build_info", .module = info_mod },
+        .{ .name = "http_zig", .module = http_zig },
+        .{ .name = "mcp_tools_json", .module = mcp_tools_json },
+    };
+    const cli_exe = b.addExecutable(.{ .name = "harness", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/cli_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .debug,
+        .link_libc = true,
+        .imports = cli_imports,
+    }) });
+    cli_exe.use_llvm = true;
+    if (target.result.os.tag == .windows) {
+        cli_exe.subsystem = .windows;
+        if (target.result.abi == .msvc) {
+            cli_exe.linkage = .static;
+            cli_exe.entry = .{ .symbol_name = "mainCRTStartup" };
+        }
+        for ([_][]const u8{ "kernel32", "ntdll", "userenv", "ws2_32", "dbghelp" }) |library| {
+            cli_exe.root_module.linkSystemLibrary(library, .{});
+        }
+    }
+    b.installArtifact(cli_exe);
+    b.step("cli", "Build standalone harness CLI").dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
 
     const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -256,6 +286,17 @@ pub fn build(b: *std.Build) void {
     const write_vectors = b.addRunArtifact(vectors);
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
+
+    const gh_runners = b.addExecutable(.{ .name = "harness-github-runners", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/github_runners_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .debug,
+    }) });
+    gh_runners.use_llvm = true;
+    if (target.result.os.tag == .macos) gh_runners.root_module.link_libc = true;
+    if (target.result.os.tag == .windows and target.result.abi == .msvc) gh_runners.linkage = .static;
+    b.installArtifact(gh_runners);
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
         artifact.use_llvm = true;

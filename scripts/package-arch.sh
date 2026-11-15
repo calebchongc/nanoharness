@@ -21,14 +21,14 @@ OUT_DIR="$ROOT/target/package"
 PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"
 
 cd "$ROOT"
-BIN="${BIN:-$ROOT/target/$PROFILE/harness}"
+BIN="${BIN:-$ROOT/target/$PROFILE/harness-engine}"
 if [[ ! -x "$BIN" ]]; then
   if [[ "$PROFILE" == "debug" ]]; then
-    cargo build -p harness
+    cargo build -p harness-engine --bin harness-engine
   else
-    cargo build --profile "$PROFILE" -p harness
+    cargo build --profile "$PROFILE" -p harness-engine --bin harness-engine
   fi
-  BIN="$ROOT/target/$PROFILE/harness"
+  BIN="$ROOT/target/$PROFILE/harness-engine"
 fi
 
 # pacman arch names: x86_64 / aarch64. nfpm takes amd64 / arm64.
@@ -53,7 +53,7 @@ platform: linux
 version: "$VERSION"
 release: "1"
 maintainer: Harness maintainers
-homepage: https://github.com/justrach/harness
+homepage: https://github.com/justrach/nanoharness
 description: One native workspace for your coding agents
 license: custom
 
@@ -72,6 +72,10 @@ depends:
 
 contents:
   - src: $BIN
+    dst: /usr/bin/harness-engine
+    file_info:
+      mode: 0755
+  - src: $ROOT/apps/nano/zig-out/bin/harness
     dst: /usr/bin/harness
     file_info:
       mode: 0755

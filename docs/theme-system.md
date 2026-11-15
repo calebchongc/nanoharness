@@ -1,8 +1,9 @@
 # Theme system
 
-Harness themes are complete, source-neutral `ThemeVariant` values owned by the
-`harness-theme` crate. Runtime components consume only Harness semantic roles. VS
-Code workbench ids and TextMate selectors stop at the source compiler.
+Harness themes are complete, source-neutral theme definitions stored in
+`apps/nano/themes.json` and loaded by `apps/nano/src/themes.zig`. Runtime
+components consume only Harness semantic roles. VS Code workbench ids and
+TextMate selectors stop at the source compiler.
 
 ## Runtime model
 
@@ -122,24 +123,9 @@ activated only after the updated library is persisted successfully. The library 
 `{data_dir}/theme-library.json` and is loaded before the first palette is
 installed.
 
-The `harness-theme-import` development tool exposes the same single-file adapter
-for built-in curation:
-
-Example:
-
-```bash
-cargo run -p harness-theme --bin harness-theme-import -- \
-  --input /path/to/theme.json \
-  --output /tmp/theme.harness.json \
-  --report /tmp/theme.report.json \
-  --id example-dark \
-  --family-id example \
-  --name "Example Dark" \
-  --appearance dark \
-  --source-url https://github.com/example/theme \
-  --revision 0123456789abcdef \
-  --license MIT
-```
+Custom VS Code theme files and extension packages are compiled natively by
+Nano's importer in `apps/nano/src/theme_import.zig` and validated against the
+shared parity vectors in `apps/parity/vectors/theme-import.json`.
 
 The report records every source mapping, hardening adjustment, fallback,
 unsupported font style, invalid color, validation result, and accent candidate

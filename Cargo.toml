@@ -1,46 +1,27 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/theme",
     "crates/proto",
-    "crates/preview",
-    "crates/visual",
     "crates/doc",
     "crates/sync",
     "crates/harness",
     "crates/engine",
     "crates/rpc",
-    "crates/update",
-    "crates/syntax",
-    "crates/mcp",
-    "crates/observe",
-    "crates/mobile",
-    "apps/harness",
 ]
-# Vendored forks are their own (trimmed) workspaces.
-exclude = ["tui"]
 
 [workspace.package]
-version = "0.2.199"
+version = "0.2.204"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
 
 [workspace.dependencies]
 harness-proto = { path = "crates/proto" }
-harness-preview = { path = "crates/preview" }
-harness-visual = { path = "crates/visual" }
 harness-doc = { path = "crates/doc" }
 harness-sync = { path = "crates/sync" }
 harness-adapters = { path = "crates/harness" }
 harness-engine = { path = "crates/engine", default-features = false }
 harness-rpc = { path = "crates/rpc" }
-harness-update = { path = "crates/update" }
-harness-syntax = { path = "crates/syntax" }
-harness-theme = { path = "crates/theme" }
-harness-mcp = { path = "crates/mcp" }
-harness-mobile = { path = "crates/mobile" }
-harness-observe = { path = "crates/observe" }
 
 # CRDT
 loro = "1.13"
@@ -60,7 +41,6 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-json5 = "1"
 # antigravity writes `settings.json` but reads it back with `hjson.load`, so a
 # user's comments and unquoted keys have to survive our read of the same file.
 deser-hjson = "2.2"
@@ -114,19 +94,13 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
-[profile.mobile]
-# The Android app's native library (apps/android builds it per ABI). Release
-# code, smaller than speed-first: it ships inside every APK.
-inherits = "release"
-opt-level = "s"
-
 [profile.headless]
-# Size-optimized headless daemon build (`cargo build --profile headless -p harness --no-default-features`).
+# Size-optimized headless daemon build (`cargo build --profile headless -p harness-engine --bin harness-engine`).
 inherits = "dist"
 opt-level = "s"
 
 [profile.dev]
-# gpui is slow unoptimized; match zed's approach for deps
+# Optimize external dependencies in dev builds while keeping workspace crates fast to compile.
 opt-level = 0
 
 [profile.dev.package."*"]

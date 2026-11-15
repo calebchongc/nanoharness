@@ -1,19 +1,18 @@
 # Harness architecture
 
-Harness is a native desktop workspace for coding agents. The Rust binary in `apps/harness` starts a GPUI interface and a local engine; `harness headless` runs the engine without a window. The SwiftUI companion in `apps/ios/Harness` displays synced workspaces and can send commands to a trusted desktop host.
+Harness is a native desktop workspace for coding agents. The desktop GUI and CLI launcher (`apps/nano`, `cli_main.zig`) are built in Zig on `nanoui` and `http.zig`, backed by the local Rust session/sync engine (`crates/engine`, `harness-engine`). The SwiftUI companion in `apps/ios/Harness` displays synced workspaces and can send commands to a trusted desktop host.
 
 ## Local process
 
-- `crates/ui` renders the desktop shell, conversation, file browser, terminal, settings, and agent controls.
+- `apps/nano` renders the native desktop shell, conversation, file browser, terminal, settings, and agent controls in Zig on `nanoui`, and hosts the `harness` CLI launcher, MCP server (`mcp_server.zig`), preview coordinator (`preview/`), Luau visual sandbox (`visual_luau.zig`), and self-updater (`updates_host.zig`).
 - `crates/engine` owns local workspaces, session records, worktrees, queues, and device control.
 - `crates/harness` contains provider adapters. Each adapter uses the provider's local CLI and credentials.
-- `crates/proto` defines shared messages and models. `crates/mcp` exposes selected session tools to agents.
+- `crates/proto` defines shared messages and models.
 - `crates/sync` handles optional account sync, registry state, session logs, and the device relay.
-- `crates/update` reads the release manifest and applies supported app or managed CLI updates.
 
 The GUI and engine communicate through local IPC when they run separately. Local mode requires no account or cloud service. The current profile is chosen at engine start; stop and restart the daemon after `harness login` or `harness logout` to change between local and synced profiles.
 
-The Android app in `apps/android` reaches the same sync protocol through `crates/mobile`, a UniFFI library over `crates/doc` and `crates/sync` that Gradle builds for each Android ABI. The iOS app keeps its Swift port of the protocol in `apps/ios/Harness/Sync`; `apps/parity` pins the rules both phones share.
+The iOS app keeps its Swift port of the sync protocol in `apps/ios/Harness/Sync`; `apps/parity` pins the rules shared across implementations.
 
 ## Sync service
 

@@ -340,7 +340,8 @@ pub fn managed_updates_allowed() -> bool {
 fn windows_managed_install() -> bool {
     cfg!(windows)
         && std::env::current_exe().ok().is_some_and(|exe| {
-            exe.file_name().is_some_and(|name| name == "harness.exe")
+            exe.file_name()
+                .is_some_and(|name| name == "harness.exe" || name == "harness-engine.exe")
                 && exe.with_file_name("harness-update.json").is_file()
         })
 }

@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_accounts;
 pub mod graff_bot;
 pub mod graff_client;
 #[cfg(target_os = "macos")]
@@ -44,6 +45,7 @@ mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
 pub mod graff_login;
 pub mod graff_mcp;
+pub mod graff_extensions;
 pub mod graff_worktree;
 mod normalize;
 mod prompt_images;
@@ -548,9 +550,43 @@ fn graff_spec() -> AcpAgentSpec {
 fn exo_bridge_programs() -> Vec<PathBuf> {
     std::env::current_exe()
         .ok()
-        .filter(|exe| exe.file_stem().is_some_and(|stem| stem == "harness"))
+        .filter(|exe| {
+            exe.file_stem()
+                .is_some_and(|stem| stem == "harness" || stem == "harness-engine")
+        })
         .into_iter()
         .collect()
+}
+
+fn mcp_bridge_program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?;
+    if stem == "harness" {
+        return Some(exe);
+    }
+    if stem != "harness-engine" {
+        return None;
+    }
+    #[cfg(windows)]
+    const ZIG_CLI_NAME: &str = "harness.exe";
+    #[cfg(not(windows))]
+    const ZIG_CLI_NAME: &str = "harness";
+    if let Some(raw) = std::env::var_os("HARNESS_ZIG_CLI") {
+        let path = PathBuf::from(raw);
+        if !path.as_os_str().is_empty() && path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(dir) = exe.parent() {
+        let sibling = dir.join(ZIG_CLI_NAME);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/nano/zig-out/bin")
+        .join(ZIG_CLI_NAME);
+    dev.is_file().then_some(dev)
 }
 
 /// Harness's own MCP server (`harness mcp`: agent rooms and chat tools),
@@ -576,7 +612,7 @@ fn cancel_params(session_id: &str, reason: Option<&str>) -> Value {
 
 fn harness_mcp_servers(harness: HarnessId, origin: Option<&crate::RunOrigin>) -> Value {
     let (HarnessId::Graff, Some(origin), Some(program)) =
-        (harness, origin, exo_bridge_programs().into_iter().next())
+        (harness, origin, mcp_bridge_program())
     else {
         return json!([]);
     };
@@ -2721,7 +2757,7 @@ fn config_option_sets_with_modes(
             // (approvalPolicy "never" + danger-full-access sandbox), Devin
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
+            ("select", Some("mode")) if config_id == "mode" => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
@@ -2851,6 +2887,7 @@ fn session_update_events(
             subagents.observe(update);
             Vec::new()
         }
+        "_codegraff/usage" => graff_accounts::usage_events(params),
         _ => Vec::new(),
     };
     if method == "session/update" {
@@ -3061,11 +3098,19 @@ fn prompt_turn(
     allowed: Vec<String>,
     images: bool,
     prompt_id: Option<String>,
+    harness: HarnessId,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
         // A room delivery's tag line becomes `_meta["harness/room"]`, so the
         // agent can tell another agent's post from the user's words.
         let (text, room) = harness_proto::room_delivery::lift(&text);
+        let (text, command) = if harness == HarnessId::Graff {
+            let (text, selected) = harness_proto::invocation::graff_command_prompt(&text);
+            // Room deliveries are advisory, never the user's completion acceptance.
+            (text, Some(selected && room.is_none()))
+        } else {
+            (text, None)
+        };
         let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
@@ -3076,6 +3121,9 @@ fn prompt_turn(
         }
         if let Some(room) = room {
             params["_meta"]["harness/room"] = room;
+        }
+        if let Some(command) = command {
+            params["_meta"]["harness/command"] = command.into();
         }
         client.request("session/prompt", params).await
     })
@@ -3786,7 +3834,17 @@ async fn run_session(session: Session) {
                         "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
                     )));
                 }
-                // A missing/foreign session falls back to a fresh one.
+                Err(e) if harness == HarnessId::Graff => {
+                    // Never send a retry without its native conversation context
+                    // or replace the stored reference with an empty session.
+                    return Err(HarnessError::Protocol(format!(
+                        "{agent_name} could not restore the previous session; your message was \
+                         not sent and the previous session reference was kept. Restore the \
+                         saved session and retry, or explicitly start a new chat without the \
+                         previous context. Restore error: {e}"
+                    )));
+                }
+                // Other agents retain their missing/foreign-session fallback.
                 Err(e) => {
                     tracing::debug!(
                         target: "harness_adapters::acp",
@@ -4195,6 +4253,7 @@ async fn run_session(session: Session) {
             allowed_images.clone(),
             images_supported,
             current_prompt_id.clone(),
+            harness,
         )
     });
     // Steers waiting for the turn boundary (agents without the extension, or
@@ -4408,7 +4467,7 @@ async fn run_session(session: Session) {
                     prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
                         client.clone(), session_id.clone(), clarification_resume::PROMPT.into(),
-                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(),
+                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(), harness,
                     ));
                     continue 'main;
                 }
@@ -4493,6 +4552,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     break 'main;
@@ -4513,16 +4573,17 @@ async fn run_session(session: Session) {
                     // with nothing further on the wire — verified live,
                     // 1.18.18). One such frame must not disarm the watchdog
                     // for the whole turn; only turn progress counts.
-                    let boilerplate = method == "session/update"
-                        && matches!(
-                            params
-                                .get("update")
-                                .and_then(|u| u.get("sessionUpdate"))
-                                .and_then(Value::as_str),
-                            Some("available_commands_update")
-                                | Some("config_option_update")
-                                | Some("current_mode_update")
-                        );
+                    let boilerplate = method == "_codegraff/usage"
+                        || (method == "session/update"
+                            && matches!(
+                                params
+                                    .get("update")
+                                    .and_then(|u| u.get("sessionUpdate"))
+                                    .and_then(Value::as_str),
+                                Some("available_commands_update")
+                                    | Some("config_option_update")
+                                    | Some("current_mode_update")
+                            ));
                     if !boilerplate {
                         prompt_stall_deadline = None;
                     }
@@ -4854,6 +4915,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
@@ -4911,6 +4973,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
@@ -4988,6 +5051,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
@@ -5053,6 +5117,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
@@ -5991,6 +6056,41 @@ mod tests {
     }
 
     #[test]
+    fn config_option_sets_orchestrator_under_mode_category() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "orchestrator",
+                    "name": "Orchestrator",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "auto",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "on", "name": "On" },
+                    ],
+                },
+            ],
+        });
+        let no_opts = serde_json::Map::new();
+        assert_eq!(
+            config_option_sets(&response, None, &[], &no_opts),
+            Vec::new()
+        );
+        let mut opts = serde_json::Map::new();
+        opts.insert("orchestrator".into(), json!("on"));
+        assert_eq!(
+            config_option_sets(&response, None, &[], &opts),
+            vec![("orchestrator".to_owned(), json!({ "value": "on" }))]
+        );
+        let mut same = serde_json::Map::new();
+        same.insert("orchestrator".into(), json!("auto"));
+        assert_eq!(config_option_sets(&response, None, &[], &same), Vec::new());
+    }
+
+    #[test]
     fn first_class_models_use_session_set_model_without_config_option() {
         let response = json!({
             "models": {
@@ -6753,4 +6853,39 @@ fn jev_effort_change_requires_matching_success_and_live_config() {
         })
     );
     assert_eq!(tracker.observe(&config("none")), None);
+}
+
+#[cfg(test)]
+#[test]
+fn codegraff_usage_notification_maps_to_plan_usage_event() {
+    let mut subagents = SubagentObserver::Graff(Default::default());
+    let mut trackers = SessionTrackers::default();
+    let params = json!({
+        "sessionId": "s1",
+        "provider": "anthropic",
+        "usage": {
+            "planWindows": [
+                {
+                    "label": "Session",
+                    "usedPercent": 18.0,
+                    "resetsAtUnix": 1_800_000_000_i64
+                },
+                {
+                    "label": "Fable",
+                    "usedPercent": 85.0
+                }
+            ]
+        }
+    });
+    let events = session_update_events("_codegraff/usage", &params, "s1", &mut subagents, &mut trackers);
+    assert_eq!(events.len(), 1);
+    let AgentEvent::PlanUsage { provider, windows } = &events[0] else {
+        panic!("expected PlanUsage event, got {events:?}");
+    };
+    assert_eq!(provider.as_deref(), Some("anthropic"));
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].label, "Session");
+    assert!((windows[0].used_fraction - 0.18).abs() < 1e-6);
+    assert_eq!(windows[1].label, "Fable");
+    assert!((windows[1].used_fraction - 0.85).abs() < 1e-6);
 }

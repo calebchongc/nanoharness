@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use harness_proto::{Model, ReasoningLevel, context_label};
+use harness_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, context_label};
 use serde_json::{Value, json};
 
 use super::{AcpHarness, initialize_params, reasoning_from_value, request_draining};
@@ -33,6 +33,7 @@ pub(super) fn normalize_legacy_id(id: &str) -> Cow<'_, str> {
         || !matches!(
             provider,
             "anthropic"
+                | "chatgpt-new"
                 | "claude-agent"
                 | "codegraff"
                 | "codex"
@@ -262,6 +263,11 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
         .and_then(Value::as_array)
         .ok_or_else(|| HarnessError::Protocol("graff/models omitted its model rows".into()))?;
     let current = catalog.get("current");
+    let orchestrator_default = current
+        .and_then(|c| c.get("orchestrator"))
+        .and_then(Value::as_str)
+        .filter(|v| matches!(*v, "off" | "auto" | "on"))
+        .unwrap_or("auto");
     let mut seen = HashSet::new();
     let mut models = Vec::new();
     for row in rows {
@@ -291,20 +297,31 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
             }
         }
         let context = row.get("context").and_then(Value::as_u64);
+        let separate_quota = row.get("separateQuota").and_then(Value::as_bool) == Some(true);
         let text = |key: &str| {
             row.get(key)
                 .and_then(Value::as_str)
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned)
         };
+        let billing = match (text("cost").as_deref(), separate_quota) {
+            (Some("plan"), true) => Some("plan*".to_owned()),
+            (Some(cost), _) => Some(cost.to_owned()),
+            (None, _) => None,
+        };
+        let options = if row.get("orchestratorSupported").and_then(Value::as_bool) == Some(true) {
+            vec![orchestrator_option(orchestrator_default)]
+        } else {
+            Vec::new()
+        };
         let model = Model {
             id: format!("{provider}/{name}"),
             label: name.to_owned(),
-            description: Some(describe(provider, context)),
+            description: Some(describe_acp(provider, context, separate_quota)),
             reasoning_levels,
-            options: Vec::new(),
+            options,
             maker: text("maker"),
-            billing: text("cost"),
+            billing,
             context,
         };
         if current.is_some_and(|c| {
@@ -450,6 +467,37 @@ fn describe(provider: &str, context: Option<u64>) -> String {
     match context {
         Some(context) => format!("{provider} · {} context", context_label(context)),
         None => provider.to_owned(),
+    }
+}
+
+fn describe_acp(provider: &str, context: Option<u64>, separate_quota: bool) -> String {
+    let base = describe(provider, context);
+    if separate_quota {
+        format!("{base} · separate limit")
+    } else {
+        base
+    }
+}
+
+fn orchestrator_option(default_choice: &str) -> ModelOption {
+    ModelOption {
+        id: "orchestrator".into(),
+        label: "Orchestrator".into(),
+        choices: vec![
+            ModelOptionChoice {
+                id: "off".into(),
+                label: "Off".into(),
+            },
+            ModelOptionChoice {
+                id: "auto".into(),
+                label: "Auto".into(),
+            },
+            ModelOptionChoice {
+                id: "on".into(),
+                label: "On".into(),
+            },
+        ],
+        default_choice: default_choice.into(),
     }
 }
 
@@ -935,6 +983,27 @@ openrouter:\n\
     }
 
     #[test]
+    fn acp_catalog_surfaces_separate_quota_billing_and_description() {
+        let catalog = json!({"models": [
+            {"provider": "anthropic", "name": "claude-fable-5-2", "authenticated": true,
+             "cost": "plan", "maker": "anthropic", "context": 1000000, "separateQuota": true},
+            {"provider": "anthropic", "name": "claude-opus-5-5", "authenticated": true,
+             "cost": "plan", "maker": "anthropic", "context": 1000000}
+        ]});
+        let models = models_from_acp(&catalog).unwrap();
+        assert_eq!(models[0].billing.as_deref(), Some("plan*"));
+        assert_eq!(
+            models[0].description.as_deref(),
+            Some("anthropic · 1M context · separate limit")
+        );
+        assert_eq!(models[1].billing.as_deref(), Some("plan"));
+        assert_eq!(
+            models[1].description.as_deref(),
+            Some("anthropic · 1M context")
+        );
+    }
+
+    #[test]
     fn listing_seats_carry_context() {
         let seats = vec![Seat {
             provider: "codegraff".into(),
@@ -947,5 +1016,37 @@ openrouter:\n\
             models[0].description.as_deref(),
             Some("codegraff · 1.05M context")
         );
+    }
+
+    #[test]
+    fn acp_catalog_surfaces_orchestrator_option_for_supported_models() {
+        let catalog = json!({
+            "models": [
+                {"provider": "codex", "name": "gpt-6-astra", "authenticated": true,
+                 "orchestratorSupported": true, "executorModel": "gpt-6-spark"},
+                {"provider": "codex", "name": "gpt-6-spark", "authenticated": true,
+                 "orchestratorSupported": false}
+            ],
+            "current": {"provider": "codex", "model": "gpt-6-astra", "orchestrator": "on"}
+        });
+        let models = models_from_acp(&catalog).unwrap();
+        assert_eq!(models[0].options.len(), 1);
+        assert_eq!(models[0].options[0].id, "orchestrator");
+        assert_eq!(models[0].options[0].default_choice, "on");
+        let ids: Vec<_> = models[0].options[0]
+            .choices
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["off", "auto", "on"]);
+        assert!(models[1].options.is_empty());
+
+        // Older or unannotated catalog falls back to "auto" when supported.
+        let defaults = json!({"models": [
+            {"provider": "anthropic", "name": "claude-opus-5-5", "authenticated": true,
+             "orchestratorSupported": true}
+        ]});
+        let models = models_from_acp(&defaults).unwrap();
+        assert_eq!(models[0].options[0].default_choice, "auto");
     }
 }

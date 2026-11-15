@@ -13,6 +13,7 @@ pub fn description(section: Section) []const u8 {
         .harnesses => "Installed agents and run preferences",
         .agents => "Provider sign-in, usage and cloud sandboxes",
         .mcp => "Connect tools and MCP servers",
+        .extensions => "Trusted native plugin panels and actions",
         .github_ci => "Repositories, CI runners and checks",
         .devices => "Connected computers and app updates",
         .appshots => "Capture app screenshots",
@@ -23,7 +24,7 @@ pub fn description(section: Section) []const u8 {
 fn keywords(section: Section) []const u8 {
     return switch (section) {
         .account => "profile member card join date sign in out cloud sync avatar",
-        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff",
+        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff switch theme default system auto",
         .notifications => "privacy telemetry metrics responsiveness scroll statistics consent sound volume banner",
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",
@@ -31,6 +32,7 @@ fn keywords(section: Section) []const u8 {
         .harnesses => "models context compaction titles installed agent",
         .agents => "login authentication credentials account token subscription billing",
         .mcp => "integration tools protocol server",
+        .extensions => "plugins extensions native panels controls callbacks github runners workers",
         .github_ci => "continuous integration build test runner repository GitHub",
         .devices => "update release version hourly install automatic background download restart computer host remote desktop",
         .appshots => "screenshot capture permission",

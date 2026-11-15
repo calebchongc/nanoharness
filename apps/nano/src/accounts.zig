@@ -93,6 +93,12 @@ pub const GraffLogin = struct {
     signed_in: bool = false,
     account: ?[]const u8 = null,
     plan_usage: ?bool = null,
+    display_name: ?[]const u8 = null,
+    organization: ?[]const u8 = null,
+    plan_label: ?[]const u8 = null,
+    usage_windows: []const Window = &.{},
+    prepaid_cents: ?i64 = null,
+    reset_credits: ?f64 = null,
 };
 
 /// `CodegraffUsage`'s reply when signed in.
@@ -171,22 +177,26 @@ fn array(v: ?json.Value) []const json.Value {
     return if (x == .array) x.array.items else &.{};
 }
 
+fn parseWindows(ar: Allocator, v: ?json.Value) ![]const Window {
+    var windows: std.ArrayList(Window) = .empty;
+    for (array(v)) |w| {
+        if (w != .object) continue;
+        const resets = try str(ar, w.object, "resetsAt");
+        try windows.append(ar, .{
+            .label = (try str(ar, w.object, "label")) orelse "",
+            .used_fraction = @floatCast(number(w.object, "usedFraction") orelse 0),
+            .resets_ms = if (resets) |r| rules.parseTime(r) else null,
+        });
+    }
+    return windows.items;
+}
+
 pub fn parseSnapshot(ar: Allocator, v: json.Value) !Snapshot {
     if (v != .object) return error.Unexpected;
     var accounts: std.ArrayList(Account) = .empty;
     for (array(v.object.get("accounts"))) |item| {
         if (item != .object) continue;
         const o = item.object;
-        var windows: std.ArrayList(Window) = .empty;
-        for (array(o.get("usageWindows"))) |w| {
-            if (w != .object) continue;
-            const resets = try str(ar, w.object, "resetsAt");
-            try windows.append(ar, .{
-                .label = (try str(ar, w.object, "label")) orelse "",
-                .used_fraction = @floatCast(number(w.object, "usedFraction") orelse 0),
-                .resets_ms = if (resets) |r| rules.parseTime(r) else null,
-            });
-        }
         try accounts.append(ar, .{
             .id = (try str(ar, o, "id")) orelse continue,
             .harness = (try str(ar, o, "harness")) orelse "",
@@ -195,7 +205,7 @@ pub fn parseSnapshot(ar: Allocator, v: json.Value) !Snapshot {
             .plan_label = try str(ar, o, "planLabel"),
             .active = flag(o, "active"),
             .switchable = flag(o, "switchable"),
-            .usage = windows.items,
+            .usage = try parseWindows(ar, o.get("usageWindows")),
             .usage_error = try str(ar, o, "usageError"),
         });
     }
@@ -223,6 +233,12 @@ pub fn parseGraffLogins(ar: Allocator, v: json.Value) ![]const GraffLogin {
             .signed_in = flag(o, "signedIn"),
             .account = try str(ar, o, "account"),
             .plan_usage = if (plan) |p| (if (p == .bool) p.bool else null) else null,
+            .display_name = try str(ar, o, "displayName"),
+            .organization = try str(ar, o, "organization"),
+            .plan_label = try str(ar, o, "planLabel"),
+            .usage_windows = try parseWindows(ar, o.get("usageWindows")),
+            .prepaid_cents = int(o, "prepaidCents"),
+            .reset_credits = number(o, "resetCredits"),
         });
     }
     return out.items;
@@ -371,6 +387,116 @@ pub fn ringFraction(acc: Account, harness_wire: []const u8, model: ?[]const u8) 
     return usedFraction(acc);
 }
 
+/// Extracts the graff route prefix before `'/'` or `':'` (e.g. `"codex"`, `"chatgpt-new"`).
+pub fn graffRoute(model: ?[]const u8) ?[]const u8 {
+    const raw = model orelse return null;
+    const sep = std.mem.indexOfAny(u8, raw, "/:") orelse return null;
+    if (sep == 0) return null;
+    return raw[0..sep];
+}
+
+pub fn graffLoginToAccount(alloc: Allocator, g: GraffLogin, active: bool) Account {
+    const plan_label: ?[]const u8 = if (g.account != null) blk: {
+        break :blk if (g.plan_label) |pl|
+            (std.fmt.allocPrint(alloc, "{s} \u{00b7} {s}", .{ g.name, pl }) catch pl)
+        else
+            g.name;
+    } else g.plan_label;
+    return .{
+        .id = g.id,
+        .harness = "graff",
+        .email = g.account,
+        .display_name = g.display_name orelse g.name,
+        .plan_label = plan_label,
+        .active = active,
+        .switchable = false,
+        .usage = g.usage_windows,
+    };
+}
+
+fn findSignedInGraffWithUsage(logins: ?[]const GraffLogin, id: []const u8) ?GraffLogin {
+    const rows = logins orelse return null;
+    for (rows) |g| {
+        if (g.signed_in and g.usage_windows.len > 0 and std.mem.eql(u8, g.id, id)) return g;
+    }
+    return null;
+}
+
+fn activeCliAccountWithUsage(snap: ?Snapshot, h: Harness) ?Account {
+    const s = snap orelse return null;
+    for (s.accounts) |acc| {
+        if (matchesProvider(acc, h) and acc.active and acc.usage.len > 0) return acc;
+    }
+    return null;
+}
+
+pub fn graffActiveAccount(alloc: Allocator, snap: ?Snapshot, logins: ?[]const GraffLogin, model: ?[]const u8) ?Account {
+    if (graffRoute(model)) |route| {
+        if (std.mem.eql(u8, route, "codex")) {
+            if (activeCliAccountWithUsage(snap, .codex)) |acc| return acc;
+            if (findSignedInGraffWithUsage(logins, "chatgpt-new")) |g| return graffLoginToAccount(alloc, g, true);
+            return null;
+        }
+        if (std.mem.eql(u8, route, "chatgpt-new")) {
+            if (findSignedInGraffWithUsage(logins, "chatgpt-new")) |g| return graffLoginToAccount(alloc, g, true);
+            if (activeCliAccountWithUsage(snap, .codex)) |acc| return acc;
+            return null;
+        }
+        if (std.mem.eql(u8, route, "claude-agent")) {
+            if (findSignedInGraffWithUsage(logins, "claude-agent")) |g| return graffLoginToAccount(alloc, g, true);
+            if (activeCliAccountWithUsage(snap, .claude_code)) |acc| return acc;
+            return null;
+        }
+        if (std.mem.eql(u8, route, "anthropic")) {
+            if (findSignedInGraffWithUsage(logins, "anthropic")) |g| return graffLoginToAccount(alloc, g, true);
+            return null;
+        }
+        if (std.mem.eql(u8, route, "xai") or std.mem.eql(u8, route, "grok")) {
+            if (findSignedInGraffWithUsage(logins, "xai")) |g| return graffLoginToAccount(alloc, g, true);
+            return null;
+        }
+        if (findSignedInGraffWithUsage(logins, route)) |g| return graffLoginToAccount(alloc, g, true);
+        return null;
+    }
+    if (logins) |rows| {
+        for (rows) |g| {
+            if (g.signed_in and g.usage_windows.len > 0) return graffLoginToAccount(alloc, g, true);
+        }
+    }
+    return null;
+}
+
+pub fn graffMatchingAccounts(alloc: Allocator, snap: ?Snapshot, logins: ?[]const GraffLogin, model: ?[]const u8) []Account {
+    const chosen = graffActiveAccount(alloc, snap, logins, model);
+    var out: std.ArrayList(Account) = .empty;
+    if (logins) |rows| {
+        for (rows) |g| {
+            if (!g.signed_in or g.usage_windows.len == 0) continue;
+            const is_active = if (chosen) |ch| std.mem.eql(u8, ch.harness, "graff") and std.mem.eql(u8, ch.id, g.id) else false;
+            out.append(alloc, graffLoginToAccount(alloc, g, is_active)) catch {};
+        }
+    }
+    if (snap) |s| if (graffRoute(model)) |route| {
+        const cli_harness: ?Harness = if (std.mem.eql(u8, route, "codex"))
+            .codex
+        else if (std.mem.eql(u8, route, "claude-agent"))
+            .claude_code
+        else
+            null;
+        if (cli_harness) |h| {
+            for (s.accounts) |acc| {
+                if (!matchesProvider(acc, h)) continue;
+                var item = acc;
+                if (chosen) |ch| {
+                    item.active = std.mem.eql(u8, ch.harness, acc.harness) and std.mem.eql(u8, ch.id, acc.id);
+                }
+                out.append(alloc, item) catch {};
+            }
+        }
+    };
+    return out.toOwnedSlice(alloc) catch &.{};
+}
+
 /// First active account belonging to `harness_wire`'s provider.
 pub fn activeAccountForHarness(snap: Snapshot, harness_wire: []const u8) ?Account {
     const h = providerHarness(harness_wire) orelse return null;
@@ -435,7 +561,14 @@ pub fn openaiLogin(s: Snapshot) OpenAi {
 }
 
 /// `GRAFF_LOGIN_PROVIDERS`' names.
-const graff_names = [_][2][]const u8{ .{ "xai", "xAI" }, .{ "kimi", "Kimi" }, .{ "zai", "Z.AI" }, .{ "chatgpt-new", "ChatGPT" }, .{ "anthropic", "Anthropic Console" } };
+const graff_names = [_][2][]const u8{
+    .{ "xai", "xAI" },
+    .{ "kimi", "Kimi" },
+    .{ "zai", "Z.AI" },
+    .{ "chatgpt-new", "ChatGPT" },
+    .{ "anthropic", "Anthropic Console" },
+    .{ "claude-agent", "Claude Agent" },
+};
 
 /// A graff provider's name for the sign-in dialog (`graff_provider_name`).
 pub fn graffProviderName(id: ?[]const u8) []const u8 {
@@ -462,13 +595,16 @@ pub const Chatgpt = union(enum) {
     ready: ?[]const u8,
     plan_off: ?[]const u8,
 
+    pub fn rowFromListing(rows: ?[]const GraffLogin) ?GraffLogin {
+        const list = rows orelse return null;
+        for (list) |r| if (std.mem.eql(u8, r.id, "chatgpt-new")) return r;
+        return null;
+    }
+
     pub fn fromListing(rows: ?[]const GraffLogin) Chatgpt {
-        const list = rows orelse return .unknown;
-        for (list) |r| if (std.mem.eql(u8, r.id, "chatgpt-new")) {
-            if (r.signed_in) return .{ .ready = r.account };
-            if (r.plan_usage) |p| if (!p) return .{ .plan_off = r.account };
-            return .signed_out;
-        };
+        const r = rowFromListing(rows) orelse return if (rows == null) .unknown else .signed_out;
+        if (r.signed_in) return .{ .ready = r.account };
+        if (r.plan_usage) |p| if (!p) return .{ .plan_off = r.account };
         return .signed_out;
     }
 
@@ -485,8 +621,24 @@ pub const Chatgpt = union(enum) {
 /// A graff provider row's line.
 pub fn graffStatus(buf: []u8, p: GraffLogin) []const u8 {
     if (!p.signed_in) return "Not signed in";
-    const who = p.account orelse return "Signed in on this device";
-    return std.fmt.bufPrint(buf, "Signed in as {s}", .{who}) catch "Signed in";
+    const head = if (p.account) |who|
+        std.fmt.bufPrint(buf, "Signed in as {s}", .{who}) catch return "Signed in"
+    else
+        std.fmt.bufPrint(buf, "Signed in on this device", .{}) catch return "Signed in";
+    var len = head.len;
+    if (p.organization) |org| {
+        if (std.fmt.bufPrint(buf[len..], " \u{00b7} {s}", .{org})) |tail| {
+            len += tail.len;
+        } else |_| {}
+    }
+    if (p.prepaid_cents) |cents| if (cents > 0) {
+        const dollars = @divTrunc(cents, 100);
+        const rem_cents: u64 = @intCast(@rem(cents, 100));
+        if (std.fmt.bufPrint(buf[len..], " \u{00b7} ${d}.{d:0>2} prepaid", .{ dollars, rem_cents })) |tail| {
+            len += tail.len;
+        } else |_| {}
+    };
+    return buf[0..len];
 }
 
 /// The legacy Codex login's line under graff's providers.
@@ -882,4 +1034,80 @@ test "account usage rules: error parsing, ring fractions, Cursor pools, optimist
     try testing.expectEqualStrings("5h: resets 12:05 PM \u{00b7} 7d: resets Sun", tip);
     try testing.expectEqualStrings("Cursor \u{00b7} Other", usageResets(ar, s.accounts[2].usage, now_ms, 0));
     try testing.expectEqualStrings("", usageResets(ar, &.{}, now_ms, 0));
+}
+
+test "graff login metadata parsing, organization/prepaid status, and provider name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const p = try parsed(
+        \\[
+        \\ {"id":"xai","name":"xAI","signedIn":true,"account":"ada@example.test","planLabel":"SuperGrok Heavy","prepaidCents":1250,"resetCredits":50.0,
+        \\  "usageWindows":[{"label":"Credits","usedFraction":0.35,"resetsAt":"2027-02-01T00:00:00Z"}]},
+        \\ {"id":"anthropic","name":"Anthropic Console","signedIn":true,"account":"ops@acme.test","organization":"Acme Labs","planLabel":"Max",
+        \\  "usageWindows":[{"label":"Session","usedFraction":0.18},{"label":"Fable","usedFraction":0.85}]},
+        \\ {"id":"claude-agent","name":"Claude Agent","signedIn":true,"account":"dev@studio.test","organization":"Studio Team","planLabel":"Claude Max 20x"}
+        \\]
+    );
+    defer p.deinit();
+    const rows = try parseGraffLogins(ar, p.value);
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    try testing.expectEqualStrings("SuperGrok Heavy", rows[0].plan_label.?);
+    try testing.expectEqual(@as(?i64, 1250), rows[0].prepaid_cents);
+    try testing.expectEqual(@as(?f64, 50.0), rows[0].reset_credits);
+    try testing.expectEqual(@as(usize, 1), rows[0].usage_windows.len);
+    try testing.expectEqualStrings("Fable", rows[1].usage_windows[1].label);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("Signed in as ada@example.test \u{00b7} $12.50 prepaid", graffStatus(&buf, rows[0]));
+    try testing.expectEqualStrings("Signed in as ops@acme.test \u{00b7} Acme Labs", graffStatus(&buf, rows[1]));
+    try testing.expectEqualStrings("Claude Agent", graffProviderName("claude-agent"));
+}
+
+test "graff route selection and matching accounts preserve reportsUsage false" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    try testing.expect(!reportsUsage("graff"));
+    try testing.expectEqualStrings("codex", graffRoute("codex/gpt-6-astra").?);
+    try testing.expectEqualStrings("claude-agent", graffRoute("claude-agent:opus").?);
+    try testing.expect(graffRoute("bare-model") == null);
+
+    const logins_json = try parsed(
+        \\[
+        \\ {"id":"chatgpt-new","name":"ChatGPT","signedIn":true,"account":"dev@acme.test","planLabel":"Pro",
+        \\  "usageWindows":[{"label":"Session","usedFraction":0.38},{"label":"Week","usedFraction":0.24}]},
+        \\ {"id":"claude-agent","name":"Claude Agent","signedIn":true,"account":"cl@acme.test","planLabel":"Max",
+        \\  "usageWindows":[{"label":"5h","usedFraction":0.42}]}
+        \\]
+    );
+    defer logins_json.deinit();
+    const logins = try parseGraffLogins(ar, logins_json.value);
+
+    const snap_json = try parsed(
+        \\{"accounts":[
+        \\ {"id":"cx-1","harness":"codex","email":"cli@codex.test","planLabel":"Plus","active":true,"switchable":true,
+        \\  "usageWindows":[{"label":"Session","usedFraction":0.61}]}
+        \\]}
+    );
+    defer snap_json.deinit();
+    const snap = try parseSnapshot(ar, snap_json.value);
+
+    // codex route prefers active Codex CLI account, falling back to ChatGPT login when absent.
+    const codex_cli = graffActiveAccount(ar, snap, logins, "codex/gpt-6-astra").?;
+    try testing.expectEqualStrings("cx-1", codex_cli.id);
+    const codex_fallback = graffActiveAccount(ar, null, logins, "codex/gpt-6-astra").?;
+    try testing.expectEqualStrings("chatgpt-new", codex_fallback.id);
+    try testing.expectEqualStrings("ChatGPT \u{00b7} Pro", codex_fallback.plan_label.?);
+
+    // chatgpt-new prefers Graff ChatGPT login even when a Codex CLI login exists.
+    const chatgpt = graffActiveAccount(ar, snap, logins, "chatgpt-new/gpt-6-sol").?;
+    try testing.expectEqualStrings("chatgpt-new", chatgpt.id);
+
+    // Non-plan API route shows no usage ring.
+    try testing.expect(graffActiveAccount(ar, snap, logins, "deepseek/deepseek-v3.2") == null);
+
+    const matching = graffMatchingAccounts(ar, snap, logins, "codex/gpt-6-astra");
+    try testing.expectEqual(@as(usize, 3), matching.len);
 }

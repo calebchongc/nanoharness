@@ -788,8 +788,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
-    #[cfg(feature = "preview")]
-    previews: Option<harness_preview::PreviewService>,
+    previews: Option<crate::preview_bridge::PreviewService>,
     simulators: Option<crate::simulators::Simulators>,
     localhost_view: Option<crate::localhost_view::LocalhostView>,
     change_requests: CheckoutChangeRequests,
@@ -798,7 +797,7 @@ pub struct EngineRpc {
     agent_accounts: AgentAccounts,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
-    updater: Option<harness_update::Updater>,
+    updater: Option<crate::update_bridge::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     external_history: Option<crate::external_history::ExternalHistory>,
@@ -838,7 +837,6 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
-            #[cfg(feature = "preview")]
             previews: None,
             simulators: None,
             localhost_view: None,
@@ -856,8 +854,7 @@ impl EngineRpc {
         }
     }
 
-    #[cfg(feature = "preview")]
-    pub fn with_previews(mut self, previews: harness_preview::PreviewService) -> Self {
+    pub fn with_previews(mut self, previews: crate::preview_bridge::PreviewService) -> Self {
         self.previews = Some(previews);
         self
     }
@@ -1004,7 +1001,7 @@ impl EngineRpc {
     }
 
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
-    pub fn with_updater(mut self, updater: harness_update::Updater) -> Self {
+    pub fn with_updater(mut self, updater: crate::update_bridge::Updater) -> Self {
         self.updater = Some(updater);
         self
     }
@@ -1049,7 +1046,7 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("auth unavailable".into()))
     }
 
-    fn updater(&self) -> Result<&harness_update::Updater, RpcError> {
+    fn updater(&self) -> Result<&crate::update_bridge::Updater, RpcError> {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
@@ -1599,6 +1596,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         // A reconnect handshakes every server; a login waits on a browser page.
+        methods::LIST_NATIVE_EXTENSIONS | methods::INVOKE_NATIVE_EXTENSION => {
+            Duration::from_secs(190)
+        }
         methods::LIST_MCP_SERVERS => Duration::from_secs(70),
         methods::MCP_SERVER_ACTION => Duration::from_secs(6 * 60),
         // A bot's first run may wait on graff's model list.
@@ -1721,6 +1721,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_GRAFF_LOGINS
             | methods::SIGN_OUT_GRAFF_LOGIN
             // graff's MCP config, caches and sign-ins are per device.
+            | methods::LIST_NATIVE_EXTENSIONS
+            | methods::INVOKE_NATIVE_EXTENSION
             | methods::LIST_MCP_SERVERS
             | methods::MCP_SERVER_ACTION
             // graff's bots live in the home of the device that runs them.
@@ -2224,6 +2226,13 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
             }
+            methods::GENERATE_CUSTOM_THEME => {
+                let p: crate::custom_theme_gen::GenerateCustomThemeParams = parse_params(params)?;
+                let generated =
+                    crate::custom_theme_gen::generate(&self.registry, self.repos.data_dir(), p)
+                        .await;
+                RpcReply::value(&generated)
+            }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
@@ -2689,75 +2698,67 @@ impl RpcService for EngineRpc {
                 self.doc_host.watch_transfers(),
             ))),
             methods::WATCH_PREVIEWS => {
-                #[cfg(not(feature = "preview"))]
+                let p: harness_proto::WatchPreviewsParams = parse_params(params)?;
+                if self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .is_none()
                 {
-                    let _ = params;
-                    Err(RpcError::Failed("Preview discovery unavailable".into()))
+                    return Err(RpcError::Failed("Project session not found".into()));
                 }
-                #[cfg(feature = "preview")]
-                {
-                    let p: harness_proto::WatchPreviewsParams = parse_params(params)?;
-                    if self
-                        .workspace
-                        .chat(&p.chat_id)
-                        .map_err(|e| RpcError::Failed(e.to_string()))?
-                        .is_none()
-                    {
-                        return Err(RpcError::Failed("Project session not found".into()));
-                    }
-                    let previews = self
-                        .previews
-                        .as_ref()
-                        .ok_or_else(|| RpcError::Failed("Preview discovery unavailable".into()))?;
-                    let catalog = previews.catalog().clone();
-                    let changes = catalog.subscribe();
-                    let chats = self.workspace.watch_chats();
-                    let workspace = self.workspace.clone();
-                    // This subscription stays on the viewing device. A remote chat
-                    // selects advertised services, but its URL uses our local proxy.
-                    let stream = futures::stream::unfold(
-                        (changes, chats, true, workspace, catalog, p.chat_id),
-                        |(mut changes, mut chats, first, workspace, catalog, chat_id)| async move {
-                            if !first {
-                                tokio::select! {
-                                    result = changes.changed() => { if result.is_err() { return None; } }
-                                    result = chats.changed() => { if result.is_err() { return None; } }
-                                }
+                let previews = self
+                    .previews
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("Preview discovery unavailable".into()))?;
+                let catalog = previews.catalog().clone();
+                let changes = catalog.subscribe();
+                let chats = self.workspace.watch_chats();
+                let workspace = self.workspace.clone();
+                // This subscription stays on the viewing device. A remote chat
+                // selects advertised services, but its URL uses our local proxy.
+                let stream = futures::stream::unfold(
+                    (changes, chats, true, workspace, catalog, p.chat_id),
+                    |(mut changes, mut chats, first, workspace, catalog, chat_id)| async move {
+                        if !first {
+                            tokio::select! {
+                                result = changes.changed() => { if result.is_err() { return None; } }
+                                result = chats.changed() => { if result.is_err() { return None; } }
                             }
-                            let mut snapshot = changes.borrow_and_update().clone();
-                            chats.borrow_and_update();
-                            let chat = workspace.chat(&chat_id).ok().flatten();
-                            let device = chat
-                                .as_ref()
-                                .map(|c| c.device_id.clone())
-                                .unwrap_or_default();
-                            snapshot.remote = device != catalog.device_id();
-                            let cwd = chat.and_then(|c| c.cwd);
-                            let cwd = cwd.map(|cwd| {
-                                if snapshot.remote {
-                                    std::path::PathBuf::from(cwd)
-                                } else {
-                                    std::path::PathBuf::from(&cwd)
-                                        .canonicalize()
-                                        .unwrap_or_else(|_| cwd.into())
-                                }
-                            });
-                            snapshot.project_name = cwd
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .map(|s| s.to_string_lossy().into_owned());
-                            snapshot.services.retain(|service| {
-                                service.device_id == device
-                                    && cwd.as_ref().is_some_and(|cwd| {
-                                        cwd == std::path::Path::new(&service.project_cwd)
-                                    })
-                            });
-                            let raw = serde_json::value::to_raw_value(&snapshot).ok()?;
-                            Some((raw, (changes, chats, false, workspace, catalog, chat_id)))
-                        },
-                    );
-                    Ok(RpcReply::StreamRaw(Box::pin(stream)))
-                }
+                        }
+                        let mut snapshot = changes.borrow_and_update().clone();
+                        chats.borrow_and_update();
+                        let chat = workspace.chat(&chat_id).ok().flatten();
+                        let device = chat
+                            .as_ref()
+                            .map(|c| c.device_id.clone())
+                            .unwrap_or_default();
+                        snapshot.remote = device != catalog.device_id();
+                        let cwd = chat.and_then(|c| c.cwd);
+                        let cwd = cwd.map(|cwd| {
+                            if snapshot.remote {
+                                std::path::PathBuf::from(cwd)
+                            } else {
+                                std::path::PathBuf::from(&cwd)
+                                    .canonicalize()
+                                    .unwrap_or_else(|_| cwd.into())
+                            }
+                        });
+                        snapshot.project_name = cwd
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|s| s.to_string_lossy().into_owned());
+                        snapshot.services.retain(|service| {
+                            service.device_id == device
+                                && cwd.as_ref().is_some_and(|cwd| {
+                                    cwd == std::path::Path::new(&service.project_cwd)
+                                })
+                        });
+                        let raw = serde_json::value::to_raw_value(&snapshot).ok()?;
+                        Some((raw, (changes, chats, false, workspace, catalog, chat_id)))
+                    },
+                );
+                Ok(RpcReply::StreamRaw(Box::pin(stream)))
             }
             methods::WATCH_CHATS => Ok(RpcReply::StreamRaw(watch_stream(
                 self.workspace.watch_chats(),
@@ -4007,7 +4008,46 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
             }
-            methods::LIST_GRAFF_LOGINS => RpcReply::value(&self.agent_accounts.list_graff_logins()),
+            methods::LIST_GRAFF_LOGINS => {
+                let p: ListAgentAccountsParams = if params.is_null() {
+                    ListAgentAccountsParams { force_usage: None }
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(
+                    &self
+                        .agent_accounts
+                        .list_graff_logins_with_usage(p.force_usage.unwrap_or(false))
+                        .await,
+                )
+            }
+            methods::LIST_NATIVE_EXTENSIONS | methods::INVOKE_NATIVE_EXTENSION => {
+                let p: crate::native_extensions::Params = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                if method == methods::LIST_NATIVE_EXTENSIONS
+                    && (p.plugin.is_some() || p.action.is_some())
+                {
+                    return Err(RpcError::Failed(
+                        "List requests cannot invoke actions".into(),
+                    ));
+                }
+                if method == methods::INVOKE_NATIVE_EXTENSION
+                    && (p.plugin.is_none() || p.action.is_none())
+                {
+                    return Err(RpcError::Failed(
+                        "Say which extension action to invoke".into(),
+                    ));
+                }
+                let value = crate::native_extensions::run(
+                    &self.agent_accounts.graff_home(),
+                    std::path::Path::new(&space.path),
+                    p.plugin.as_deref(),
+                    p.action.as_deref(),
+                )
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
+                RpcReply::value(&value)
+            }
             methods::LIST_MCP_SERVERS => {
                 let p: ListMcpServersParams = parse_params(params)?;
                 let home = self.agent_accounts.graff_home();

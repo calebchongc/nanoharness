@@ -8,8 +8,8 @@
 const std = @import("std");
 const workspace = @import("workspace.zig");
 
-/// An appearance the theme action switches to (`AppearanceMode`).
-pub const Appearance = enum { system, light, dark };
+/// An appearance action the palette runs (`AppearanceMode`).
+pub const Appearance = enum { toggle, system, light, dark };
 
 /// A palette result (`Entry`).
 pub const Entry = union(enum) {
@@ -17,6 +17,8 @@ pub const Entry = union(enum) {
     new_project,
     settings,
     theme: Appearance,
+    custom_theme_studio,
+    custom_theme: []const u8,
     ui_mode: @import("motion_rules.zig").UiMode,
     toggle_part: @import("motion_rules.zig").MovingPart,
     /// An unfocused split pane (its index): picking it moves focus there.
@@ -35,10 +37,13 @@ pub const Entry = union(enum) {
             .new_project => "New project",
             .settings => "Open settings",
             .theme => |m| switch (m) {
-                .system => "Switch to system theme",
+                .toggle => "Switch theme",
+                .system => "Default system theme",
                 .light => "Switch to light theme",
                 .dark => "Switch to dark theme",
             },
+            .custom_theme_studio => "Open Backdrop & Scene Studio",
+            .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |p| p.name else null,
             .ui_mode => |m| switch (m) {
                 .zen => "Switch to Zen mode (simple flat view)",
                 .developer => "Switch to Developer mode (full hierarchy)",
@@ -53,6 +58,17 @@ pub const Entry = union(enum) {
                 .grouped_sections => "Toggle grouped sidebar sections",
             },
             else => null,
+        };
+    }
+
+    /// Extra query keywords for command matching while keeping `label` concise.
+    pub fn searchText(e: Entry) ?[]const u8 {
+        return switch (e) {
+            .theme => |m| switch (m) {
+                .system => "Default system theme switch to system theme auto macos reset",
+                else => e.label(),
+            },
+            else => e.label(),
         };
     }
 
@@ -71,6 +87,7 @@ pub const Entry = union(enum) {
         if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
         return switch (x) {
             .theme => |m| m == y.theme,
+            .custom_theme => |id| std.mem.eql(u8, id, y.custom_theme),
             .ui_mode => |m| m == y.ui_mode,
             .toggle_part => |part| part == y.toggle_part,
             .pane => |i| i == y.pane,
@@ -91,17 +108,30 @@ pub fn matchesQuery(query: []const u8, text: []const u8) bool {
     return true;
 }
 
-/// The actions a query keeps, in their order; the theme action names the
-/// appearance opposite the one showing (`actions_for`).
+/// The actions a query keeps, in their order; `Switch theme` and
+/// `Default system theme` stay in the core list so typing `"switch theme"`
+/// or opening ⌘K always offers them, while explicit light/dark actions stay
+/// searchable for direct selection.
 pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
     var out: Actions = .{};
-    const core = [_]Entry{ .new_chat, .new_project, .settings, .{ .theme = if (is_dark) .light else .dark } };
-    for (core) |e| if (matchesQuery(query, e.label().?)) {
+    const core = [_]Entry{
+        .new_chat,
+        .new_project,
+        .settings,
+        .{ .theme = .toggle },
+        .{ .theme = .system },
+    };
+    for (core) |e| if (matchesQuery(query, e.searchText().?)) {
         out.items[out.len] = e;
         out.len += 1;
     };
     if (query.len > 0) {
+        const opposite: Appearance = if (is_dark) .light else .dark;
+        const current: Appearance = if (is_dark) .dark else .light;
         const extra = [_]Entry{
+            .{ .theme = opposite },
+            .{ .theme = current },
+            .custom_theme_studio,
             .{ .ui_mode = .zen },
             .{ .ui_mode = .developer },
             .{ .toggle_part = .open_workspaces_tree },
@@ -113,15 +143,32 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
             .{ .toggle_part = .multi_axis_filters },
         };
         for (extra) |e| if (matchesQuery(query, e.label().?)) {
-            out.items[out.len] = e;
-            out.len += 1;
+            if (out.len < out.items.len) {
+                out.items[out.len] = e;
+                out.len += 1;
+            }
         };
+        const custom_themes = @import("custom_themes.zig");
+        for (custom_themes.userPresets()) |*p| {
+            if (out.len >= out.items.len) break;
+            if (matchesQuery(query, p.name) or matchesQuery(query, p.subtitle) or matchesQuery(query, @tagName(p.backdrop.motif))) {
+                out.items[out.len] = .{ .custom_theme = p.id };
+                out.len += 1;
+            }
+        }
+        for (custom_themes.curated()) |*p| {
+            if (out.len >= out.items.len) break;
+            if (matchesQuery(query, p.name) or matchesQuery(query, p.subtitle) or matchesQuery(query, @tagName(p.backdrop.motif))) {
+                out.items[out.len] = .{ .custom_theme = p.id };
+                out.len += 1;
+            }
+        }
     }
     return out;
 }
 
 pub const Actions = struct {
-    items: [16]Entry = undefined,
+    items: [64]Entry = undefined,
     len: usize = 0,
 
     pub fn slice(x: *const Actions) []const Entry {
@@ -404,17 +451,24 @@ fn expectActions(want: []const Entry, q: []const u8, dark: bool) !void {
 }
 
 test "action search hides an empty section and keeps the order" {
-    try expectActions(&.{ .new_chat, .new_project, .settings, .{ .theme = .light } }, "", true);
+    try expectActions(&.{ .new_chat, .new_project, .settings, .{ .theme = .toggle }, .{ .theme = .system } }, "", true);
     try expectActions(&.{ .new_chat, .new_project }, "new", true);
     try expectActions(&.{.settings}, "settings", true);
-    try expectActions(&.{.{ .theme = .light }}, "theme", true);
+    try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .light }, .{ .theme = .dark } }, "theme", true);
     try expectActions(&.{}, "deployment", true);
 }
 
-test "the theme action names the appearance opposite the one showing" {
-    try expectActions(&.{.{ .theme = .light }}, "theme", true);
-    try expectActions(&.{.{ .theme = .dark }}, "theme", false);
+test "Switch theme and Default system theme stay searchable while light/dark stay directly targetable" {
+    try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .light }, .{ .theme = .dark } }, "theme", true);
+    try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .dark }, .{ .theme = .light } }, "theme", false);
+    try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .light }, .{ .theme = .dark } }, "switch theme", true);
+    try expectActions(&.{ .{ .theme = .toggle }, .{ .theme = .system }, .{ .theme = .dark }, .{ .theme = .light } }, "switch theme", false);
+    try expectActions(&.{.{ .theme = .system }}, "system", true);
+    try expectActions(&.{.{ .theme = .system }}, "default", false);
+    try expectActions(&.{.{ .theme = .system }}, "switch to system", true);
     try expectActions(&.{.{ .theme = .light }}, "light", true);
+    try expectActions(&.{.{ .theme = .light }}, "light", false);
+    try expectActions(&.{.{ .theme = .dark }}, "dark", true);
     try expectActions(&.{.{ .theme = .dark }}, "dark", false);
 }
 
