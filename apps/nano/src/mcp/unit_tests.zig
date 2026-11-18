@@ -376,8 +376,14 @@ test "mcp catalog: tools/list serves protocol/mcp-tools.json exactly: names, ord
     const shared = try sharedCatalog(a);
     try testing.expectEqual(@as(usize, 31), shared.len);
     for (shared) |t| {
+        const has_ann = u.get(t, "annotations") != null;
         // Exactly these keys, so nothing else could be served.
-        try testing.expectEqual(@as(usize, 3), t.object.count());
+        try testing.expectEqual(@as(usize, if (has_ann) 4 else 3), t.object.count());
+        if (has_ann) {
+            const ann = u.get(t, "annotations").?;
+            try testing.expect(ann == .object);
+            try testing.expect(u.boolean(ann, "readOnlyHint") == true);
+        }
         try testing.expect(u.str(t, "name") != null and u.str(t, "description") != null);
         try testing.expect(u.get(t, "inputSchema").? == .object);
     }
@@ -409,11 +415,11 @@ test "mcp catalog: the shared catalog is the Rust server's tool list" {
     const a = arena.allocator();
     const all = try json.parseFromSliceLeaky(Value, a, tools.catalog_json, .{});
     const want = [_][]const u8{
-        "whoami",         "list_devices", "list_projects", "list_harnesses", "list_models",   "list_chats",     "get_chat",
-        "create_chat",    "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat", "dismiss_input", "respond_to_input",
-        "rename_chat",    "archive_chat", "show_visual",   "show_image",     "list_rooms",    "create_room",    "join_room",
-        "leave_room",     "post_room",    "release_claim", "read_room",      "room_inbox",    "archive_room",   "destroy_room",
-        "list_bots",      "run_bot",      "run_due_bots",
+        "whoami",      "list_devices", "list_projects", "list_harnesses", "list_models",    "list_chats",    "get_chat",
+        "create_chat", "read_chat",    "send_message",  "wait_for_turn",  "interrupt_chat", "dismiss_input", "respond_to_input",
+        "rename_chat", "archive_chat", "show_visual",   "show_image",     "list_rooms",     "create_room",   "join_room",
+        "leave_room",  "post_room",    "release_claim", "read_room",      "room_inbox",     "archive_room",  "destroy_room",
+        "list_bots",   "run_bot",      "run_due_bots",
     };
     try testing.expectEqual(want.len, all.array.items.len);
     for (all.array.items, want) |t, name| {
@@ -739,7 +745,6 @@ test "mcp respond_to_input: the current pending question is found in the transcr
 
 // ---- publishing -------------------------------------------------------------------------
 
-
 test "mcp show_image and show_visual: scripted engine surfaces errors and validates bounds" {
     const w = try WorldFixture.create(.{ .chat_id = "chat-alpha-1" });
     defer w.destroy();
@@ -905,4 +910,3 @@ fn repeat(a: Allocator, unit: []const u8, n: usize) ![]const u8 {
     for (0..n) |k| @memcpy(out[k * unit.len ..][0..unit.len], unit);
     return out;
 }
-
