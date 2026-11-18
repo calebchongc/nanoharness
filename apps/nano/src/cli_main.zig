@@ -209,6 +209,44 @@ pub fn parseArgs(args: []const []const u8) ParseOutcome {
     return .{ .ok = .{ .headed = .{ .open_arg = first } } };
 }
 
+pub const WaitForExitParse = union(enum) {
+    ok: struct { pid: ?u32, rest: []const []const u8 },
+    missing_value: []const u8,
+    bad_arg: []const u8,
+};
+
+pub fn stripWaitForExit(args: []const []const u8) WaitForExitParse {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "--wait-for-exit")) {
+        if (args.len < 2) return .{ .missing_value = "--wait-for-exit" };
+        const pid = std.fmt.parseInt(u32, args[1], 10) catch return .{ .bad_arg = args[1] };
+        return .{ .ok = .{ .pid = pid, .rest = args[2..] } };
+    }
+    return .{ .ok = .{ .pid = null, .rest = args } };
+}
+
+fn waitForExitProcess(arena: Allocator, io: Io, pid: u32) void {
+    if (comptime builtin.os.tag != .windows) return;
+    const w = struct {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+        extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn WaitForSingleObject(hHandle: *anyopaque, dwMilliseconds: u32) callconv(.winapi) u32;
+        extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
+    };
+    if (pid != w.GetCurrentProcessId()) {
+        if (w.OpenProcess(w.SYNCHRONIZE, 0, pid)) |proc_handle| {
+            defer _ = w.CloseHandle(proc_handle);
+            _ = w.WaitForSingleObject(proc_handle, 60_000);
+        }
+    }
+    const self_exe = std.process.executablePathAlloc(io, arena) catch return;
+    const dir = std.fs.path.dirname(self_exe) orelse return;
+    for ([_][]const u8{ "harness.exe.old", "harness-nano.exe.old", "harness-engine.exe.old", "WebView2Loader.dll.old" }) |old_name| {
+        const old_path = std.fs.path.join(arena, &.{ dir, old_name }) catch continue;
+        Io.Dir.cwd().deleteFile(io, old_path) catch {};
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     if (comptime builtin.os.tag == .windows) attachParentConsole();
     const code = try run(init);
@@ -230,7 +268,22 @@ fn run(init: std.process.Init) !u8 {
     const out = &stdout_w.interface;
     const err_w = &stderr_w.interface;
 
-    const action: Action = switch (parseArgs(args)) {
+    const wait_split = switch (stripWaitForExit(args)) {
+        .ok => |v| v,
+        .missing_value => |flag| {
+            try err_w.print("error: a value is required for '{s}'\n", .{flag});
+            try err_w.flush();
+            return 2;
+        },
+        .bad_arg => |arg| {
+            try err_w.print("error: unexpected argument '{s}'\n", .{arg});
+            try err_w.flush();
+            return 2;
+        },
+    };
+    if (wait_split.pid) |pid| waitForExitProcess(arena, io, pid);
+
+    const action: Action = switch (parseArgs(wait_split.rest)) {
         .ok => |a| a,
         .bad_arg => |arg| {
             try err_w.print("error: unexpected argument '{s}'\n", .{arg});
@@ -772,4 +825,22 @@ test "cli_main packUnixSunPath enforces null-terminated 108-byte AF_UNIX bound" 
 
     const too_long: [108]u8 = @splat('a');
     try testing.expectError(error.NameTooLong, packUnixSunPath(&too_long, &buf));
+}
+
+test "cli_main stripWaitForExit accepts optional relaunch pid before subcommand" {
+    const plain = stripWaitForExit(&.{"--version"}).ok;
+    try testing.expect(plain.pid == null);
+    try testing.expectEqual(@as(usize, 1), plain.rest.len);
+
+    const waited = stripWaitForExit(&.{ "--wait-for-exit", "4242" }).ok;
+    try testing.expectEqual(@as(?u32, 4242), waited.pid);
+    try testing.expectEqual(@as(usize, 0), waited.rest.len);
+    try testing.expect(parseArgs(waited.rest).ok.headed.open_arg == null);
+
+    const with_sub = stripWaitForExit(&.{ "--wait-for-exit", "77", "update" }).ok;
+    try testing.expectEqual(@as(?u32, 77), with_sub.pid);
+    try testing.expect(!parseArgs(with_sub.rest).ok.update.check);
+
+    try testing.expectEqualStrings("--wait-for-exit", stripWaitForExit(&.{"--wait-for-exit"}).missing_value);
+    try testing.expectEqualStrings("not-a-pid", stripWaitForExit(&.{ "--wait-for-exit", "not-a-pid" }).bad_arg);
 }
