@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "async-trait",
  "futures",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.208"
+version = "0.2.209"
 dependencies = [
  "block2",
  "chrono",
