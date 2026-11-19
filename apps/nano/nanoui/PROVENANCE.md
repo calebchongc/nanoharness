@@ -100,6 +100,15 @@ a lazy sRGB premultiplied BGRA8 atlas texture and sample via `Kind.color_text`
 with opacity, clipping, motion blur, and horizontal fades while ordinary text
 keeps its R8 mask, smoothing, and dilation path unchanged.
 
+Harness-local pointer cancellation in `src/ui/{context,frame,surface_events}.zig`
+retires held gestures when a window loses focus, without synthesizing a click
+or drop. Real macOS mouse moves reconcile the tracked button with AppKit's
+button snapshot, recovering from releases consumed by native responders while
+preserving completed text ranges. Synthetic/scripted frames do not poll live
+mouse state. Harness's `retention selection window deactivation cancels` and
+`retention selection swallowed release` tests cover offscreen cancellation,
+cross-pane movement, exact Copy and the next ordinary selection.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
