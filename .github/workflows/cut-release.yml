@@ -67,15 +67,14 @@ jobs:
           name=$(gh api "users/$MERGED_BY" --jq '.name // .login')
           git -c user.name="$name" \
               -c user.email="$MERGED_BY_ID+$MERGED_BY@users.noreply.github.com" \
-              tag -a "$tag" -m "Harness $tag" "$MERGE_SHA"
+              tag -a "$tag" -m "NanoHarness $tag" "$MERGE_SHA"
           git push origin "refs/tags/$tag"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
-      - name: start the desktop release and TestFlight
+      - name: start the desktop release
         if: steps.tag.outputs.created == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           gh workflow run release.yml --ref "v$VERSION"
-          gh workflow run testflight.yml --ref main -f audience=internal -f ci_certificates=keep
