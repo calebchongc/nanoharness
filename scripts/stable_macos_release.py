@@ -143,6 +143,18 @@ def bundle_hashes(bundle: Path) -> tuple[str, ...]:
     )
 
 
+def check_macho_minos(binary: Path, max_version: tuple[int, ...]) -> None:
+    require(binary.is_file(), f"missing Mach-O binary: {binary}")
+    output = run("otool", "-l", binary)
+    match = re.search(r"cmd LC_BUILD_VERSION\b.*?\bminos\s+([0-9]+(?:\.[0-9]+)*)", output, re.S)
+    require(match is not None, f"{binary} has no LC_BUILD_VERSION minos")
+    actual = tuple(int(part) for part in match.group(1).split("."))
+    require(
+        actual <= max_version,
+        f"{binary} requires macOS {match.group(1)} (expected <= {'.'.join(map(str, max_version))})",
+    )
+
+
 def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, ...]:
     require(bundle.is_dir(), f"missing app bundle: {bundle}")
     actual = run(
@@ -162,7 +174,10 @@ def check_bundle(bundle: Path, version: str, graff_version: str) -> tuple[str, .
         bundle / "Contents/Resources/bin/harness-github-runners",
     ):
         require(exe.is_file(), f"{bundle} missing executable {exe.relative_to(bundle)}")
+        check_macho_minos(exe, (12, 0))
         check_developer_id(exe)
+    check_macho_minos(bundle / "Contents/Resources/bin/graff", (15, 0))
+    check_macho_minos(bundle / "Contents/Resources/bin/codedb", (15, 0))
     check_developer_id(bundle)
     run("xcrun", "stapler", "validate", bundle)
     check_graff_version(bundle, graff_version)
