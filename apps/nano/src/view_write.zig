@@ -108,7 +108,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     if (a.noticeText()) |n| {
         const notice = column(c, w).pt(10);
         defer notice.end();
-        ui.text(c, n, .{ .size = 13, .line_height = 13 * 1.618, .color = k.danger });
+        ui.text(c, n, .{ .size = 13, .line_height = 13 * 1.618, .color = k.danger, .wrap = true });
     }
     if (attachments.count(a) > 0) {
         const material = column(c, w).column().pb(8);
