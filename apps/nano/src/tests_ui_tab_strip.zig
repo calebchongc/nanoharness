@@ -638,3 +638,107 @@ test "github tab identity inactive cap differs from selected cap in compact layo
     const inactive_bg = slotBg(&h.t.ctx, "GitHub") orelse return error.MissingInactiveGitHubTab;
     try testing.expect(!std.meta.eql(active_bg, inactive_bg));
 }
+
+test "overflow tab window keeps selected tab background aligned with displayed active tab (#36)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.dark = false;
+    try replace(&h.a.chats,
+        \\[{"id":"t0","deviceId":"local","title":"Cedar Notes","spaceId":"local-project","archived":false},
+        \\ {"id":"t1","deviceId":"local","title":"Maple Draft","spaceId":"local-project","archived":false},
+        \\ {"id":"t2","deviceId":"local","title":"Birch Plan","spaceId":"local-project","archived":false},
+        \\ {"id":"t3","deviceId":"local","title":"Alder Audit","spaceId":"local-project","archived":false},
+        \\ {"id":"t4","deviceId":"local","title":"Pine Spec","spaceId":"local-project","archived":false}]
+    );
+
+    const checkAlignment = struct {
+        fn run(h_ptr: *Harness) !void {
+            h_ptr.a.view.strip.active_tab_anchor = null;
+            h_ptr.t.frame();
+            h_ptr.t.frame();
+            const tab = h_ptr.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
+            const sel = @import("view_tab_strip_render.zig").selectedBounds(&h_ptr.a) orelse return error.MissingSelectedBounds;
+            const body_x = h_ptr.a.view.sidebar_width + h_ptr.a.view.chrome.leading;
+            try testing.expectApproxEqAbs(tab.x, body_x + sel.left, 0.5);
+            try testing.expectApproxEqAbs(tab.x + tab.w, body_x + sel.right, 0.5);
+        }
+    }.run;
+
+    // 1. Exact #36 reproduction: 2 tabs in a narrow single-slot Developer-mode lane showing "+1".
+    h.a.openChat("t0", "local-project");
+    h.a.newTab();
+    h.a.openChat("t1", "local-project");
+    h.a.view.sidebar_open = true;
+    h.a.view.sidebar_width = h.a.settings.sidebarWidth();
+    h.a.showTab(1);
+    h.t.resize(740, 520);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_TAB_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, "{s}/overflow-tab-cap-light.png", .{std.mem.span(dir)})) |path| {
+            h.t.screenshot(path) catch {};
+        } else |_| {}
+    }
+    try testing.expect(h.topText("+1") != null);
+    try checkAlignment(&h);
+
+    // Switch back to first tab in the same narrow single-slot lane.
+    h.a.showTab(0);
+    h.t.settle(2);
+    try checkAlignment(&h);
+
+    // 2. Ultra-narrow single-slot lane where slot_w shrinks below tabWidth, with trailing update pill.
+    h.a.updates.graff_kind = .updated;
+    const ver = "0.302.74.75";
+    @memcpy(h.a.updates.graff_to[0..ver.len], ver);
+    h.a.updates.graff_to_len = ver.len;
+    h.a.showTab(1);
+    h.t.resize(620, 520);
+    h.t.settle(2);
+    try checkAlignment(&h);
+
+    // 3. Multi-tab overflow (5 tabs) across first, middle, and last selection, sidebar closed and open.
+    for ([_][]const u8{ "t2", "t3", "t4" }) |id| {
+        h.a.newTab();
+        h.a.openChat(id, "local-project");
+    }
+    for ([_]bool{ false, true }) |sidebar_open| {
+        h.a.view.sidebar_open = sidebar_open;
+        h.a.view.sidebar_width = if (sidebar_open) h.a.settings.sidebarWidth() else 0;
+        for ([_]f32{ 760, 920 }) |w| {
+            h.t.resize(w, 520);
+            for ([_]usize{ 0, 2, 4 }) |sel_ix| {
+                h.a.showTab(sel_ix);
+                h.t.settle(2);
+                try checkAlignment(&h);
+            }
+        }
+    }
+}
+
+test "singleWindow pure layout matches visible slot for first, last, and narrow single-slot tabs (#36)" {
+    const render = @import("view_tab_strip_render.zig");
+    // Issue #36 example: 350pt lane, 2 tabs, add_room=27 -> visible_count=1, slot_w=167.5.
+    const w0 = render.singleWindow(350, 2, 0, 27);
+    const w1 = render.singleWindow(350, 2, 1, 27);
+    try testing.expectEqual(@as(usize, 0), w0.win_start);
+    try testing.expectEqual(@as(usize, 1), w0.win_end);
+    try testing.expectEqual(@as(usize, 1), w0.hidden_count);
+    try testing.expectApproxEqAbs(@as(f32, 0), w0.selected_left, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 167.5), w0.selected_right, 0.01);
+
+    try testing.expectEqual(@as(usize, 1), w1.win_start);
+    try testing.expectEqual(@as(usize, 2), w1.win_end);
+    try testing.expectEqual(@as(usize, 1), w1.hidden_count);
+    try testing.expectApproxEqAbs(@as(f32, 0), w1.selected_left, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 167.5), w1.selected_right, 0.01);
+
+    // Narrow single-slot lane where slot_w shrinks below tabWidth (112).
+    const narrow = render.singleWindow(154, 2, 1, 27);
+    try testing.expectEqual(@as(usize, 1), narrow.win_start);
+    try testing.expectEqual(@as(usize, 2), narrow.win_end);
+    try testing.expectApproxEqAbs(@as(f32, 90), narrow.slot_w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 0), narrow.selected_left, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 90), narrow.selected_right, 0.01);
+}

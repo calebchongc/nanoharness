@@ -366,20 +366,81 @@ fn showDevicePicker(a: *const App) bool {
 }
 
 pub const Selected = struct { left: f32, right: f32 };
+
+pub const overflow_pill_w: f32 = 34;
+
+/// Shared pure geometry for the single-panel tab window (`single` and `selectedBounds`).
+pub const TabWindow = struct {
+    slot_w: f32,
+    win_start: usize,
+    win_end: usize,
+    hidden_count: usize,
+    selected_left: f32,
+    selected_right: f32,
+};
+
+pub fn singleWindow(available: f32, n: usize, selected: usize, add_room: f32) TabWindow {
+    if (n == 0) return .{
+        .slot_w = 0,
+        .win_start = 0,
+        .win_end = 0,
+        .hidden_count = 0,
+        .selected_left = 0,
+        .selected_right = 0,
+    };
+    const width = chrome.tabWidth(available, n);
+    const total_tabs_w = @as(f32, @floatFromInt(n)) * width + @as(f32, @floatFromInt(n -| 1)) * 3;
+    const overflowing = total_tabs_w + add_room > available;
+    const visible_budget = @max(0, available - add_room - (if (overflowing) overflow_pill_w + 3 else 0));
+    const visible_count: usize = if (!overflowing)
+        n
+    else
+        @max(@as(usize, 1), @min(n, @as(usize, @intFromFloat(@floor((visible_budget + 3) / (width + 3))))));
+    const clamped_sel = @min(selected, n - 1);
+    const win_start: usize = if (clamped_sel < visible_count) 0 else @min(n - visible_count, clamped_sel + 1 - visible_count);
+    const win_end: usize = @min(n, win_start + visible_count);
+    const hidden_count: usize = n -| (win_end - win_start);
+    const slot_w: f32 = if (overflowing and visible_count == 1)
+        @min(width, @max(48, visible_budget))
+    else
+        width;
+    const rel_ix = clamped_sel -| win_start;
+    const sel_left = @as(f32, @floatFromInt(rel_ix)) * (slot_w + 3);
+    return .{
+        .slot_w = slot_w,
+        .win_start = win_start,
+        .win_end = win_end,
+        .hidden_count = hidden_count,
+        .selected_left = sel_left,
+        .selected_right = sel_left + slot_w,
+    };
+}
+
+fn singleRightExtra(a: *const App, settings_open: bool) f32 {
+    const vu = @import("view_updates.zig");
+    return if (settings_open)
+        (if (vu.topbarUpdatesWidth(a) > 0) vu.topbarUpdatesWidth(a) + 10 else 0)
+    else
+        vu.topbarTrailingReserve(a);
+}
+
 pub fn selectedBounds(a: *const App) ?Selected {
     if (a.settings.uiMode() == .zen) return null;
+    if (a.view.settings_open) return null;
     if (strip.count(a) != 1) return null;
     const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
+    if (n == 0) return null;
     const selected = if (group) |g| g.active else a.tabs.active;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     const dev_room: f32 = if (showDevicePicker(a)) chrome.device_room else 0;
-    const right_extra = @import("view_updates.zig").topbarTrailingReserve(a);
+    const right_extra = singleRightExtra(a, false);
     const available = @max(0, a.view.chrome.width - left - dev_room - caption.trailing - right_extra - 4);
-    const width = chrome.tabWidth(available, n);
-    const scroll = @max(0, @as(f32, @floatFromInt(selected + 1)) * (width + 3) - @max(0, available - 32));
-    const start = left - a.view.chrome.leading + @as(f32, @floatFromInt(selected)) * (width + 3) - scroll;
-    return .{ .left = @max(0, start), .right = @min(a.view.chrome.width, start + width) };
+    const win = singleWindow(available, n, selected, 27);
+    const lane_offset = left - a.view.chrome.leading;
+    const start = lane_offset + win.selected_left;
+    const end = lane_offset + win.selected_right;
+    return .{ .left = @max(0, start), .right = @min(a.view.chrome.width, end) };
 }
 
 fn zenTabStartX(a: *const App) f32 {
@@ -395,11 +456,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const settings_open = a.view.settings_open;
     const show_dev = !settings_open and showDevicePicker(a);
     const dev_room: f32 = if (show_dev) chrome.device_room else 0;
-    const vu = @import("view_updates.zig");
-    const right_extra = if (settings_open)
-        (if (vu.topbarUpdatesWidth(a) > 0) vu.topbarUpdatesWidth(a) + 10 else 0)
-    else
-        vu.topbarTrailingReserve(a);
+    const right_extra = singleRightExtra(a, settings_open);
     const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
@@ -408,24 +465,13 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         @max(0, c.size.w - lane_x - dev_room - caption.trailing - right_extra - 12)
     else
         @max(0, a.view.chrome.width - left - dev_room - caption.trailing - right_extra - 4);
-    const width = chrome.tabWidth(available, n);
     const show_add = !settings_open and (!zen or n > 1);
     const add_room: f32 = if (show_add) 27 else 0;
-    const total_tabs_w = @as(f32, @floatFromInt(n)) * width + @as(f32, @floatFromInt(n -| 1)) * 3;
-    const overflowing = n > 0 and total_tabs_w + add_room > available;
-    const overflow_pill_w: f32 = 34;
-    const visible_budget = @max(0, available - add_room - (if (overflowing) overflow_pill_w + 3 else 0));
-    const visible_count: usize = if (!overflowing)
-        n
-    else
-        @max(@as(usize, 1), @min(n, @as(usize, @intFromFloat(@floor((visible_budget + 3) / (width + 3))))));
-    const win_start: usize = if (selected < visible_count) 0 else @min(n - visible_count, selected + 1 - visible_count);
-    const win_end: usize = @min(n, win_start + visible_count);
-    const hidden_count: usize = n -| (win_end - win_start);
-    const slot_w: f32 = if (overflowing and visible_count == 1)
-        @min(width, @max(48, visible_budget))
-    else
-        width;
+    const win = singleWindow(available, n, selected, add_room);
+    const win_start = win.win_start;
+    const win_end = win.win_end;
+    const hidden_count = win.hidden_count;
+    const slot_w = win.slot_w;
     if (zen and n == 1) {
         const only_chat = if (group) |g| (if (selected == 0) a.selected else g.items.items[0].chat) else workspaceChatId(a, 0);
         if (only_chat == null) {
