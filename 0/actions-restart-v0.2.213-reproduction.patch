@@ -1,0 +1,140 @@
+--- a/apps/nano/src/app.zig
++++ b/apps/nano/src/app.zig
+@@ -2099,3 +2099,76 @@
+         a.request(requests.interrupt(chat), .of(App, a, onNotice));
+     }
+ };
++
++test "actions restart diagnostic: normal restoration versus queued frames across a connection gap" {
++    const d = @import("diagnostic_actions_restart.zig");
++    const testing = std.testing;
++    const actions_mod = @import("app_actions.zig");
++    {
++        var a: App = .init(testing.allocator, testing.io, 1);
++        defer a.deinit();
++        try d.setup(&a);
++        App.stateChanged(&a, .connected);
++        d.drain(&a);
++        try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
++        try testing.expectEqual(@as(usize, 1), try d.actionCalls(&a));
++        std.debug.print("\nCONTROL: normal saved-tab restoration -> ready; ListProjectActions=1\n", .{});
++    }
++    var a: App = .init(testing.allocator, testing.io, 1);
++    defer a.deinit();
++    try d.setup(&a);
++    App.stateChanged(&a, .connected);
++    // Model replacement's synchronous disconnected transition before already
++    // queued WatchSpaces/WatchChats messages are delivered. No real engine,
++    // socket, process, window, user data, or engine.lock is accessed.
++    const saved_scene = a.engine.scene;
++    a.engine.scene = null;
++    a.engine.state = .disconnected;
++    App.stateChanged(&a, .disconnected);
++    d.drain(&a);
++    try testing.expectEqualStrings("chat", a.selected.?);
++    try testing.expectEqual(actions_mod.Status.unavailable, a.actions.status);
++    try testing.expectEqualStrings("not connected", a.actions.error_text.?);
++    std.debug.print("RESTORE DURING GAP: unavailable; exact error=not connected\n", .{});
++    a.engine.scene = saved_scene;
++    a.engine.state = .connected;
++    App.stateChanged(&a, .connected);
++    d.drain(&a);
++    @import("app_panels.zig").chatsArrived(&a);
++    actions_mod.refresh(&a);
++    d.drain(&a);
++    try testing.expect(a.engine.up());
++    try testing.expectEqual(actions_mod.Status.unavailable, a.actions.status);
++    try testing.expectEqual(@as(usize, 0), try d.actionCalls(&a));
++    std.debug.print("RECONNECTED: engine.up=true; Actions=unavailable; ListProjectActions=0\n", .{});
++    try d.captureAndRetry(&a);
++    try testing.expectEqual(@as(usize, 1), try d.actionCalls(&a));
++    std.debug.print("REAL RETRY BUTTON: Actions=ready; ListProjectActions=1\n", .{});
++}
++
++test "actions restart regression: reconnect should retry an unavailable project snapshot" {
++    const d = @import("diagnostic_actions_restart.zig");
++    const testing = std.testing;
++    const actions_mod = @import("app_actions.zig");
++    var a: App = .init(testing.allocator, testing.io, 1);
++    defer a.deinit();
++    try d.setup(&a);
++    const saved_scene = a.engine.scene;
++    a.engine.scene = null;
++    a.engine.state = .connecting;
++    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
++        "[{\"id\":\"project\",\"deviceId\":\"synthetic\",\"path\":\"/synthetic/project\"}]", .{});
++    defer spaces.deinit();
++    try a.spaces.replace(spaces.value);
++    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
++        "[{\"id\":\"chat\",\"spaceId\":\"project\",\"deviceId\":\"synthetic\",\"title\":\"Synthetic restart\"}]", .{});
++    defer chats.deinit();
++    try a.chats.replace(chats.value);
++    a.restoreTabs();
++    try testing.expectEqual(actions_mod.Status.unavailable, a.actions.status);
++    a.engine.scene = saved_scene;
++    a.engine.state = .connected;
++    App.stateChanged(&a, .connected);
++    d.drain(&a);
++    try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
++}
+--- /dev/null
++++ b/apps/nano/src/diagnostic_actions_restart.zig
+@@ -0,0 +1,58 @@
++//! Synthetic issue investigation only; production behavior is unchanged.
++const std = @import("std");
++const testing = std.testing;
++const App = @import("app.zig").App;
++const actions = @import("app_actions.zig");
++
++pub const replies =
++    \\{"EngineInfo":{"deviceId":"synthetic","version":"0.2.213"},
++    \\ "EngineReady":{},"ListHarnesses":[],"ListModels":[],
++    \\ "WatchDevices":{"$items":[[]]},
++    \\ "WatchSpaces":{"$items":[[{"id":"project","deviceId":"synthetic","path":"/synthetic/project"}]]},
++    \\ "WatchChats":{"$items":[[{"id":"chat","spaceId":"project","deviceId":"synthetic","title":"Synthetic restart"}]]},
++    \\ "WatchSessions":{"$items":[[]]},
++    \\ "ListProjectActions":{"spaceId":"project","actions":[{"id":"test","name":"Test","command":"echo synthetic","icon":"test","runOnWorktreeCreate":false}]}}
++;
++
++pub fn setup(a: *App) !void {
++    a.offscreen = true;
++    a.dark = false;
++    a.settings.apply("{\"openTabs\":[\"chat\"],\"lastChatId\":\"chat\"}");
++    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, replies, .{});
++    a.engine.state = .connected;
++}
++
++pub fn actionCalls(a: *App) !usize {
++    var count: usize = 0;
++    for (a.engine.sent.items) |frame| {
++        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
++        defer parsed.deinit();
++        if (std.mem.eql(u8, parsed.value.object.get("method").?.string, "ListProjectActions")) count += 1;
++    }
++    return count;
++}
++
++pub fn drain(a: *App) void {
++    for (0..8) |_| _ = a.engine.pump();
++}
++
++pub fn captureAndRetry(a: *App) !void {
++    @import("theme.zig").registerFonts();
++    var t: @import("nanoui").ui.Tester = undefined;
++    try t.init(testing.allocator, .init(a, @import("view.zig").view), .{ .width = 1000, .height = 600, .dark = false, .scale = 2 });
++    defer t.deinit();
++    t.settle(0.3);
++    const anchor = a.actions.anchor orelse return error.MissingActionsToolbar;
++    t.click(anchor.x + anchor.w / 2, anchor.y + anchor.h / 2);
++    t.settle(0.3);
++    try testing.expect(t.hasText("not connected"));
++    try testing.expect(t.hasText("Retry"));
++    try t.screenshot("actions-restart-before.png");
++    try t.clickText("Retry");
++    t.settle(0.3);
++    drain(a);
++    t.settle(0.3);
++    try testing.expectEqual(actions.Status.ready, a.actions.status);
++    try testing.expect(t.hasText("Test"));
++    try t.screenshot("actions-restart-retry.png");
++}
