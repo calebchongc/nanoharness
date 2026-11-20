@@ -198,8 +198,13 @@ test "every original Harness SVG renders at screen density inside its existing f
     for ([_]f32{ 1, 2 }) |scale| {
         var state: u8 = 0;
         var t: ui.Tester = undefined;
-        try t.init(std.testing.allocator, .init(&state, iconSheet), .{ .scale = scale });
+        try t.init(std.testing.allocator, .init(&state, iconSheet), .{
+            .width = @floatFromInt(std.enums.values(Name).len * 20),
+            .height = 40,
+            .scale = scale,
+        });
         defer t.deinit();
+        while (t.text.images.wants_frame) t.frame();
         var count: usize = 0;
         for (t.ctx.nodes.items) |node| switch (node.content) {
             .image => |im| {

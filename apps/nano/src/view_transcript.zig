@@ -313,26 +313,24 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const sel_owner_mod = @import("selection_owner.zig");
     const sel_surface = sel_owner_mod.state(c).surface;
     const saved_pin = sel_owner_mod.pin(c).*;
-    const active_drag = c.selection.dragging or c.selection.pressed;
     const anchor_id: u64 = if (c.selection.anchor) |p| p.id else 0;
     const focus_id: u64 = if (c.selection.focus) |p| p.id else anchor_id;
     const selection_elsewhere = sel_surface != 0 and sel_surface != drawn.box;
-    const pin_matches = !active_drag and anchor_id != 0 and !selection_elsewhere and
-        saved_pin.surface == drawn.box and saved_pin.anchor == anchor_id and saved_pin.focus == focus_id;
-    const need_full_for_selection = !selection_elsewhere and (active_drag or (anchor_id != 0 and !pin_matches));
+    const pin_same_surface = saved_pin.surface == drawn.box;
+    const pin_usable = anchor_id != 0 and !selection_elsewhere and pin_same_surface and saved_pin.anchor == anchor_id;
+    const need_full_for_selection = !selection_elsewhere and anchor_id != 0 and pin_same_surface and saved_pin.needs_scan;
     // The column's required clip prevents NanoUI's retained-scroll fast
-    // path. A settled conversation therefore rebuilds too: keep measured
-    // offscreen rows as spacers on ordinary wheel frames, not only while
-    // a reply streams. Active drags and prompt-rail navigation mount the
-    // full content; a completed selection pins only its own row span so
-    // scrolling stays proportional to visible content while Copy keeps
-    // exact ownership.
+    // path. Keep measured offscreen rows as spacers during wheel scroll,
+    // mouse-down, active drag, and completed selection: only the active
+    // selection's own row span is pinned while unselected history stays
+    // culled. A one-shot scan runs only when an endpoint is offscreen and
+    // not yet pinned.
     const cull_offscreen = !need_full_for_selection and (!a.offscreen or tweening or resizing) and a.view.rail.glide == null;
     var sel_pin: SelectionPin = .{
-        .active = pin_matches,
-        .lo_row = saved_pin.lo_row,
-        .hi_row = saved_pin.hi_row,
-        .scanning = !cull_offscreen and anchor_id != 0 and !selection_elsewhere,
+        .active = pin_usable and saved_pin.lo_row != 0,
+        .lo_row = if (pin_usable) saved_pin.lo_row else 0,
+        .hi_row = if (pin_usable) saved_pin.hi_row else 0,
+        .scanning = anchor_id != 0 and !selection_elsewhere,
         .anchor_id = anchor_id,
         .focus_id = focus_id,
     };
@@ -379,6 +377,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         const row_id = c.peekId(null);
         const row_pinned = sel_pin.isPinned(row_id);
         if (spacer(c, cull, !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+            sel_pin.noteCulled();
             if (e.isHumanPrompt()) {
                 ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
             }
@@ -430,7 +429,10 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 .focus = focus_id,
                 .lo_row = sel_pin.first_row,
                 .hi_row = sel_pin.last_row,
+                .needs_scan = false,
+                .scanned = true,
             };
+            if (sel_pin.culled_between) c.changed = true;
         } else if ((sel_pin.saw_anchor or sel_pin.saw_focus) and trailer_hit) {
             sel_owner_mod.pin(c).* = .{
                 .surface = drawn.box,
@@ -438,7 +440,10 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 .focus = focus_id,
                 .lo_row = sel_pin.first_row,
                 .hi_row = 0,
+                .needs_scan = false,
+                .scanned = true,
             };
+            if (sel_pin.saw_culled_after_first) c.changed = true;
         } else if (!sel_pin.saw_anchor and !sel_pin.saw_focus and trailer_hit) {
             sel_owner_mod.pin(c).* = .{
                 .surface = drawn.box,
@@ -446,6 +451,32 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 .focus = focus_id,
                 .lo_row = 0,
                 .hi_row = 0,
+                .needs_scan = false,
+                .scanned = true,
+            };
+        } else if (cull_offscreen) {
+            const already_scanned = pin_same_surface and saved_pin.anchor == anchor_id and saved_pin.focus == focus_id and saved_pin.scanned;
+            if (!already_scanned) {
+                sel_owner_mod.pin(c).* = .{
+                    .surface = drawn.box,
+                    .anchor = anchor_id,
+                    .focus = focus_id,
+                    .lo_row = saved_pin.lo_row,
+                    .hi_row = saved_pin.hi_row,
+                    .needs_scan = true,
+                    .scanned = false,
+                };
+                c.changed = true;
+            }
+        } else {
+            sel_owner_mod.pin(c).* = .{
+                .surface = drawn.box,
+                .anchor = anchor_id,
+                .focus = focus_id,
+                .lo_row = 0,
+                .hi_row = 0,
+                .needs_scan = false,
+                .scanned = true,
             };
         }
     }
@@ -465,6 +496,8 @@ const SelectionPin = struct {
     last_row: u64 = 0,
     saw_anchor: bool = false,
     saw_focus: bool = false,
+    saw_culled_after_first: bool = false,
+    culled_between: bool = false,
 
     fn isPinned(self: *SelectionPin, row_id: u64) bool {
         if (!self.active or self.lo_row == 0) return false;
@@ -472,6 +505,10 @@ const SelectionPin = struct {
         const pinned = self.in_span;
         if (self.hi_row != 0 and row_id == self.hi_row) self.in_span = false;
         return pinned;
+    }
+
+    fn noteCulled(self: *SelectionPin) void {
+        if (self.scanning and self.first_row != 0) self.saw_culled_after_first = true;
     }
 
     fn observe(self: *SelectionPin, c: *const ui.Context, row_id: u64, start_ix: usize) void {
@@ -488,7 +525,11 @@ const SelectionPin = struct {
             }
         }
         if (hit) {
-            if (self.first_row == 0) self.first_row = row_id;
+            if (self.first_row == 0) {
+                self.first_row = row_id;
+            } else if (self.saw_culled_after_first) {
+                self.culled_between = true;
+            }
             self.last_row = row_id;
         }
     }
@@ -549,7 +590,10 @@ fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entr
     const row_id = c.peekId(null);
     const row_pinned = sel_pin.isPinned(row_id);
     const at_end = user_ix + 1 == entries_.len;
-    if (spacer(c, cull, !row_pinned and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) return;
+    if (spacer(c, cull, !row_pinned and (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) {
+        sel_pin.noteCulled();
+        return;
+    }
     const row_start = c.nodes.items.len;
     const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
     const closes = t.end == owner.parts.items.len;

@@ -200,6 +200,23 @@ pub const Images = struct {
         return d;
     }
 
+    /// Registers an SVG document's target raster spec without decoding pixels
+    /// during view construction. Paint-time clipping rejects offscreen SVGs,
+    /// and visible ones rasterize lazily through `get` under the per-frame
+    /// decode budget. Returns false if `bytes` does not open an `<svg>` tag.
+    pub fn registerSvg(im: *Images, k: u64, bytes: []const u8, spec: SvgSpec) bool {
+        if (im.svgs.contains(k)) return true;
+        if (!@import("svg.zig").isValid(bytes)) return false;
+        const longest = @max(spec.width, spec.height);
+        var at = spec;
+        if (longest > im.pictureLimit()) {
+            at.width = @max(1, @as(u32, @intCast(@as(u64, spec.width) * im.pictureLimit() / longest)));
+            at.height = @max(1, @as(u32, @intCast(@as(u64, spec.height) * im.pictureLimit() / longest)));
+        }
+        im.svgs.put(im.gpa, k, at) catch return false;
+        return true;
+    }
+
     /// The SVG document `bytes` drawn at `spec`'s size and color, as
     /// picture `k`: decoded once, then packed when drawn like any other.
     pub fn infoSvg(im: *Images, k: u64, bytes: []const u8, spec: SvgSpec) ?Decoded {
