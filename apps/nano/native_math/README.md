@@ -24,9 +24,12 @@ Selection copies the original delimited equation source, not flattened math.
 The original intentional literal fallbacks remain: unknown/malformed input,
 explicit style declarations, explicit `limits`/`nolimits` overrides,
 barless/style-specific fraction commands, `rule`, and explicit spacing whose
-semantics the upstream AST loses. Source/token/depth/AST/grid/box/output/area
-limits and the 32-entry/2-MiB vector cache are retained. FFI panics are caught;
-failed layouts return literal source rather than a changed equation.
+semantics the upstream AST loses. Explicit spacing around relation atoms is
+retained alongside the relation's automatic TeX glue; unsupported spacing that
+could change binary-operator classification still falls back to literal source.
+Source/token/depth/AST/grid/box/output/area limits and the 32-entry/2-MiB vector
+cache are retained. FFI panics are caught; failed layouts return literal source
+rather than a changed equation.
 
 Verification (from the repository root):
 
