@@ -154,6 +154,7 @@ test {
     _ = @import("tests_color_emoji.zig");
     _ = @import("tests_image_orientation.zig");
     _ = @import("tests_ui_feedback.zig");
+    _ = @import("tests_ui_copy_port.zig");
     _ = @import("tests_ui_glass.zig");
     _ = @import("surface_palette.zig");
     _ = @import("tests_ui_surfaces.zig");

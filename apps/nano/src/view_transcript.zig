@@ -640,7 +640,7 @@ fn peerMessage(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, mes
     header.end();
     // Coordination is not a right-aligned human prompt. Keep its body
     // selectable, while the sender label is not part of cross-message Copy.
-    @import("view_markdown.zig").markdown(c, k, message.body);
+    @import("view_markdown.zig").markdown(c, k, message.body, &a.view.copy_feedback);
     lane(c, a, k, e, box.hovered(), false);
     return c.rects.get(c.node(box.index).id);
 }
@@ -702,17 +702,6 @@ fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) 
     return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
 }
 
-/// GPUI's copied-message check lasts 1.2 seconds. Keep only a stable control
-/// id and a deadline, not a borrowed entry id or a frame-arena string.
-pub const CopyFeedback = struct {
-    button: u64 = 0,
-    until: f64 = 0,
-
-    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
-        return s.button == button and now < s.until;
-    }
-};
-
 /// Under a message: 32 points held for its time and copy button, shown on
 /// hover (`strip`).
 fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
@@ -724,19 +713,13 @@ fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: b
         const buf = c.alloc().alloc(u8, 32) catch return;
         ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
     }
-    const button = c.node(l.index).id;
-    const copied = a.view.message_copy.active(button, c.time);
-    if (copied) c.frameIn(@floatCast(a.view.message_copy.until - c.time));
-    if (kit.iconButton(c, k, if (copied) .check else .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
+    if (kit.copyButton(c, k, &a.view.copy_feedback, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
             if (text.items.len > 0) text.appendSlice(c.alloc(), "\n\n") catch {};
             text.appendSlice(c.alloc(), p.text.items) catch {};
         };
         c.clipboard.write(c.clipboard.ctx, text.items);
-        a.view.message_copy = .{ .button = button, .until = c.time + 1.2 };
-        c.changed = true;
-        c.frameIn(0);
     }
 }
 
@@ -1222,11 +1205,11 @@ fn singleLine(c: *ui.Context, s: []const u8) []const u8 {
 /// `notice_chip` with its tile (notice.rs): the danger triangle, `label`,
 /// Copy, then the message wrapped. The caller adds what goes under it and
 /// ends it.
-pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: []const u8) ui.Div {
-    return messageChip(c, k, label, message, false);
+pub fn noticeChip(c: *ui.Context, feedback: *kit.CopyFeedback, k: theme.Colors, label: []const u8, message: []const u8) ui.Div {
+    return messageChip(c, feedback, k, label, message, false);
 }
 
-fn messageChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: []const u8, calm: bool) ui.Div {
+fn messageChip(c: *ui.Context, feedback: *kit.CopyFeedback, k: theme.Colors, label: []const u8, message: []const u8, calm: bool) ui.Div {
     const tone = if (calm) k.muted else k.danger;
     const ink = if (calm) k.muted else k.danger_muted;
     // GPUI's edge insets what's inside it; here it's drawn over the box.
@@ -1239,10 +1222,9 @@ fn messageChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: []co
         tile.end();
         ui.text(c, label, .{ .size = 12, .weight = .medium, .color = ink.alpha(0.8) });
         ui.spacer(c);
-        const copy = ui.div(c).row().size(20, 20).center().rounded(6).hover(tone.alpha(0.12));
-        icons.icon(c, .copy, 12, ink.alpha(0.8), 0);
-        copy.end();
-        if (copy.clicked()) c.clipboard.write(c.clipboard.ctx, message);
+        var copy_colors = k;
+        copy_colors.hover = tone.alpha(0.12);
+        if (kit.copyButton(c, copy_colors, feedback, .{ .size = 20, .icon = 12, .color = ink.alpha(0.8) })) c.clipboard.write(c.clipboard.ctx, message);
     }
     // GPUI's line height (phi), as the GPUI renderer draws the chip.
     ui.text(c, message, rows_st(c, 12, .{ .wrap = true, .color = k.text.alpha(0.8) }));
@@ -1260,7 +1242,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     const problem = if (notice != null or run_errors.isPlanUsageLimit(message)) null else run_errors.providerProblem(message);
     const outer = ui.div(c).column().wFull().py(4);
     defer outer.end();
-    const chip = messageChip(c, k, if (notice) |n| n.label() else if (problem) |p| p.label() else "Error", message, notice != null);
+    const chip = messageChip(c, &a.view.copy_feedback, k, if (notice) |n| n.label() else if (problem) |p| p.label() else "Error", message, notice != null);
     defer chip.end();
     const p = problem orelse return;
     const id = chat_id orelse return;

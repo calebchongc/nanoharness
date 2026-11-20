@@ -113,12 +113,13 @@ test "native math UI inline baseline and narrow wrapping keep equations inside p
 const Fixture = struct {
     source: []const u8,
     owner: ?*@import("app.zig").App = null,
+    copy_feedback: @import("view_kit.zig").CopyFeedback = .{},
     max_width: ?f32 = null,
     fn view(f: *Fixture, c: *ui.Context) void {
         const page = ui.div(c).column().wFull().p(20);
         if (f.max_width) |w| _ = page.maxW(w).clip();
         defer page.end();
-        if (f.owner) |a| @import("view_markdown.zig").withLinks(c, theme.builtin(false), f.source, a, "math") else @import("view_markdown.zig").markdown(c, theme.builtin(false), f.source);
+        if (f.owner) |a| @import("view_markdown.zig").withLinks(c, theme.builtin(false), f.source, a, "math") else @import("view_markdown.zig").markdown(c, theme.builtin(false), f.source, &f.copy_feedback);
     }
 };
 

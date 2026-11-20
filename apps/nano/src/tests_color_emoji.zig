@@ -25,7 +25,7 @@ fn probeView(a: *App, c: *ui.Context) void {
     _ = ui.textField(c, &a.composer, .{ .width = .fill, .size = 18, .line_height = 24, .color = k.text });
     const table_box = ui.div(c).column().w(420);
     defer table_box.end();
-    md.markdown(c, k, emoji_table);
+    md.markdown(c, k, emoji_table, &a.view.copy_feedback);
 }
 
 test "macOS colour emoji preserve RGB and internal detail in light and dark themes" {
