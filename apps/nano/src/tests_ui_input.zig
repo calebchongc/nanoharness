@@ -634,3 +634,31 @@ test "the theme picker opens and applies a palette without an unrelated input" {
     try testing.expectEqualDeep(background, h.t.ctx.theme.background);
     try testing.expectEqualDeep(colors.composer, h.t.ctx.theme.surface);
 }
+
+test "native NSWindow Cmd+Shift+P toggles project picker open and closed while search has focus (#42)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const objc = @import("nanoui").objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var n: NativeInput = undefined;
+    try n.init(&h.a);
+    defer n.deinit();
+    try @import("native_menu.zig").install(&n.runtime, &h.a);
+    defer if (n.runtime.main_menu) |menu| {
+        objc.msg(void, n.runtime.nsapp, "setMainMenu:", .{@as(?objc.Object, null)});
+        menu.destroy();
+        n.runtime.main_menu = null;
+    };
+    const cmd_shift: objc.NSUInteger = (1 << 20) | (1 << 17);
+    // First Cmd+Shift+P through real NSWindow.sendEvent: opens the project picker.
+    n.routedKey(.window, "P", 35, cmd_shift);
+    try testing.expectEqual(@import("view_tab_strip.zig").Menu.folder, h.a.view.strip.menu.?);
+    // Type into the focused search field, then press Cmd+Shift+P again to dismiss.
+    n.routedKey(.window, "a", 0, 0);
+    try testing.expectEqualStrings("a", h.a.view.strip.query.text());
+    n.routedKey(.window, "P", 35, cmd_shift);
+    try testing.expect(h.a.view.strip.menu == null);
+}

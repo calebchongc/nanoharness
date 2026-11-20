@@ -320,3 +320,77 @@ test "multi-pane project picker anchors to active tab rather than another pane f
     try testing.expect(right_search.x >= mid_x);
     try testing.expect(right_search.y < 120);
 }
+
+test "project picker #42: dismisses on outside clicks including top strip, micro-drag, and right-click, and toggles with Cmd+Shift+P" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+
+    // Existing chat: Cmd+Shift+P opens the top-anchored project picker (`footer_folder == false`).
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    try testing.expect(!h.a.view.strip.footer_folder);
+
+    // Clicking inside the search field and typing keeps the picker open.
+    const search_rect = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    h.t.click(search_rect.x + 12, search_rect.y + search_rect.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    h.t.typeText("field");
+    h.t.settle(1);
+    try testing.expectEqualStrings("field", h.a.view.strip.query.text());
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+
+    // Pressing Cmd+Shift+P again while search has focus dismisses the picker and returns focus.
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expect(h.a.view.strip.menu == null);
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+
+    // Clicking outside in the top header strip (y < 42) must dismiss the picker.
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    h.t.click(760, 20);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_PICKER_DISMISS_SNAPSHOT")) |path| try h.t.screenshot(std.mem.span(path));
+    try testing.expect(h.a.view.strip.menu == null);
+
+    // Clicking outside with slight pointer drift (trackpad micro-drag) must dismiss the picker.
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    h.t.drag(820, 420, 832, 425);
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.menu == null);
+
+    // Right-clicking outside the picker must also dismiss it.
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    h.t.secondaryClick(820, 420);
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.menu == null);
+
+    // Sidebar project picker (`filter_menu`) dismisses on Cmd+Shift+P instead of stacking two pickers.
+    @import("view_sidebar_menus.zig").openProjects(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.view.filter_menu);
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expect(!h.a.view.filter_menu);
+    try testing.expect(h.a.view.strip.menu == null);
+
+    // Draft footer-anchored project picker (`footer_folder == true`) also toggles with Cmd+Shift+P,
+    // dismisses on outside click, and still lets project rows be selected normally.
+    h.a.newTab();
+    h.t.settle(2);
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    try testing.expect(h.a.view.strip.footer_folder);
+    h.t.drag(820, 300, 830, 304);
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.menu == null);
+
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    try h.t.clickText("fieldnotes");
+    h.t.settle(1);
+    try testing.expect(h.a.view.strip.menu == null);
+    try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+}
