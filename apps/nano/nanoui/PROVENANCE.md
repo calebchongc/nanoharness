@@ -50,6 +50,26 @@ teardown uses `destroyNow` after close decisions have been resolved, matching
 Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
+NanoHarness-local selection changes port the unmerged Harness proposals
+https://github.com/justrach/harness/pull/831 and
+https://github.com/justrach/harness/pull/843 to this dependency's current path.
+`src/ui/{selection,text_selection,textedit,textfield,textfield_lines,textarea,types}.zig`
+share source-byte word/sentence/paragraph selection for two/three/four clicks
+in prose and prompt editors, retaining the initial multi-click unit while
+held and extending drags in complete units. Four or more clicks remain
+paragraph-only; Cmd+A remains the explicit select-all command. Code and
+ordinary fields retain word/visual-line selection. The app owns continuous
+edge scrolling in the original selection viewport without disabling row
+culling or replacing split-pane scroll-position preservation.
+
+`src/ui/{accessible_text,a11y}.zig` expose selected source text and UTF-16
+ranges to macOS accessibility. A stable read-only text-area element represents
+cross-paragraph output selections; editor selections use their real field.
+Native hidden-window tests cover queries, stale-selection withdrawal and
+window isolation, not system-wide Speak Selection playback. These public
+struct changes require rebuilding the native runtime through the package
+graph, rather than reusing a runtime compiled against an older layout.
+
 The native timeline row is cherry-picked from upstream proposal
 https://github.com/justrach/nanoui/pull/177, commit
 `b641cf30f360d40f41248478fea3aed0597a14ed`: `src/kit/timeline.zig`
