@@ -1551,8 +1551,10 @@ fn sessionRowWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, 
     const zen = a.settings.uiMode() == .zen;
     const selected = a.selected != null and std.mem.eql(u8, a.selected.?, ch.id);
     const l = Look.of(a);
-    // 6 above an 18-point line, as `render_chat_row`'s `py(6)` column.
     var r = ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(if (zen) @as(f32, 5) else 6).gap(2).rounded(if (zen) @as(f32, 7) else 8).clip();
+    // Compact rows reserve extra context height; center their single line
+    // inside the whole box rather than leaving that space below the title.
+    if (zen or l.compact) r = r.justifyCenter();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
     // moves, so its menu opening under a still pointer leaves it hovered.
     const now = a.nowMs();
