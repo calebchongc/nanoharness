@@ -58,6 +58,58 @@ const Harness = struct {
     }
 };
 
+fn disclosureArrow(t: *ui.Tester, label: []const u8) !ui.Rect {
+    const text = textNode(t, label) orelse return error.NoDisclosureLabel;
+    const parent = t.ctx.node(text).parent;
+    for (t.ctx.nodes.items) |node| {
+        if (node.parent == parent and node.rect.w == 12 and node.rect.h == 12) return node.rect;
+    }
+    return error.NoDisclosureArrow;
+}
+
+test "sidebar disclosure arrows stay aligned through hover collapse and Cmd+B" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"pin","deviceId":"synthetic-device","title":"Pinned example","spaceId":"synthetic-project","archived":false},
+        \\  {"id":"live","deviceId":"synthetic-device","title":"Active example","spaceId":"synthetic-project","archived":false},
+        \\  {"id":"archive","deviceId":"synthetic-device","title":"Archived example","spaceId":"synthetic-project","archived":true} ]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.settings.setPins(&.{"pin"});
+    h.a.settings.set(.sidebar_show_archived, true);
+    h.a.settings.setText("sidebarOrganization", "by_project");
+    h.a.view.archived_open = true;
+    h.t.settle(1);
+    h.snap("sidebar-disclosure-alignment");
+    const pinned = try disclosureArrow(&h.t, "Pinned");
+    const project = try disclosureArrow(&h.t, "synthetic-notes");
+    const archived = try disclosureArrow(&h.t, "Archived");
+    try testing.expectApproxEqAbs(sidebar.widthOf(&h.a) - 28, project.x, 0.01);
+    try testing.expectApproxEqAbs(pinned.x, project.x, 0.01);
+    try testing.expectApproxEqAbs(pinned.x, archived.x, 0.01);
+
+    h.t.moveTo(project.x + 6, project.y + 6);
+    h.t.settle(1);
+    try testing.expectApproxEqAbs(project.x, (try disclosureArrow(&h.t, "synthetic-notes")).x, 0.01);
+    h.snap("sidebar-disclosure-hover");
+    h.t.click(project.x + 6, project.y + 6);
+    h.t.settle(1);
+    try testing.expectApproxEqAbs(project.x, (try disclosureArrow(&h.t, "synthetic-notes (1)")).x, 0.01);
+    h.t.click(project.x + 6, project.y + 6);
+    h.t.settle(1);
+
+    _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
+    h.t.settle(1);
+    _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
+    h.t.settle(1);
+    try testing.expectApproxEqAbs(project.x, (try disclosureArrow(&h.t, "synthetic-notes")).x, 0.01);
+    try testing.expectApproxEqAbs(project.x, (try disclosureArrow(&h.t, "Pinned")).x, 0.01);
+    try testing.expectApproxEqAbs(project.x, (try disclosureArrow(&h.t, "Archived")).x, 0.01);
+}
+
 test "retention 194 open workspace rows use each chat harness mark" {
     var h: Harness = undefined;
     try h.init(true);

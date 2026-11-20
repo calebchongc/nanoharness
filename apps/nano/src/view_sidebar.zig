@@ -995,7 +995,6 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
             const color = if (k.is_harp) k.muted else k.muted.alpha(0.5);
             ui.text(c, if (open) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
             ui.spacer(c);
-            icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
             var create = false;
             if (by_project and !std.mem.startsWith(u8, key, "home:") and !std.mem.eql(u8, key, "needs")) {
                 ui.key(c, "project-group-new-session");
@@ -1004,6 +1003,9 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
                 if (h.hovered()) icons.icon(c, .plus, 13, k.muted, 0);
                 create = add.clicked();
             }
+            // Keep disclosure arrows in the same trailing column as every
+            // other header; the hover-only project action goes before it.
+            icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
             if (create) {
                 a.newWorkspaceSession();
                 a.select(null, key);
