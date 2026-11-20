@@ -319,6 +319,13 @@ pub fn toggleProjectPicker(a: *App) void {
         a.redraw();
         return;
     }
+    a.view.filter_menu = false;
+    a.view.more_menu = false;
+    a.view.account_menu = false;
+    a.view.space_menu = false;
+    a.view.checkout_menu = false;
+    a.view.ref_menu = false;
+    a.view.star_menu = false;
     if (state.active_folder_anchor) |anchor| {
         open(a, .folder, active(a), anchor);
         state.footer_folder = false;
@@ -403,8 +410,11 @@ pub fn keys(c: *ui.Context, a: *App) void {
     const view_mod = @import("view.zig");
     if (c.shortcut(.{ .key = ui.Shortcut.escape }) or (state.menu == .folder and view_mod.boundShortcut(c, a, "openProjectPicker"))) {
         state.menu = null;
+        c.focus = 0;
         a.view.focus_composer = true;
         a.redraw();
+    } else if (view_mod.boundShortcut(c, a, "openProjectPicker")) {
+        toggleProjectPicker(a);
     } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;

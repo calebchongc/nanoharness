@@ -186,8 +186,11 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
         const scrim_top = @import("motion_rules.zig").scrimTop(footer, @import("panel_chrome.zig").header_height);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
-        if (scrim.clicked()) {
+        const scrim_hit = scrim.interaction();
+        const trigger = if (!footer) state.active_folder_anchor else null;
+        if (scrim_hit.pressed or scrim_hit.right_pressed or scrim_hit.clicked or kit.pressedOutside(c, trigger)) {
             state.menu = null;
+            c.focus = 0;
             a.view.focus_composer = true;
             return;
         }

@@ -701,7 +701,14 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (chat_menu.anyDialog(a)) {
         if (c.shortcut(.{ .key = S.escape })) chat_menu.dismiss(a);
-    } else if (header_menus.anyOpen(a)) header_menus.keys(c, a) else if (!a.view.palette.open) {
+    } else if (header_menus.anyOpen(a)) {
+        if (a.view.filter_menu and boundShortcut(c, a, "openProjectPicker")) {
+            header_menus.close(a);
+            c.focus = 0;
+            return;
+        }
+        header_menus.keys(c, a);
+    } else if (!a.view.palette.open) {
         // The session search, while it holds the keys.
         @import("view_sidebar_search.zig").keys(c, a);
     }
