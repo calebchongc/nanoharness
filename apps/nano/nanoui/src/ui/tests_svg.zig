@@ -63,3 +63,25 @@ test "an SVG icon draws tinted at the screen's density, in its own colors untint
         break;
     };
 }
+
+test "offscreen clipped SVGs are not eagerly rasterized during build or paint (#38)" {
+    const OffscreenSvgs = struct {
+        fn view(_: *@This(), c: *ui.Context) void {
+            const clip = ui.div(c).column().size(80, 40).clip();
+            defer clip.end();
+            _ = ui.svg(c, .{ .key = "visible-sq", .bytes = square, .size = 16 });
+            ui.div(c).size(10, 200).end();
+            for (0..24) |i| {
+                const key = c.print("offscreen-sq-{d}", .{i});
+                _ = ui.svg(c, .{ .key = key, .bytes = square, .size = 16 });
+            }
+        }
+    };
+    var s: OffscreenSvgs = .{};
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, OffscreenSvgs.view), .{ .width = 120, .height = 60 });
+    defer t.deinit();
+    t.settle(1);
+    try testing.expectEqual(@as(usize, 1), t.text.images.decoded.count());
+    try testing.expect(!t.text.images.wants_frame);
+}

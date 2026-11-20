@@ -59,7 +59,10 @@ pub fn draw(c: *ui.Context, in: md.Inline, style: ui.TextStyle, color: ui.Color,
     c.node(area.index).layout_dependent = true;
     defer area.end();
     const old = c.rects.get(c.node(area.index).id);
-    if (old == null) c.changed = true;
+    // `area` is `layout_dependent`, so `ui.frame.run` schedules a bounded
+    // post-layout frame when a newly mounted math container acquires its
+    // measured width; never set `c.changed = true` inside build passes where
+    // layout has not run yet.
     const room = @max(1, if (old) |r| r.w else c.size.w - 40);
     var st = style;
     st.wrap = false;

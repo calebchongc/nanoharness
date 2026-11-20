@@ -10,14 +10,17 @@ pub const State = struct {
     snapshot: u64 = 0,
 };
 
-/// Transcript row span pinned for a completed selection so offscreen unselected
-/// history stays culled while Copy and highlight validation keep exact ownership.
+/// Transcript row span pinned for an active or completed selection so offscreen
+/// unselected history stays culled while dragging, Copy, and highlight
+/// validation keep exact ownership.
 pub const Pin = struct {
     surface: u64 = 0,
     anchor: u64 = 0,
     focus: u64 = 0,
     lo_row: u64 = 0,
     hi_row: u64 = 0,
+    needs_scan: bool = false,
+    scanned: bool = false,
 };
 
 /// Explicit child key under the implicit window root. The view calls this

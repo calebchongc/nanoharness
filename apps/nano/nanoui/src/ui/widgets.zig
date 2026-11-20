@@ -216,7 +216,7 @@ pub fn svg(c: *Context, opts: SvgOptions) bool {
     hasher.update(std.mem.asBytes(&[2]u32{ pw, ph }));
     hasher.update(std.mem.asBytes(&[4]f32{ cur.r, cur.g, cur.b, cur.a }));
     const k = hasher.final();
-    _ = c.text.images.infoSvg(k, opts.bytes, .{ .width = pw, .height = ph, .current = .{ cur.r, cur.g, cur.b, cur.a } }) orelse return false;
+    if (!c.text.images.registerSvg(k, opts.bytes, .{ .width = pw, .height = ph, .current = .{ cur.r, cur.g, cur.b, cur.a } })) return false;
     _ = c.leaf(.{ .width = .{ .px = w }, .height = .{ .px = h } }, .{ .image = .{ .key = k, .source = .{ .encoded = opts.bytes }, .opacity = opts.opacity, .tint = opts.color, .snap = true } }, null);
     return true;
 }

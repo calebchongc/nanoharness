@@ -25,6 +25,13 @@ pub const Options = struct {
     current: [4]f32 = .{ 0, 0, 0, 1 },
 };
 
+/// Whether `src` opens an `<svg>` element (without rasterizing it).
+pub fn isValid(src: []const u8) bool {
+    var it: tags.Tags = .{ .s = src };
+    while (it.next()) |tag| if (tag.kind != .close and std.mem.eql(u8, tag.name, "svg")) return true;
+    return false;
+}
+
 /// The document's own size: its viewBox's, else its width and height.
 pub fn size(src: []const u8) ?[2]f32 {
     var it: tags.Tags = .{ .s = src };

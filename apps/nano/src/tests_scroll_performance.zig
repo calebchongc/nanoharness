@@ -221,3 +221,106 @@ test "transcript scroll spacers preserve the destination pixels after a large ju
         try testing.expectEqual(full.pixels, live.pixels);
     }
 }
+
+test "active mouse-down and drag on math-heavy history stay viewport-proportional without eager offscreen SVG decoding (#38)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = false;
+    a.dark = true;
+    a.openChat("synthetic-math-stall", null);
+    a.view.sidebar_open = false;
+
+    const count: usize = 400;
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(testing.allocator);
+    try json.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..count) |i| {
+        if (i > 0) try json.appendSlice(testing.allocator, ",");
+        try json.print(testing.allocator,
+            \\{{"id":"reply-{d}","role":"assistant","status":"complete","parts":[{{"id":"text","kind":"text","text":"## Synthetic answer {d}\n\nA synthetic equation $\\frac{{x_{{{d}}}+1}}{{y_{{{d}}}+2}}$ inside an ordinary paragraph, with enough text for native selection.\n\nAnother synthetic paragraph for selecting without moving the viewport."}}]}}
+        , .{ i, i, i, i });
+    }
+    try json.appendSlice(testing.allocator, "]}");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json.items, .{});
+    defer parsed.deinit();
+    try a.transcript.apply(parsed.value);
+
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1000, .height = 700, .dark = true });
+    defer t.deinit();
+    t.settle(0.5);
+    t.scroll(500, 350, 12_000);
+    t.settle(0.2);
+
+    const ordinary_nodes = t.ctx.nodes.items.len;
+    const ordinary_decoded = t.text.images.decoded.count();
+    const ordinary_build_ms = t.ctx.stats.build_ms;
+
+    // Locate two visible plain paragraphs to drag across.
+    var first_rect: ?ui.Rect = null;
+    var second_rect: ?ui.Rect = null;
+    for (t.ctx.nodes.items) |n| {
+        if (n.content == .text and n.content.text.str.len > 40 and n.rect.y > 60 and n.rect.y + n.rect.h < 600 and n.rect.w > 150) {
+            if (first_rect == null) {
+                first_rect = n.rect;
+            } else if (n.rect.y > first_rect.?.y + first_rect.?.h + 2) {
+                second_rect = n.rect;
+                break;
+            }
+        }
+    }
+    const r0 = first_rect orelse return error.NoVisibleSelectableParagraph;
+    const r1 = second_rect orelse return error.NoSecondSelectableParagraph;
+
+    // 1. Mouse-down must stay viewport-proportional, single-pass, and never decode offscreen SVGs.
+    t.down(r0.x + 3, r0.y + 8);
+    const down_nodes = t.ctx.nodes.items.len;
+    const down_passes = t.ctx.stats.passes;
+    const down_decoded = t.text.images.decoded.count();
+    const down_build_ms = t.ctx.stats.build_ms;
+    std.debug.print(
+        "\n#38 rows={d} ordinary_nodes={d} ordinary_ms={d:.3} down_nodes={d} down_passes={d} down_ms={d:.3} decoded_before={d} decoded_after={d}\n",
+        .{ count, ordinary_nodes, ordinary_build_ms, down_nodes, down_passes, down_build_ms, ordinary_decoded, down_decoded },
+    );
+    try testing.expect(down_nodes < ordinary_nodes * 2);
+    try testing.expect(down_passes <= 2);
+    try testing.expect(down_decoded <= ordinary_decoded + 24);
+
+    // 2. Dragging across paragraphs stays proportional to visible + selected rows.
+    t.move(r1.x + 110, r1.y + 8);
+    const drag_nodes = t.ctx.nodes.items.len;
+    try testing.expect(t.ctx.selection.dragging);
+    try testing.expect(drag_nodes < ordinary_nodes * 2);
+
+    // 3. Scrolling while still dragging extends into newly visible rows without mounting full history.
+    t.scroll(500, 350, -300);
+    t.move(r1.x + 120, r1.y + 8);
+    try testing.expect(t.ctx.nodes.items.len < ordinary_nodes * 3);
+
+    // 4. Releasing retains exact Copy, even after scrolling far away from the selection.
+    t.up();
+    t.settle(0.2);
+    try testing.expect(t.ctx.selection.anchor != null);
+    _ = t.shortcut(.{ .key = 'c', .cmd = true });
+    const expected_copy = try testing.allocator.dupe(u8, t.clipboard.items);
+    defer testing.allocator.free(expected_copy);
+    try testing.expect(expected_copy.len > 20);
+    try testing.expect(std.mem.indexOfScalar(u8, expected_copy, '\n') != null);
+
+    for (0..10) |_| t.scroll(500, 350, -400);
+    t.settle(0.2);
+    try testing.expect(t.ctx.nodes.items.len < ordinary_nodes * 2);
+    t.clipboard.clearRetainingCapacity();
+    _ = t.shortcut(.{ .key = 'c', .cmd = true });
+    try testing.expectEqualStrings(expected_copy, t.clipboard.items);
+
+    // 5. Second press after settling also stays viewport-proportional and bounded.
+    const r2 = for (t.ctx.nodes.items) |n| {
+        if (n.content == .text and n.content.text.str.len > 40 and n.rect.y > 60 and n.rect.y + n.rect.h < 600 and n.rect.w > 150) break n.rect;
+    } else return error.NoVisibleSelectableParagraph;
+    t.down(r2.x + 3, r2.y + 8);
+    try testing.expect(t.ctx.nodes.items.len < ordinary_nodes * 2);
+    try testing.expect(t.ctx.stats.passes <= 2);
+    t.up();
+}
