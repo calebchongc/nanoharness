@@ -377,6 +377,7 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel = panel_chrome.bodyFor(c, k, zen).grow().wFull().h(0);
     defer panel.end();
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
+    @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
     if (c.input.pressed and panel.interaction().hovered) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     if (strip.rendering.selectedBounds(a)) |selected| panel_chrome.join(c, k, a.view.chrome.chat_width, selected.left, selected.right);
     // Decorative shoulders change node count as the sidebar slides; the
@@ -496,6 +497,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
             const pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
             defer pane.end();
             @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
+            @import("view_attachment_drop.zig").shade(c, a, k, pane.index);
             if (c.input.pressed and pane.interaction().hovered) a.view.strip.focused = .{ .chat = ix };
             if (ix == s.focus) {
                 focused(c, a, k);

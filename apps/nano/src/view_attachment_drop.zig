@@ -83,6 +83,22 @@ fn destination(a: *const App, pane: ?usize) ?u64 {
     return hash.final();
 }
 
+/// Shade only a valid receiving conversation while OS files hover. Native
+/// exit/cancellation and the existing destination guard own its lifetime.
+pub fn shade(c: *ui.Context, a: *App, k: @import("theme.zig").Colors, index: u32) void {
+    if (blocked(a)) return;
+    const point = c.input.drag_over orelse return;
+    const hover = a.file_drop.hover orelse return;
+    const id = c.node(index).id;
+    if (hover.id != id or hover.cancelled) return;
+    const rect = c.rects.get(id) orelse return;
+    if (!rect.contains(point)) return;
+    const scrim: ui.Color = .{ .a = if (k.dark) 0.4 else 0.32 * (0.4 / 0.6) };
+    const veil = ui.div(c).absolute().offset(0, 0).sizeFull().center().layer(5).bg(scrim).rounded(9);
+    defer veil.end();
+    ui.text(c, "Drop to attach", .{ .size = 13, .color = k.text });
+}
+
 pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
     if (c.input.drag_over == null and c.input.drop == null) a.file_drop.hover = null;
     if (blocked(a)) {

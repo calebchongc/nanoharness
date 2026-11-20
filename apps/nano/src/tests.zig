@@ -178,6 +178,7 @@ test {
     _ = @import("tests_project_folder_retention.zig");
     _ = @import("tests_pending_progress_retention.zig");
     _ = @import("tests_pending_feedback_lifecycle.zig");
+    _ = @import("tests_ui_attachment_drop.zig");
     _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
