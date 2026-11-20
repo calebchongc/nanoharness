@@ -16,3 +16,15 @@ to see needs a maintainer to add the `no-screenshots` label. -->
 ## Tests
 
 <!-- Name the test that fails without the change, and what else you ran. -->
+
+## Contributor Agreement
+
+All contributions require agreement to the
+[Contributor Assignment and License Agreement (`CLA.md`)](CLA.md), under which
+contributions are irrevocably assigned to the Licensors and become part of
+`Licensor Material` governed by [`LICENSE`](LICENSE). If you have not already
+signed the current version of `CLA.md`, comment on this pull request with:
+
+```text
+I have read the Contributor License Agreement (CLA.md) and I hereby irrevocably agree to its terms.
+```

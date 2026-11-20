@@ -142,6 +142,8 @@ For the internals, see [architecture](ARCHITECTURE.md). For appearance and theme
 A company that crosses a line must contact us within 5 working days. Individuals always use Harness under the AGPL, whatever they earn, and so do organizations that meet none of these tests. Versions up to v0.2.108 keep the license they shipped with. Unsure? Treat yourself as covered and get in touch.
 Contact [rach@standardharness.com](mailto:rach@standardharness.com).
 
+**Contributing.** All contributions require prior agreement to the [Contributor Assignment and License Agreement (`CLA.md`)](CLA.md) (see [`CONTRIBUTING.md`](CONTRIBUTING.md)), under which contributions are irrevocably assigned to the Licensors and become part of `Licensor Material` governed by [`LICENSE`](LICENSE).
+
 ### Upstream license notice ([zeronsh/zeron](https://github.com/zeronsh/zeron))
 
 Earlier portions of the workspace and engine stack were adapted from [Zeron (`zeronsh/zeron`)](https://github.com/zeronsh/zeron), Copyright (c) 2026 Wing, under the MIT License. The original MIT permission and warranty notice is retained verbatim in [`third_party/licenses/Zeron-MIT.txt`](third_party/licenses/Zeron-MIT.txt) alongside [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
