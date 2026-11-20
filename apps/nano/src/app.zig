@@ -142,6 +142,8 @@ pub const View = struct {
     model_picker: @import("model_picker.zig").State = .{},
     /// The context ring's hover card (view_context.zig).
     context: @import("view_context.zig").State = .{},
+    agent_work: @import("view_agent_work.zig").State = .{},
+    subagent_steer: nanoui.ui.TextBuffer = .{},
     /// The composer footer's account-usage ring and switcher popover (view_account_usage.zig).
     account_usage: @import("view_account_usage.zig").State = .{},
     composer_anchor: ?nanoui.ui.Rect = null,
@@ -250,6 +252,7 @@ pub const View = struct {
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
+        @import("text_buffer.zig").deinit(&v.subagent_steer);
         v.project_setup.deinit();
         v.open_chooser.deinit();
         @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
@@ -1774,6 +1777,10 @@ pub const App = struct {
         a.notice_len = 0;
         queue_mod.stop(a);
         const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
+        if (!same) {
+            a.view.agent_work = .{};
+            a.view.subagent_steer.clear();
+        }
         if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;

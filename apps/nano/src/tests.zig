@@ -1,5 +1,6 @@
 //! Every test: `zig build test`.
 test {
+    _ = @import("tests_ui_agent_work.zig");
     _ = @import("ws.zig");
     _ = @import("rpc.zig");
     _ = @import("workspace.zig");

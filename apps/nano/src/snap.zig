@@ -76,7 +76,10 @@ pub fn main(init: std.process.Init) !void {
     if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| {
         if (a.space == null) a.space = try gpa.dupe(u8, sp);
     }
-    if (str(scene, "open")) |id| a.openChat(id, null);
+    if (str(scene, "open")) |id| {
+        a.openChat(id, null);
+        if (scene.get("toolProgress")) |v| try @import("app_progress.zig").apply(&a, id, v);
+    }
     if (str(scene, "openSettings")) |sec_key| {
         if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
         @import("view_settings.zig").open(&a);
@@ -232,6 +235,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     try applySceneExtras(&a, arena, scene);
     if (str(scene, "selectedChat")) |id| {
         a.openChat(id, null);
+        if (scene.get("toolProgress")) |v| try @import("app_progress.zig").apply(&a, id, v);
         if (scene.get("transcript")) |v| {
             var frame = (reset(arena, v) orelse return error.OutOfMemory);
             // The chat's context meter rides its transcript frame.
@@ -465,6 +469,11 @@ fn settle(t: *ui.Tester, a: *App, transcripts: ?json.ObjectMap, context_usage: ?
     if (transcripts) |all| {
         for (a.peers.items) |*p| if (p.transcript.entries.items.len == 0) if (all.get(p.id)) |v| {
             p.transcript.apply(reset(arena, v) orelse continue) catch {};
+            filled = true;
+        };
+        for (a.panels.tabs.items) |tab| if (tab.agent) |sub| if (sub.transcript.entries.items.len == 0) if (all.get(sub.doc)) |v| {
+            sub.transcript.apply(reset(arena, v) orelse continue) catch {};
+            sub.loaded = true;
             filled = true;
         };
     }
