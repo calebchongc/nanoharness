@@ -272,6 +272,27 @@ test "access map opens from the footer and shows real call input and output" {
     try testing.expect(h.a.panels.host_open);
     try testing.expectEqual(@import("app_panels.zig").TabKind.tool_access, h.a.panels.activeTab().?.kind);
     try testing.expect(h.t.hasText("3/5 tools · 6 calls"));
+    snap(&h, "access-map-copy-port");
+    try testing.expect(!h.t.hasText("Failed"));
+    try testing.expect(h.t.hasText("2× · 1 failed"));
+    var red = false;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, "Terminal")) {
+            red = std.meta.eql(text.style.color, h.t.ctx.theme.danger);
+        },
+        else => {},
+    };
+    try testing.expect(red);
+    const terminal = try textRect(&h.t, "Terminal");
+    var red_icon = false;
+    for (h.t.ctx.nodes.items) |node| if (node.content == .image and
+        node.rect.x < terminal.x and node.rect.x > terminal.x - 30 and
+        @abs(node.rect.y - terminal.y) < 10)
+    {
+        red_icon = std.meta.eql(node.content.image.tint, h.t.ctx.theme.danger);
+    };
+    try testing.expect(red_icon);
+    try testing.expect(h.a.transcript.entries.items[1].parts.items[1].is_error);
     try h.click("Terminal");
     try testing.expect(h.t.hasText("INPUT"));
     try testing.expect(h.t.hasText("OUTPUT"));
