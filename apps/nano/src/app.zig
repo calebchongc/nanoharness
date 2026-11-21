@@ -738,6 +738,7 @@ pub const App = struct {
                     queue_mod.watch(a);
                     @import("app_panels.zig").chatChanged(a);
                 }
+                @import("app_actions.zig").reconnected(a);
                 @import("engine_start.zig").connected(a);
             },
             .disconnected, .connecting => {
@@ -750,6 +751,7 @@ pub const App = struct {
                 a.w_sessions = .{};
                 a.w_doc = .{};
                 a.w_queue = .{};
+                @import("app_actions.zig").disconnected(a);
                 change_requests.disconnected(a);
                 @import("agent_updates.zig").disconnected(a);
                 // Nothing answers: start an engine, as a person would.
@@ -2099,3 +2101,220 @@ pub const App = struct {
         a.request(requests.interrupt(chat), .of(App, a, onNotice));
     }
 };
+
+const actions_restart_fixture = struct {
+    const replies_ok =
+        \\{"EngineInfo":{"deviceId":"synthetic","version":"0.2.213"},
+        \\ "EngineReady":{},"ListHarnesses":[],"ListModels":[],
+        \\ "WatchDevices":{"$items":[[]]},
+        \\ "WatchSpaces":{"$items":[[{"id":"project","deviceId":"synthetic","path":"/synthetic/project"}]]},
+        \\ "WatchChats":{"$items":[[{"id":"chat","spaceId":"project","deviceId":"synthetic","title":"Synthetic restart"}]]},
+        \\ "WatchSessions":{"$items":[[]]},
+        \\ "ListProjectActions":{"spaceId":"project","actions":[{"id":"test","name":"Test","command":"echo synthetic","icon":"test","runOnWorktreeCreate":false}]}}
+    ;
+
+    const replies_err =
+        \\{"EngineInfo":{"deviceId":"synthetic","version":"0.2.213"},
+        \\ "EngineReady":{},"ListHarnesses":[],"ListModels":[],
+        \\ "WatchDevices":{"$items":[[]]},
+        \\ "WatchSpaces":{"$items":[[{"id":"project","deviceId":"synthetic","path":"/synthetic/project"}]]},
+        \\ "WatchChats":{"$items":[[{"id":"chat","spaceId":"project","deviceId":"synthetic","title":"Synthetic restart"}]]},
+        \\ "WatchSessions":{"$items":[[]]},
+        \\ "ListProjectActions":{"$err":"invalid actions config"}}
+    ;
+
+    const replies_unsupported =
+        \\{"EngineInfo":{"deviceId":"synthetic","version":"0.2.213"},
+        \\ "EngineReady":{},"ListHarnesses":[],"ListModels":[],
+        \\ "WatchDevices":{"$items":[[]]},
+        \\ "WatchSpaces":{"$items":[[{"id":"project","deviceId":"synthetic","path":"/synthetic/project"}]]},
+        \\ "WatchChats":{"$items":[[{"id":"chat","spaceId":"project","deviceId":"synthetic","title":"Synthetic restart"}]]},
+        \\ "WatchSessions":{"$items":[[]]},
+        \\ "ListProjectActions":{"$err":"unknown method: ListProjectActions"}}
+    ;
+
+    fn setup(a: *App, scene_json: []const u8) !void {
+        a.offscreen = true;
+        a.dark = false;
+        a.settings.apply("{\"openTabs\":[\"chat\"],\"lastChatId\":\"chat\",\"uiMode\":\"developer\"}");
+        a.engine.scene = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, scene_json, .{});
+        a.engine.state = .connected;
+    }
+
+    fn drain(a: *App) void {
+        for (0..8) |_| _ = a.engine.pump();
+    }
+
+    fn actionCalls(a: *const App) !usize {
+        var count: usize = 0;
+        for (a.engine.sent.items) |frame| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, frame, .{});
+            defer parsed.deinit();
+            if (std.mem.eql(u8, parsed.value.object.get("method").?.string, "ListProjectActions")) count += 1;
+        }
+        return count;
+    }
+};
+
+test "actions restart regression (#45): connection gap defers load and reconnect recovers without manual Retry" {
+    const testing = std.testing;
+    const actions_mod = @import("app_actions.zig");
+    const fx = actions_restart_fixture;
+
+    // Control: normal connected saved-tab restoration loads actions once -> ready.
+    {
+        var a: App = .init(testing.allocator, testing.io, 1);
+        defer a.deinit();
+        try fx.setup(&a, fx.replies_ok);
+        App.stateChanged(&a, .connected);
+        fx.drain(&a);
+        try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
+        try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+    }
+
+    // Connection-gap replay: watches start on connect, disconnect happens before
+    // queued WatchSpaces/WatchChats frames deliver saved-tab restoration, then reconnect.
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    try fx.setup(&a, fx.replies_ok);
+    App.stateChanged(&a, .connected);
+
+    const saved_scene = a.engine.scene;
+    a.engine.scene = null;
+    a.engine.state = .disconnected;
+    App.stateChanged(&a, .disconnected);
+    fx.drain(&a);
+    try testing.expectEqualStrings("chat", a.selected.?);
+
+    // Reconnect and deliver fresh watches.
+    a.engine.scene = saved_scene;
+    a.engine.state = .connected;
+    App.stateChanged(&a, .connected);
+    fx.drain(&a);
+
+    // Render the real toolbar to verify (and optionally snapshot) post-reconnect UI.
+    @import("theme.zig").registerFonts();
+    var t: @import("nanoui").ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1000, .height = 560, .dark = false, .scale = 2 });
+    defer t.deinit();
+    t.settle(0.3);
+    if (std.c.getenv("NANO_ACTIONS_SNAP_DIR")) |dir| {
+        if (a.actions.status == .unavailable) {
+            if (a.actions.anchor) |anchor| {
+                t.click(anchor.x + anchor.w / 2, anchor.y + anchor.h / 2);
+                t.settle(0.3);
+            }
+        }
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/actions-reconnect.png", .{std.mem.span(dir)});
+        try t.screenshot(path);
+    }
+
+    try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
+    try testing.expect(a.actions.error_text == null);
+    try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+    try testing.expect(t.hasText("Test"));
+}
+
+test "actions restart regression (#45): in-flight failure during disconnect recovers automatically on reconnect" {
+    const testing = std.testing;
+    const actions_mod = @import("app_actions.zig");
+    const fx = actions_restart_fixture;
+
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    try fx.setup(&a, fx.replies_ok);
+    App.stateChanged(&a, .connected);
+    // Pump WatchSpaces/WatchChats (first pump), which selects the chat and starts ListProjectActions,
+    // leaving ListProjectActions in-flight in the mux before the second pump.
+    _ = a.engine.pump();
+    try testing.expectEqual(actions_mod.Status.loading, a.actions.status);
+    try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+
+    // Drop the connection while ListProjectActions is still pending.
+    for (a.engine.queued.items) |q| a.engine.gpa.free(q);
+    a.engine.queued.clearRetainingCapacity();
+    a.engine.mux.failAll("disconnected");
+    a.engine.state = .disconnected;
+    App.stateChanged(&a, .disconnected);
+    try testing.expectEqual(actions_mod.Status.unavailable, a.actions.status);
+    try testing.expectEqualStrings("disconnected", a.actions.error_text.?);
+
+    // Reconnect must recover automatically without changing chat or pressing Retry.
+    a.engine.state = .connected;
+    App.stateChanged(&a, .connected);
+    fx.drain(&a);
+    try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
+    try testing.expect(a.actions.error_text == null);
+    try testing.expectEqual(@as(usize, 1), a.actions.list.len);
+    try testing.expectEqualStrings("Test", a.actions.list[0].name);
+    try testing.expectEqual(@as(usize, 2), try fx.actionCalls(&a));
+
+    // Once ready for the same space, another connected notification does not loop or duplicate loads.
+    App.stateChanged(&a, .connected);
+    fx.drain(&a);
+    try testing.expectEqual(@as(usize, 2), try fx.actionCalls(&a));
+}
+
+test "actions restart regression (#45): real errors stay unavailable without retry loops, Retry recovers, and unknown method stays unsupported" {
+    const testing = std.testing;
+    const actions_mod = @import("app_actions.zig");
+    const fx = actions_restart_fixture;
+
+    // 1. Real server error stays `.unavailable` without automatic retry loops; manual Retry recovers.
+    {
+        var a: App = .init(testing.allocator, testing.io, 1);
+        defer a.deinit();
+        try fx.setup(&a, fx.replies_err);
+        App.stateChanged(&a, .connected);
+        fx.drain(&a);
+        try testing.expectEqual(actions_mod.Status.unavailable, a.actions.status);
+        try testing.expectEqualStrings("invalid actions config", a.actions.error_text.?);
+        try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+
+        // Repeated metadata/refresh calls must not spin up a retry loop.
+        @import("app_panels.zig").chatsArrived(&a);
+        actions_mod.refresh(&a);
+        fx.drain(&a);
+        try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+
+        // Fix the backend reply and exercise the real Retry button in the toolbar menu.
+        if (a.engine.scene) |*old| old.deinit();
+        a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, fx.replies_ok, .{});
+        @import("theme.zig").registerFonts();
+        var t: @import("nanoui").ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1000, .height = 560, .dark = false, .scale = 2 });
+        defer t.deinit();
+        t.settle(0.3);
+        const anchor = a.actions.anchor orelse return error.MissingActionsToolbar;
+        t.click(anchor.x + anchor.w / 2, anchor.y + anchor.h / 2);
+        t.settle(0.3);
+        try testing.expect(t.hasText("invalid actions config"));
+        try t.clickText("Retry");
+        t.settle(0.3);
+        fx.drain(&a);
+        t.settle(0.3);
+        try testing.expectEqual(actions_mod.Status.ready, a.actions.status);
+        try testing.expect(a.actions.error_text == null);
+        try testing.expectEqual(@as(usize, 2), try fx.actionCalls(&a));
+        try testing.expect(t.hasText("Test"));
+    }
+
+    // 2. Older engine returning "unknown method" stays `.unsupported` across reconnects.
+    {
+        var a: App = .init(testing.allocator, testing.io, 1);
+        defer a.deinit();
+        try fx.setup(&a, fx.replies_unsupported);
+        App.stateChanged(&a, .connected);
+        fx.drain(&a);
+        try testing.expectEqual(actions_mod.Status.unsupported, a.actions.status);
+        try testing.expectEqual(@as(f32, 0), @import("view_actions.zig").toolbarHeight(&a));
+        try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+
+        App.stateChanged(&a, .disconnected);
+        App.stateChanged(&a, .connected);
+        fx.drain(&a);
+        try testing.expectEqual(actions_mod.Status.unsupported, a.actions.status);
+        try testing.expectEqual(@as(usize, 1), try fx.actionCalls(&a));
+    }
+}
