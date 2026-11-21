@@ -66,8 +66,24 @@ test "project header creates an independent session in that project" {
     defer h.deinit();
     h.a.openChat("chat-a", null);
     h.t.settle(0.3);
-    const group = h.t.findText("synthetic-alpha") orelse return error.NoProjectGroup;
-    h.t.click(@import("view_sidebar.zig").widthOf(&h.a) - 26, group.y + group.h / 2);
+    var header_parent: ?u32 = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |t| if (std.mem.eql(u8, t.str, "synthetic-alpha")) {
+            header_parent = node.parent;
+            break;
+        },
+        else => {},
+    };
+    const parent = header_parent orelse return error.NoProjectGroup;
+    var add_rect: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.parent == parent and node.rect.w == 20 and node.rect.h == 20) {
+            add_rect = node.rect;
+            break;
+        }
+    }
+    const add = add_rect orelse return error.NoProjectAddButton;
+    h.t.click(add.x + add.w / 2, add.y + add.h / 2);
     h.t.settle(0.3);
     try testing.expect(h.a.selected == null);
     try testing.expectEqualStrings("project-a", h.a.space.?);
