@@ -85,6 +85,29 @@ pub fn allowedNavigation(address: []const u8) bool {
     return true;
 }
 
+/// OpenAI sign-in routes that may require WebAuthn/passkeys, which macOS
+/// WKWebView cannot complete for third-party domains without site-owned
+/// Associated Domains.
+pub fn requiresSystemBrowserForPasskeys(address: []const u8) bool {
+    const p = parts(address, true) catch return false;
+    _ = std.Uri.parse(address) catch return false;
+    if (std.ascii.eqlIgnoreCase(p.host, "auth.openai.com") or
+        std.ascii.eqlIgnoreCase(p.host, "auth0.openai.com"))
+    {
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(p.host, "chatgpt.com") or
+        std.ascii.eqlIgnoreCase(p.host, "chat.openai.com"))
+    {
+        return std.ascii.startsWithIgnoreCase(p.tail, "/auth");
+    }
+    if (std.ascii.eqlIgnoreCase(p.host, "platform.openai.com")) {
+        return std.ascii.startsWithIgnoreCase(p.tail, "/login") or
+            std.ascii.startsWithIgnoreCase(p.tail, "/auth");
+    }
+    return false;
+}
+
 pub const Range = struct { start: usize, end: usize };
 
 /// Length of a valid bare `http(s)://` URL at the start of `text`, trimming
@@ -178,4 +201,28 @@ test "browser policy rejects privileged schemes, credentials and malformed addre
     }
     try std.testing.expect(!allowedNavigation("example.com"));
     try std.testing.expect(!allowedNavigation(" https://example.com"));
+}
+
+test "passkey handoff detects OpenAI auth hosts and login paths without false positives" {
+    for ([_][]const u8{
+        "https://auth.openai.com/log-in",
+        "https://AUTH.OPENAI.COM/api/accounts/authorize?state=1",
+        "https://auth0.openai.com/u/login",
+        "https://chatgpt.com/auth/login",
+        "https://chat.openai.com/auth/login",
+        "https://platform.openai.com/login",
+    }) |url| {
+        try std.testing.expect(requiresSystemBrowserForPasskeys(url));
+    }
+    for ([_][]const u8{
+        "https://auth.openai.com.evil.invalid/log-in",
+        "https://chatgpt.com/",
+        "https://chatgpt.com/c/synthetic",
+        "https://platform.openai.com/docs",
+        "http://localhost:3000/auth/login",
+        "javascript:alert(1)",
+        "https://user:pass@auth.openai.com/log-in",
+    }) |url| {
+        try std.testing.expect(!requiresSystemBrowserForPasskeys(url));
+    }
 }

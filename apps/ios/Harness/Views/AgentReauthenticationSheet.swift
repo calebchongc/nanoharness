@@ -138,9 +138,9 @@ struct AgentReauthenticationSheet: View {
         }
     }
 
-    /// graff's ChatGPT sign-in finished here: in the in-app browser, or in Safari
-    /// for accounts whose provider blocks in-app sign-in (Google), then pasting
-    /// the address of the page that didn't load.
+    /// graff's ChatGPT sign-in finished here: in SFSafariViewController (supporting
+    /// passkeys and Google sign-in) with automatic loopback capture, or manually in
+    /// Safari by pasting the address of the page that didn't load.
     @ViewBuilder
     private func phoneSignIn(_ signIn: AgentReauthentication.BrowserSignIn) -> some View {
         if recovery.handedOff {
@@ -151,7 +151,7 @@ struct AgentReauthenticationSheet: View {
         } else {
             Text("Sign in on your iPhone")
                 .font(Theme.sans(16, weight: .medium))
-            Text("Sign in to ChatGPT here and allow access for \(hostName). Only continue with a sign-in you started.")
+            Text("Sign in to ChatGPT here with your passkey, Google, or email and allow access for \(hostName). Only continue with a sign-in you started.")
                 .foregroundStyle(Theme.textMuted)
             Button("Sign in with ChatGPT") { browsing = true }
                 .buttonStyle(.borderedProminent)
@@ -159,9 +159,9 @@ struct AgentReauthenticationSheet: View {
             if let error = recovery.redirectError {
                 Text(error).foregroundStyle(Theme.danger)
             }
-            DisclosureGroup("Signing in with Google?") {
+            DisclosureGroup("Open in Safari manually?") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Google doesn't allow sign-in inside apps. Open the page in Safari, sign in, and when Safari says it can't open the final page, copy that page's address and paste it here.")
+                    Text("If you prefer opening Safari directly, sign in there and when Safari says it can't open the final page, copy that page's address and paste it here.")
                         .foregroundStyle(Theme.textMuted)
                     Button("Open in Safari") { openURL(signIn.url) }
                     TextField("Address of the page that didn't load", text: $pasted)

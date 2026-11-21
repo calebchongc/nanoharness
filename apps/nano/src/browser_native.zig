@@ -50,9 +50,11 @@ pub const Native = struct {
         errdefer gpa.destroy(self);
         const owned_home = try gpa.dupe(u8, home);
         errdefer gpa.free(owned_home);
-        const cls = objc.defineClass(.{ .name = "HarnessNanoBrowserDelegate", .protocols = &.{ "WKNavigationDelegate", "WKURLSchemeHandler" }, .methods = &.{
+        const cls = objc.defineClass(.{ .name = "HarnessNanoBrowserDelegate", .protocols = &.{ "WKNavigationDelegate", "WKUIDelegate", "WKURLSchemeHandler" }, .methods = &.{
             .{ .name = "webView:decidePolicyForNavigationAction:decisionHandler:", .imp = &decide, .types = "v@:@@@?" },
+            .{ .name = "webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:", .imp = &createPopup, .types = "@@:@@@@" },
             .{ .name = "webView:didStartProvisionalNavigation:", .imp = &started, .types = "v@:@@" },
+            .{ .name = "webView:didCommitNavigation:", .imp = &committed, .types = "v@:@@" },
             .{ .name = "webView:didFinishNavigation:", .imp = &finished, .types = "v@:@@" },
             .{ .name = "webView:didFailNavigation:withError:", .imp = &failed, .types = "v@:@@@" },
             .{ .name = "webView:didFailProvisionalNavigation:withError:", .imp = &failed, .types = "v@:@@@" },
@@ -69,6 +71,7 @@ pub const Native = struct {
         self.* = .{ .gpa = gpa, .io = io, .home = owned_home, .view = view, .delegate = delegate, .events = events };
         objc.setZig(delegate, self);
         objc.msg(void, view, "setNavigationDelegate:", .{delegate});
+        objc.msg(void, view, "setUIDelegate:", .{delegate});
         objc.msg(void, view, "setAllowsBackForwardNavigationGestures:", .{objc.YES});
         objc.msg(void, view, "setHidden:", .{objc.YES});
         return self;
@@ -78,6 +81,7 @@ pub const Native = struct {
         // WebKit may still deliver a cancellation after removeFromSuperview.
         objc.setZig(s.delegate, null);
         objc.msg(void, s.view, "setNavigationDelegate:", .{@as(?objc.Object, null)});
+        objc.msg(void, s.view, "setUIDelegate:", .{@as(?objc.Object, null)});
         objc.msg(void, s.view, "stopLoading", .{});
         objc.msg(void, s.view, "removeFromSuperview", .{});
         objc.release(s.view);
@@ -189,10 +193,28 @@ fn decide(delegate: objc.Object, _: objc.SEL, _: objc.Object, action: objc.Objec
     } else handler.invoke(handler, if (allowed) 1 else 0);
 }
 
+fn createPopup(delegate: objc.Object, _: objc.SEL, _: objc.Object, _: objc.Object, action: objc.Object, _: objc.Object) callconv(.c) ?objc.Object {
+    const s = objc.getZig(Native, delegate) orelse return null;
+    if (s.saved_view != null) return null;
+    const request = objc.msg(objc.Object, action, "request", .{});
+    const url = objc.msg(?objc.Object, request, "URL", .{}) orelse return null;
+    const address = objc.fromNSString(objc.msg(?objc.Object, url, "absoluteString", .{}));
+    const frame = objc.msg(?objc.Object, action, "targetFrame", .{});
+    if (frame == null and web.allowedNavigation(address)) {
+        _ = objc.msg(?objc.Object, s.view, "loadRequest:", .{request});
+    }
+    return null;
+}
+
 fn started(delegate: objc.Object, _: objc.SEL, _: objc.Object, _: ?objc.Object) callconv(.c) void {
     const s = objc.getZig(Native, delegate) orelse return;
     s.loading = true;
     s.error_len = 0;
+    s.notify();
+}
+
+fn committed(delegate: objc.Object, _: objc.SEL, _: objc.Object, _: ?objc.Object) callconv(.c) void {
+    const s = objc.getZig(Native, delegate) orelse return;
     s.notify();
 }
 

@@ -42,8 +42,28 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
         ui.key(c, c.print("browser-copy-{x}-{s}", .{ @intFromPtr(b), b.address.text() }));
         if (kit.copyButton(c, k, &a.view.copy_feedback, .{ .size = 24, .icon = 13, .disabled = b.address.text().len == 0, .tip = .{ .text = "Copy address" } })) c.clipboard.write(c.clipboard.ctx, b.address.text());
         if (b.saved_view == null and b.url.len > 0 and @import("browser_url.zig").allowedNavigation(b.url)) {
-            if (kit.iconButton(c, k, .@"arrow-up-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Open in browser" } })) _ = @import("nanoui").shell.openUrl(b.url);
+            if (kit.iconButton(c, k, .@"arrow-up-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Open in browser" } })) _ = @import("app_browser.zig").open_external_url(b.url);
         }
+    }
+    if (b.saved_view == null and b.url.len > 0 and @import("browser_url.zig").requiresSystemBrowserForPasskeys(b.url)) {
+        ui.key(c, "browser-passkey-handoff");
+        const bar = ui.div(c).row().wFull().px(12).py(8).gap(10).itemsCenter().bg(k.ink(0.05)).border(k.border).borderW(1);
+        defer bar.end();
+        @import("icons.zig").icon(c, .globe, 15, k.muted, 0);
+        {
+            const host_w = if (a.view.chrome.host_width > 0) a.view.chrome.host_width else 520;
+            const avail = @max(140, host_w - 190);
+            const msg = ui.div(c).column().grow().w(0).gap(2);
+            defer msg.end();
+            kit.ellipsisText(c, "Passkeys aren't supported in the in-app browser.", .{ .size = 12, .line_height = 16, .weight = .medium, .color = k.text }, avail);
+            kit.ellipsisText(c, "Finish OpenAI sign-in in your system browser.", .{ .size = 11.5, .line_height = 15, .color = k.muted }, avail);
+        }
+        ui.key(c, "browser-passkey-open-external");
+        const open_btn = ui.div(c).row().px(10).py(5).gap(5).itemsCenter().rounded(7).bg(k.solid).hover(k.solid.alpha(0.88)).control();
+        defer open_btn.end();
+        ui.text(c, "Open in browser", .{ .size = 12, .line_height = 16, .weight = .medium, .color = k.on_solid });
+        @import("icons.zig").icon(c, .@"arrow-up-right", 12, k.on_solid, 0);
+        if (open_btn.clicked()) _ = @import("app_browser.zig").open_external_url(b.url);
     }
     if (b.notice.text().len > 0) {
         const notice = ui.div(c).column().wFull().px(12).py(8);
