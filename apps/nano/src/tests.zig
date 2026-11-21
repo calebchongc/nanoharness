@@ -1,5 +1,6 @@
 //! Every test: `zig build test`.
 test {
+    _ = @import("tests_ui_agent_work.zig");
     _ = @import("ws.zig");
     _ = @import("rpc.zig");
     _ = @import("workspace.zig");
@@ -156,6 +157,7 @@ test {
     _ = @import("tests_color_emoji.zig");
     _ = @import("tests_image_orientation.zig");
     _ = @import("tests_ui_feedback.zig");
+    _ = @import("tests_ui_copy_port.zig");
     _ = @import("tests_ui_glass.zig");
     _ = @import("surface_palette.zig");
     _ = @import("tests_ui_surfaces.zig");
@@ -180,6 +182,7 @@ test {
     _ = @import("tests_project_folder_retention.zig");
     _ = @import("tests_pending_progress_retention.zig");
     _ = @import("tests_pending_feedback_lifecycle.zig");
+    _ = @import("tests_ui_attachment_drop.zig");
     _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");

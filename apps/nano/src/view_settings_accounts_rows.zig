@@ -82,6 +82,8 @@ pub const Ghost = struct {
     label: []const u8,
     icon: ?icons.Name = null,
     size: f32 = 12,
+    /// Reserve a copy action's original hit target during confirmation.
+    width: ?f32 = null,
     dim: bool = false,
     /// Its `text_tooltip`, after GPUI's default wait.
     tip: []const u8 = "",
@@ -91,6 +93,7 @@ pub const Ghost = struct {
 /// pointer. True when clicked.
 pub fn ghost(c: *ui.Context, k: theme.Colors, g: Ghost) bool {
     var b = ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06));
+    if (g.width) |w| b = b.w(w);
     if (g.dim) b = b.opacity(0.5);
     b = tip.on(b, k, .{ .text = g.tip });
     defer b.end();
@@ -101,7 +104,7 @@ pub fn ghost(c: *ui.Context, k: theme.Colors, g: Ghost) bool {
 }
 
 pub fn ghostW(c: *ui.Context, g: Ghost) f32 {
-    return 20 + (if (g.icon != null) @as(f32, 16 + 6) else 0) + c.text.width(g.label, .{ .size = g.size });
+    return g.width orelse (20 + (if (g.icon != null) @as(f32, 16 + 6) else 0) + c.text.width(g.label, .{ .size = g.size }));
 }
 
 /// `btn_primary` made small (`px(8) py(4) rounded(6)` at 11.5).

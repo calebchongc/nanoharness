@@ -18,14 +18,19 @@ const Feed = struct {
     retry_at: f64 = 0,
     pending_retry_at: f64 = 0,
     since: ?i64 = null,
+    tails: @import("app_tool_progress.zig").State,
 
     fn progress(f: *Feed, id: u64, reply: rpc.Reply) void {
         if (f.watch != id) return;
         switch (reply) {
-            .item => |value| f.since = buildWaitSince(value),
+            .item => |value| {
+                f.since = buildWaitSince(value);
+                f.tails.replace(f.app, value) catch {};
+            },
             .done, .err => {
                 f.watch = null;
                 f.since = null;
+                f.tails.clear(f.app);
                 f.retry_at = f.app.now + retry_s;
             },
             .ok => {},
@@ -47,7 +52,10 @@ const Feed = struct {
     }
 
     fn cancel(f: *Feed) void {
-        if (f.watch) |id| f.app.engine.cancel(id);
+        if (f.watch) |id| {
+            f.app.engine.cancel(id);
+            f.tails.clear(f.app);
+        }
         if (f.pending_watch) |id| f.app.engine.cancel(id);
         f.watch = null;
         f.pending_watch = null;
@@ -126,6 +134,7 @@ pub fn tick(a: *App, now: f64) ?f64 {
         if (!keep) {
             f.cancel();
             @import("app_send_feedback.zig").clearRemote(a, f.chat);
+            f.tails.deinit();
             a.gpa.free(f.chat);
             a.gpa.destroy(f);
             _ = a.live_progress.feeds.swapRemove(i);
@@ -141,8 +150,9 @@ pub fn tick(a: *App, now: f64) ?f64 {
             a.gpa.destroy(f);
             continue;
         };
-        f.* = .{ .app = a, .chat = chat };
+        f.* = .{ .app = a, .chat = chat, .tails = .init(a.gpa) };
         a.live_progress.feeds.append(a.gpa, f) catch {
+            f.tails.deinit();
             a.gpa.free(chat);
             a.gpa.destroy(f);
         };
@@ -180,6 +190,7 @@ pub fn tick(a: *App, now: f64) ?f64 {
 pub fn deinit(a: *App) void {
     for (a.live_progress.feeds.items) |f| {
         f.cancel();
+        f.tails.deinit();
         a.gpa.free(f.chat);
         a.gpa.destroy(f);
     }
@@ -202,4 +213,55 @@ test "restore waiting protocol uses the same data vectors as the Rust host (#606
             return err;
         };
     }
+}
+
+const empty: @import("app_tool_progress.zig").State = .init(std.heap.page_allocator);
+
+/// Same feed as build-slot waits, keyed by parent chat (including visible peers).
+pub fn forChat(a: *const App, chat: ?[]const u8) *const @import("app_tool_progress.zig").State {
+    const id = chat orelse return &empty;
+    for (a.live_progress.feeds.items) |f| if (std.mem.eql(u8, f.chat, id)) return &f.tails;
+    return &empty;
+}
+
+/// Apply a synthetic or wire snapshot without installing a second subscription.
+pub fn apply(a: *App, chat: []const u8, value: std.json.Value) !void {
+    for (a.live_progress.feeds.items) |f| if (std.mem.eql(u8, f.chat, chat)) {
+        f.since = buildWaitSince(value);
+        return f.tails.replace(a, value);
+    };
+    const f = try a.gpa.create(Feed);
+    errdefer a.gpa.destroy(f);
+    const owned = try a.gpa.dupe(u8, chat);
+    errdefer a.gpa.free(owned);
+    f.* = .{ .app = a, .chat = owned, .since = buildWaitSince(value), .tails = .init(a.gpa) };
+    errdefer f.tails.deinit();
+    try f.tails.replace(a, value);
+    try a.live_progress.feeds.append(a.gpa, f);
+}
+
+test "809 one existing progress watch per visible chat keeps snapshots isolated and clears on disconnect" {
+    const testing = std.testing;
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.openChat("synthetic-parent", null);
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"WatchToolProgress\":{}}", .{});
+    a.engine.state = .connected;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"items":[{"toolId":"agent","output":"Synthetic tail","state":"running"}]}
+    , .{});
+    defer parsed.deinit();
+    try apply(&a, "synthetic-parent", parsed.value);
+    try apply(&a, "other-parent", parsed.value);
+    try testing.expect(forChat(&a, "missing").find("agent") == null);
+    _ = tick(&a, 0);
+    _ = tick(&a, 0.5);
+    try testing.expectEqual(@as(usize, 1), a.engine.sent.items.len);
+    try testing.expectEqual(@as(usize, 1), a.live_progress.feeds.items.len);
+    try testing.expectEqualStrings("Synthetic tail", forChat(&a, "synthetic-parent").find("agent").?.output);
+    try testing.expect(forChat(&a, "other-parent").find("agent") == null);
+    a.engine.state = .disconnected;
+    _ = tick(&a, 1);
+    try testing.expect(forChat(&a, "synthetic-parent").find("agent") == null);
 }

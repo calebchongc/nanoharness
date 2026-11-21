@@ -294,6 +294,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_sidebar_menus.zig").menus(c, a, popup);
     @import("view_picker.zig").popover(c, a, popup);
     @import("view_account_usage.zig").overlay(c, a, popup);
+    @import("view_agent_work.zig").overlay(c, a, popup);
     @import("view_context.zig").overlay(c, a, popup);
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
@@ -332,7 +333,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_usage.open or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
+        v.updates_popover or v.star_menu or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -377,6 +378,7 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel = panel_chrome.bodyFor(c, k, zen).grow().wFull().h(0);
     defer panel.end();
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
+    @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
     if (c.input.pressed and panel.interaction().hovered) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     if (strip.rendering.selectedBounds(a)) |selected| panel_chrome.join(c, k, a.view.chrome.chat_width, selected.left, selected.right);
     // Decorative shoulders change node count as the sidebar slides; the
@@ -496,6 +498,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
             const pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
             defer pane.end();
             @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
+            @import("view_attachment_drop.zig").shade(c, a, k, pane.index);
             if (c.input.pressed and pane.interaction().hovered) a.view.strip.focused = .{ .chat = ix };
             if (ix == s.focus) {
                 focused(c, a, k);

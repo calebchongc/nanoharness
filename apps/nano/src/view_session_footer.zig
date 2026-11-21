@@ -71,6 +71,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         session(c, a, k, slot_w);
     }
     @import("view_account_usage.zig").indicator(c, a, k);
+    @import("view_agent_work.zig").indicator(c, a, k);
     @import("view_context.zig").indicator(c, a, k);
 }
 

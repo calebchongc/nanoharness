@@ -37,7 +37,10 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
             b.editing = c.focus == id;
             if (r.submitted) b.navigate(b.address.text());
         }
-        if (kit.iconButton(c, k, .copy, .{ .size = 24, .icon = 13, .tip = .{ .text = "Copy address" } }) and b.address.text().len > 0) c.clipboard.write(c.clipboard.ctx, b.address.text());
+        // Confirmation belongs to this browser/address, not another tab that
+        // happens to occupy the same chrome slot.
+        ui.key(c, c.print("browser-copy-{x}-{s}", .{ @intFromPtr(b), b.address.text() }));
+        if (kit.copyButton(c, k, &a.view.copy_feedback, .{ .size = 24, .icon = 13, .disabled = b.address.text().len == 0, .tip = .{ .text = "Copy address" } })) c.clipboard.write(c.clipboard.ctx, b.address.text());
         if (b.saved_view == null and b.url.len > 0 and @import("browser_url.zig").allowedNavigation(b.url)) {
             if (kit.iconButton(c, k, .@"arrow-up-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Open in browser" } })) _ = @import("nanoui").shell.openUrl(b.url);
         }
