@@ -989,9 +989,11 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
         }
     }
 
-    // 3. Moving onto the active narrow slot's folder chip and clicking opens `.folder`,
+    // 3. Moving onto an active narrow slot's folder chip and clicking opens `.folder`,
     //    and clicking the compact computer glyph beside it switches directly to `.device`.
-    h.t.resize(840 + caption_trailing, 620);
+    //    Pane 5 at 900pt stays in the compact dual-glyph band on both macOS (~108pt) and Windows (~97pt).
+    h.a.focusPane(5);
+    h.t.resize(900 + caption_trailing, 620);
     h.t.settle(2);
     const initial_folder = h.a.view.strip.active_folder_anchor orelse return error.MissingActiveFolderAnchor;
     h.t.moveTo(initial_folder.x + 6, initial_folder.y + initial_folder.h / 2);
@@ -1136,7 +1138,7 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     defer h.deinit();
     h.a.settings.applyUiMode(.zen);
     // Split chats + open the blank side panel ("New tab" surface picker) at a narrow window width
-    // so host_width < 280pt and columns falls back to shared slots.
+    // so host_width < 280pt and edge controls squeeze pane 0 (macOS) or pane 3 (Windows) below slot_min.
     h.a.splitPane(.horizontal);
     h.a.openChat("b", "remote-project");
     h.a.splitPane(.horizontal);
@@ -1164,7 +1166,17 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
         }
     }
 
-    // 2. Topbar `+` (`instrument-new-tab`) sits cleanly left of `Toggle side panel` with zero overlap.
+    // 2. Topbar `+` (`instrument-new-tab`) sits cleanly left of `Toggle side panel` with zero overlap,
+    //    and pane 2's tab stays aligned over its column below (both edges on macOS; left edge on Windows
+    //    where trailing caption buttons share panes 2..3).
+    const active_tab = h.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
+    const pane2_w = chrome.paneSpanIn(h.a.view.chrome.chat_width, h.a.tabs.layout().?.shares.items[2], 3, true, chrome.zen_gutter);
+    const pane2_right = host_left - chrome.zen_gutter;
+    const pane2_left = pane2_right - pane2_w;
+    try testing.expectApproxEqAbs(pane2_left, active_tab.x, 1.5);
+    if (@import("window_chrome.zig").trailing == 0) {
+        try testing.expectApproxEqAbs(pane2_right, active_tab.x + active_tab.w, 1.5);
+    }
     var plus_rect: ?ui.Rect = null;
     var toggle_rect: ?ui.Rect = null;
     for (h.t.ctx.a11y_items.items) |item| {
