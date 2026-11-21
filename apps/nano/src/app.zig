@@ -719,7 +719,7 @@ pub const App = struct {
         a.ensureModels(a.target().harness);
     }
 
-    fn stateChanged(ctx: ?*anyopaque, s: engine_mod.State) void {
+    pub fn stateChanged(ctx: ?*anyopaque, s: engine_mod.State) void {
         const a: *App = @ptrCast(@alignCast(ctx.?));
         switch (s) {
             .connected => {
@@ -738,6 +738,7 @@ pub const App = struct {
                     queue_mod.watch(a);
                     @import("app_panels.zig").chatChanged(a);
                 }
+                @import("app_actions.zig").reconnected(a);
                 @import("engine_start.zig").connected(a);
             },
             .disconnected, .connecting => {
@@ -752,6 +753,7 @@ pub const App = struct {
                 a.w_queue = .{};
                 change_requests.disconnected(a);
                 @import("agent_updates.zig").disconnected(a);
+                @import("app_actions.zig").disconnected(a);
                 // Nothing answers: start an engine, as a person would.
                 if (s == .disconnected) @import("engine_start.zig").disconnected(a);
             },
