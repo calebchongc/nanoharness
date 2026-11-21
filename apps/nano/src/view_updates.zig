@@ -913,6 +913,14 @@ fn deviceLabel(a: *const App, id: []const u8) []const u8 {
     return id;
 }
 
+fn graffUpdateActionable(a: *const App) bool {
+    return graffVisible(a) and (a.updates.graff_kind != .updated or a.updates.graff_updating_manual);
+}
+
+fn agentUpdateActionable(st: agent_updates.Status) bool {
+    return st.showUpdateNotice() and st.phase != .updated;
+}
+
 pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const UnifiedRow {
     var out: std.ArrayList(UnifiedRow) = .empty;
 
@@ -955,7 +963,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     }
 
     // 2. Managed Codegraff engine update (`engine:graff`).
-    if (graffVisible(a)) {
+    if (graffUpdateActionable(a)) {
         if (a.updates.graffTo()) |to| {
             const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
             const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
@@ -987,7 +995,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
     for (a.agent_updates.devices.items) |w| {
         var any_for_dev = false;
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             const tok = skipToken(alloc, st);
             const active = st.phase.isActive();
@@ -1002,7 +1010,7 @@ pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const Unifi
         const connected = w.online and w.connected;
         const dev_name = deviceLabel(a, w.device_id);
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             const tok = skipToken(alloc, st);
             const active = st.phase.isActive();
@@ -1106,7 +1114,7 @@ pub fn topbarUpdatesCount(a: *const App) usize {
         if (!dismissed and !skipped) count += 1;
     }
 
-    if (graffVisible(a)) {
+    if (graffUpdateActionable(a)) {
         if (a.updates.graffTo()) |to| {
             const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
             const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
@@ -1116,7 +1124,7 @@ pub fn topbarUpdatesCount(a: *const App) usize {
 
     for (a.agent_updates.devices.items) |w| {
         for (w.statuses) |st| {
-            if (!st.showUpdateNotice()) continue;
+            if (!agentUpdateActionable(st)) continue;
             var id_buf: [192]u8 = undefined;
             const row_id = std.fmt.bufPrint(&id_buf, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
             var tok_buf: [256]u8 = undefined;
