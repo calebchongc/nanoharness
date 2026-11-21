@@ -139,7 +139,7 @@ pub fn tabWidth(width: f32, count: usize) f32 {
 
 pub fn sharedSlotRoom(width: f32, left: f32, right: f32, count: usize) f32 {
     const n: f32 = @floatFromInt(@max(count, 1));
-    return (width - left - right - 24 - n * 2) / n;
+    return @max(0, (width - left - right - 24 - n * 4) / n);
 }
 
 /// Slot widths align to columns only if every slot fits. Expanded or stacked

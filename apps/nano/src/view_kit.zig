@@ -349,6 +349,7 @@ pub fn glyphText(c: *ui.Context, s: []const u8, st: ui.TextStyle) void {
 /// `s` in one line at most `max_w` wide, cut with an ellipsis (the tab
 /// list's titles).
 pub fn ellipsisText(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) void {
+    if (max_w <= 0) return;
     if (c.text.width(s, st) <= max_w) return ui.text(c, s, st);
     // `truncate_line`: the cut's trailing blanks and ASCII punctuation go.
     const kept = std.mem.trimEnd(u8, s[0..truncateAt(c, s, st, max_w)], " \t\n\r!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~");
