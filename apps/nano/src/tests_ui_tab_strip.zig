@@ -944,11 +944,11 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
     h.a.splitPane(.horizontal);
     h.a.openChat("b", "p2");
     h.a.splitPane(.horizontal);
-    h.a.openChat("c", "p3");
+    h.a.select(null, "p1");
     h.a.splitPane(.horizontal);
     h.a.openChat("d", "p4");
     h.a.splitPane(.horizontal);
-    h.a.select(null, "p1");
+    h.a.openChat("c", "p3");
     h.a.focusPane(1);
     h.a.view.sidebar_open = false;
     h.a.view.sidebar_width = 0;
@@ -991,8 +991,8 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
 
     // 3. Moving onto an active narrow slot's folder chip and clicking opens `.folder`,
     //    and clicking the compact computer glyph beside it switches directly to `.device`.
-    //    Pane 5 at 900pt stays in the compact dual-glyph band on both macOS (~108pt) and Windows (~97pt).
-    h.a.focusPane(5);
+    //    Interior pane 3 at 900pt stays un-squeezed by edge controls on both macOS and Windows.
+    h.a.focusPane(3);
     h.t.resize(900 + caption_trailing, 620);
     h.t.settle(2);
     const initial_folder = h.a.view.strip.active_folder_anchor orelse return error.MissingActiveFolderAnchor;
