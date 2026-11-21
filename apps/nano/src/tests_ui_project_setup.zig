@@ -321,3 +321,63 @@ test "an unavailable explicit computer cannot silently browse on the local viewe
     try testing.expectEqual(@as(usize, 0), try count(&h.a, "ListFolders"));
     try testing.expectEqual(@as(usize, 0), try count(&h.a, "Mutate"));
 }
+
+fn snapProjectSetup(h: *Harness, name: []const u8) !void {
+    const dir = std.c.getenv("NANO_PROJECT_SETUP_SNAP_DIR") orelse return;
+    var buf: [1024]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+    try h.t.screenshot(path);
+}
+
+test "New project stays compact and keeps Change and Create project aligned after picking a folder" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.init(dark);
+        defer h.deinit();
+        var devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"local","name":"Studio MacBook Pro (2)"},{"id":"remote","name":"Build box"}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        try scene(&h.a,
+            \\{"ListDrives":{"drives":[{"name":"Projects volume","path":"/synthetic/projects"}]},
+            \\ "ListFolders":{"$seq":[
+            \\  {"path":"/synthetic/home","entries":[{"name":"synthetic-workspace","isDir":true,"isRepo":true},{"name":"docs","isDir":true,"isRepo":false}]},
+            \\  {"path":"/work","entries":[{"name":"synthetic-workspace","isDir":true,"isRepo":true},{"name":"docs","isDir":true,"isRepo":false}]},
+            \\  {"path":"/work/synthetic-workspace","entries":[{"name":"apps","isDir":true,"isRepo":false},{"name":"crates","isDir":true,"isRepo":false}]}]}}
+        );
+        h.a.addFolder();
+        h.t.settle(1);
+        h.t.typeText("synthetic-workspace");
+        h.t.settle(0.2);
+        if (!dark) try snapProjectSetup(&h, "project-setup-empty");
+
+        try h.t.clickText("Add folder…");
+        pump(&h);
+        pump(&h);
+        if (!dark) try snapProjectSetup(&h, "project-setup-browser");
+        try h.t.clickText("synthetic-workspace");
+        pump(&h);
+        try h.t.clickText("Use this folder");
+        h.t.settle(1);
+        if (!dark) try snapProjectSetup(&h, "project-setup-selected");
+
+        const path_rect = h.t.findText("/work/synthetic-workspace") orelse return error.MissingSelectedPath;
+        const dev_rect = h.t.findText("Studio MacBook Pro (2)") orelse return error.MissingDeviceName;
+        const change_rect = h.t.findText("Change…") orelse return error.MissingChangeButton;
+        const hint_rect = h.t.findText("New chats will work in this folder.") orelse return error.MissingFolderHint;
+        const cancel_rect = h.t.findText("Cancel") orelse return error.MissingCancelButton;
+        const create_rect = h.t.findText("Create project") orelse return error.MissingCreateButton;
+
+        // Device label must stay on one compact line right under the path (not wrapped 1 char per line).
+        try testing.expect(dev_rect.h <= 24);
+        try testing.expect(dev_rect.y - (path_rect.y + path_rect.h) <= 10);
+        // Change… must sit vertically aligned with the compact selected-folder row.
+        try testing.expect(@abs((change_rect.y + change_rect.h / 2) - (path_rect.y + (dev_rect.y + dev_rect.h - path_rect.y) / 2)) <= 16);
+        // Helper text and footer buttons must remain close below without vertical blowup or clipping.
+        try testing.expect(hint_rect.y - (dev_rect.y + dev_rect.h) <= 32);
+        try testing.expectApproxEqAbs(cancel_rect.y, create_rect.y, 4);
+        try testing.expect(create_rect.y + create_rect.h <= 700);
+        try testing.expect(create_rect.x + create_rect.w <= 830);
+    }
+}
