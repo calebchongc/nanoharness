@@ -435,7 +435,7 @@ test "desktop parity settings default to project groups and clamp saved sidebar 
     try testing.expectEqualStrings("Devices and data", settings.Section.archived.group());
 }
 
-test "desktop parity project navigation reuses its workspace and keeps peer conversations" {
+test "desktop parity project navigation opens independent workspaces without silent grouping" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -456,7 +456,7 @@ test "desktop parity project navigation reuses its workspace and keeps peer conv
     const palette = @import("view_palette.zig");
     palette.activate(&h.a, .{ .chat = "other" });
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expect(h.a.tabs.layout() != null);
+    try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("other", h.a.selected.?);
     h.t.settle(1);
     const project_group = h.t.findText("notes") orelse return error.NoProjectGroup;
@@ -469,13 +469,12 @@ test "desktop parity project navigation reuses its workspace and keeps peer conv
     };
     try testing.expect(other_workspace_row);
     palette.activate(&h.a, .{ .chat = "second" });
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("second", h.a.selected.?);
-    const split = h.a.tabs.layout().?;
-    try testing.expectEqual(@as(usize, 2), split.groups[split.focus].count());
     palette.activate(&h.a, .{ .chat = "first" });
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
     try testing.expectEqualStrings("first", h.a.selected.?);
 }
 

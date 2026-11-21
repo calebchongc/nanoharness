@@ -1018,9 +1018,9 @@ pub const App = struct {
         a.select(chat_id, space_id);
     }
 
-    /// Navigation reuses an open conversation, then its project's workspace.
-    /// Conversations in that workspace share panel tabs; another project's
-    /// workspace keeps its own panels and drafts (`open_chat_preserving_tabs`).
+    /// Navigation reuses an open conversation or opens it in an independent
+    /// top-level workspace without silently grouping it into an existing pane
+    /// (`open_chat_preserving_tabs`).
     pub fn openChatInTab(a: *App, chat_id: []const u8) void {
         if (a.findChat(chat_id) == null) return;
         a.view.settings_open = false;
@@ -1036,29 +1036,18 @@ pub const App = struct {
         }
         const chat = a.findChat(chat_id).?;
         const project = chat.space_id;
-        // Reading history is not a project-pane replacement. Keep the live
-        // workspace (including its split and drafts) visible in its own tab.
-        if (chat.archived) {
-            a.newWorkspaceSession();
-            a.tabs.setCurrent(chat_id);
-            a.select(chat_id, project);
-            return;
-        }
-        const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
-            a.tabs.active
-        else for (0..a.tabs.items.items.len) |ix| {
-            if (sameProject(a.workspaceProject(ix), project)) break ix;
-        } else null;
-        if (destination) |ix| {
-            a.showTab(ix);
-            a.tabs.isolateWorkspace() catch return;
-            a.addChatTab(true);
-        } else {
-            a.newWorkspaceSession();
-            a.tabs.isolateWorkspace() catch return;
-        }
+        if (drafts.canvas(a)) |d| {
+            const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
+            a.tabs.park(a.tabs.active, focus_pane, d);
+        } else |_| {}
+        a.tabs.appendTab();
+        a.view.strip.focused = .{ .chat = 0 };
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, project);
+        a.view.focus_composer = true;
     }
 
     /// The workspace's selected conversation or parked draft owns its project.
@@ -1069,10 +1058,6 @@ pub const App = struct {
         if (a.tabs.drafts.items[ix]) |d| return if (d.no_project) null else d.space;
         if (ix == a.tabs.active) if (a.newChatSpace()) |space| return space.id;
         return null;
-    }
-
-    fn sameProject(left: ?[]const u8, right: ?[]const u8) bool {
-        return if (left) |id| (if (right) |other| std.mem.eql(u8, id, other) else false) else right == null;
     }
 
     /// `/resume`'s choice: `chat_id` in the current tab (or pane), wherever

@@ -74,7 +74,7 @@ test "desktop issues file drop focuses the inactive pane and keeps its remote ow
     const url = try fileUrl(&tmp, testing.allocator);
     defer testing.allocator.free(url);
     h.a.splitPane(.horizontal);
-    h.a.openChatInTab("chat-b");
+    h.a.openChat("chat-b", null);
     h.a.focusPane(0);
     h.t.settle(1);
     h.t.drop(1000, 600, &.{url}, "");

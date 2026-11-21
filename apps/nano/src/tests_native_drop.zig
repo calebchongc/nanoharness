@@ -26,7 +26,7 @@ const Harness = struct {
         h.a.openChat("drop-a", null);
         if (split) {
             h.a.splitPane(.horizontal);
-            h.a.openChatInTab("drop-b");
+            h.a.openChat("drop-b", null);
             h.a.focusPane(0);
         }
         try h.t.init(h.a.gpa, .init(&h.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
@@ -85,7 +85,7 @@ test "native drop rejects a chat replaced during hover instead of retargeting" {
     defer testing.allocator.free(url);
     h.hover();
     h.a.focusPane(1);
-    h.a.openChatInTab("drop-c");
+    h.a.openChat("drop-c", null);
     h.a.focusPane(0);
     h.hover();
     h.release(&.{url});
@@ -141,7 +141,7 @@ test "native drop pending release cancels after chat replacement or closed pane"
         h.t.drop(1000, 600, &.{url}, "");
         try testing.expect(h.a.file_drop.pending != null);
         h.a.focusPane(1);
-        if (close) h.a.closePanel() else h.a.openChatInTab("drop-c");
+        if (close) h.a.closePanel() else h.a.openChat("drop-c", null);
         @import("view_attachment_drop.zig").prepare(&h.a);
         try testing.expectEqual(@as(usize, 0), h.a.attachments.items.items.len);
         try testing.expect(h.a.file_drop.pending == null);

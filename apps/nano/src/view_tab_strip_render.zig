@@ -133,6 +133,17 @@ fn workspacePaneCount(a: *const App, ws: usize) usize {
     return 1;
 }
 
+fn workspaceLocalTabCount(a: *const App, ws: usize) usize {
+    if (ws < a.tabs.splits.items.len) if (a.tabs.splits.items[ws]) |s| return s.groups[s.focus].count();
+    return 1;
+}
+
+fn singleBarGroup(a: *const App) ?*const tabs.PanelTabs {
+    if (a.tabs.items.items.len > 1) return null;
+    const s = a.tabs.layout() orelse return null;
+    return if (s.groups[s.focus].count() > 1) &s.groups[s.focus] else null;
+}
+
 fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w: f32) void {
     ui.key(c, c.print("top-workspace-tab-{d}", .{ws}));
     const cid = workspaceChatId(a, ws);
@@ -428,7 +439,7 @@ pub fn selectedBounds(a: *const App) ?Selected {
     if (a.settings.uiMode() == .zen) return null;
     if (a.view.settings_open) return null;
     if (strip.count(a) != 1) return null;
-    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
+    const group = singleBarGroup(a);
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     if (n == 0) return null;
     const selected = if (group) |g| g.active else a.tabs.active;
@@ -457,7 +468,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const show_dev = !settings_open and showDevicePicker(a);
     const dev_room: f32 = if (show_dev) chrome.device_room else 0;
     const right_extra = singleRightExtra(a, settings_open);
-    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
+    const group = singleBarGroup(a);
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
     const lane_x = if (zen) zenTabStartX(a) else a.view.sidebar_width + left;
@@ -487,6 +498,9 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     for (win_start..win_end) |ix| {
         const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else workspaceChatId(a, ix);
         const panes_n = if (group != null) @as(usize, 1) else workspacePaneCount(a, ix);
+        const local_tabs_n = if (group != null) @as(usize, 1) else workspaceLocalTabCount(a, ix);
+        const show_local_menu = !settings_open and group == null and ix == selected and local_tabs_n > 1;
+        const local_menu_room: f32 = if (show_local_menu) 34 else 0;
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         const pill_w: f32 = if (zen and n == 1)
@@ -520,24 +534,48 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
             if (zen and panes_n == 1) {
-                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = .medium, .color = if (ix == selected) k.text else k.muted }, @max(0, pill_w - 50));
+                kit.ellipsisText(c, label, .{ .size = 12.5, .line_height = 16, .weight = .medium, .color = if (ix == selected) k.text else k.muted }, @max(0, pill_w - 50 - local_menu_room));
             } else {
-                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, @max(0, pill_w - 58));
+                const text_w = @max(0, pill_w - 58 - local_menu_room);
+                kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, text_w);
                 if (panes_n > 1) {
                     const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                     defer meta.end();
-                    kit.ellipsisText(c, c.print("{d} split panes", .{panes_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, pill_w - 58));
+                    kit.ellipsisText(c, c.print("{d} split panes", .{panes_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, text_w);
+                } else if (local_tabs_n > 1) {
+                    const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
+                    defer meta.end();
+                    kit.ellipsisText(c, c.print("{d} tabs", .{local_tabs_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, text_w);
                 } else if (ch) |chat_row| {
                     const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                     defer meta.end();
-                    if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (pill_w - 58) * 0.45));
+                    if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, text_w * 0.45));
                     const mark = icons.harnessMark(chat_row.harness orelse "graff");
                     icons.icon(c, mark.name, 12, mark.brand orelse k.muted, 0);
-                    kit.ellipsisText(c, chat_row.model orelse chat_row.harness orelse "Graff", .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (pill_w - 58) * 0.5 - 15));
+                    kit.ellipsisText(c, chat_row.model orelse chat_row.harness orelse "Graff", .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, text_w * 0.5 - 15));
                 }
             }
         }
         var handled = false;
+        if (show_local_menu) {
+            ui.key(c, "panel-tab-group-menu");
+            const pane: usize = if (a.tabs.layout()) |s| s.focus else 0;
+            const target: strip.Panel = .{ .chat = pane };
+            var badge = ui.div(c).row().h(18).minW(24).px(4).gap(2).center().rounded(4).bg(k.ink(if (k.dark) 0.10 else 0.08)).hover(k.ink(0.14)).control();
+            badge = tip.on(badge, k, .{ .text = c.print("{d} tabs in workspace", .{local_tabs_n}), .look = .tab });
+            defer badge.end();
+            ui.text(c, c.print("{d}", .{local_tabs_n}), .{ .size = 11, .weight = .medium, .color = k.muted });
+            icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
+            if (badge.clicked()) {
+                handled = true;
+                const state = &a.view.strip;
+                if (state.menu == .panel and strip.same(state.target, target)) {
+                    state.menu = null;
+                } else {
+                    strip.open(a, .panel, target, c.rects.get(c.node(badge.index).id) orelse c.rects.get(c.node(cap.index).id));
+                }
+            }
+        }
         if (!settings_open and (hot or (n > 1 and ix == selected))) {
             if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
                 handled = true;

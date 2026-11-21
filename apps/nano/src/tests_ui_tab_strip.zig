@@ -420,7 +420,10 @@ test "Cmd+[ and Cmd+] step single-pane panel tabs and retain loaded transcripts 
     defer parsed.deinit();
     try h.a.transcript.apply(parsed.value);
     const entries_ptr = h.a.transcript.entries.items.ptr;
-    h.a.openChatInTab("c");
+    try h.a.tabs.isolateWorkspace();
+    h.a.addChatTab(true);
+    h.a.tabs.setCurrent("c");
+    h.a.select("c", "local-project");
     h.t.settle(1);
     try testing.expectEqualStrings("c", h.a.selected.?);
     try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.panes.items.len);
@@ -741,4 +744,222 @@ test "singleWindow pure layout matches visible slot for first, last, and narrow 
     try testing.expectApproxEqAbs(@as(f32, 90), narrow.slot_w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 0), narrow.selected_left, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 90), narrow.selected_right, 0.01);
+}
+
+fn issue47SetChats(h: *Harness, projectless: bool) !void {
+    try replace(&h.a.chats, if (projectless)
+        \\[{"id":"a","deviceId":"local","title":"Alpha","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","archived":false},
+        \\ {"id":"e","deviceId":"local","title":"Epsilon","archived":false},
+        \\ {"id":"f","deviceId":"local","title":"Zeta","archived":false}]
+    else
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","spaceId":"local-project","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"local-project","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","spaceId":"local-project","archived":false},
+        \\ {"id":"e","deviceId":"local","title":"Epsilon","spaceId":"local-project","archived":false},
+        \\ {"id":"f","deviceId":"local","title":"Zeta","spaceId":"local-project","archived":false}]
+    );
+    h.a.settings.setText("sidebarLastActivity", "all");
+    h.a.settings.applyUiMode(.developer);
+    h.t.settle(0.2);
+}
+
+fn issue47OpenIndependent(h: *Harness, id: []const u8, first: bool) void {
+    if (!first) h.a.newWorkspaceSession();
+    h.a.openChat(id, null);
+}
+
+fn issue47OverflowRect(h: *Harness) ?ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (tx.str.len >= 2 and tx.str[0] == '+' and node.rect.y < chrome.header_height and node.rect.x >= h.a.view.sidebar_width) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+fn issue47MenuText(h: *Harness, text: []const u8) ?ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y >= chrome.header_height and node.rect.x >= h.a.view.sidebar_width) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+fn issue47Snap(h: *Harness, name: []const u8) !void {
+    const dir = std.c.getenv("NANO_ISSUE47_SNAP_DIR") orelse return;
+    var buf: [1024]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+    try h.t.screenshot(path);
+}
+
+test "issue #47: Cmd-3 opens unopened projectless and same-project chats as independent workspaces without grouping" {
+    const sidebar = @import("view_sidebar.zig");
+    for ([_]bool{ true, false }) |projectless| {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        try issue47SetChats(&h, projectless);
+        const visible = sidebar.visibleSessionIds(&h.t.ctx, &h.a);
+        try testing.expect(visible.len >= 5);
+        const target = try testing.allocator.dupe(u8, visible[2]);
+        defer testing.allocator.free(target);
+        var chosen: [4][]const u8 = undefined;
+        var n: usize = 0;
+        for ([_][]const u8{ "a", "b", "c", "d", "e", "f" }) |id| {
+            if (std.mem.eql(u8, id, target)) continue;
+            chosen[n] = id;
+            issue47OpenIndependent(&h, id, n == 0);
+            n += 1;
+            if (n == 4) break;
+        }
+        h.a.showTab(0);
+        h.t.settle(0.2);
+        const closed_before = h.a.tabs.closed.items.len;
+        const neighbor_title = h.a.findChat(chosen[1]).?.title.?;
+        try testing.expect(h.topText(neighbor_title) != null);
+
+        h.press((ui.Shortcut{ .key = '3', .cmd = true }).native());
+        if (projectless) try issue47Snap(&h, "cmd3-no-unintended-group");
+
+        try testing.expectEqualStrings(target, h.a.selected.?);
+        // Must open in its own independent top-level workspace, never grouping into an existing pane.
+        try testing.expectEqual(@as(usize, 5), h.a.tabs.items.items.len);
+        try testing.expect(h.a.tabs.layout() == null);
+        // Other workspaces remain reachable in the top bar (visible cap or overflow menu).
+        try testing.expect(h.topText(neighbor_title) != null or issue47OverflowRect(&h) != null);
+        try testing.expectEqual(closed_before, h.a.tabs.closed.items.len);
+        for (chosen) |id| {
+            try testing.expect(h.a.tabs.find(id) != null);
+            try testing.expect(!h.a.findChat(id).?.archived);
+        }
+    }
+}
+
+test "issue #47: entering an existing multi-tab workspace via Cmd-3 or click keeps all workspaces reachable, including reverse and narrow overflow" {
+    const sidebar = @import("view_sidebar.zig");
+    for ([_]bool{ true, false }) |via_cmd3| {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        try issue47SetChats(&h, false);
+        const visible = sidebar.visibleSessionIds(&h.t.ctx, &h.a);
+        try testing.expect(visible.len >= 5);
+        const target = try testing.allocator.dupe(u8, visible[2]);
+        defer testing.allocator.free(target);
+        // Pick 4 other chats: ws0, ws1, ws2=[target, companion], ws3.
+        var others: [4][]const u8 = undefined;
+        var oi: usize = 0;
+        for ([_][]const u8{ "a", "b", "c", "d", "e", "f" }) |id| {
+            if (std.mem.eql(u8, id, target)) continue;
+            others[oi] = id;
+            oi += 1;
+            if (oi == 4) break;
+        }
+        issue47OpenIndependent(&h, others[0], true);
+        issue47OpenIndependent(&h, others[1], false);
+        // Workspace 2: explicitly grouped 1-pane, 2-tab workspace ([target, others[3]]).
+        issue47OpenIndependent(&h, target, false);
+        try h.a.tabs.isolateWorkspace();
+        h.a.addChatTab(true);
+        h.a.tabs.setCurrent(others[3]);
+        h.a.select(others[3], "local-project");
+        h.a.showPaneTab(0);
+        // Workspace 3: fourth independent workspace.
+        issue47OpenIndependent(&h, others[2], false);
+        h.a.showTab(0);
+        h.t.settle(0.2);
+
+        try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+        const closed_before = h.a.tabs.closed.items.len;
+        const ws0_title = h.a.findChat(others[0]).?.title.?;
+        const ws1_title = h.a.findChat(others[1]).?.title.?;
+        const target_title = h.a.findChat(target).?.title.?;
+        const companion_title = h.a.findChat(others[3]).?.title.?;
+        const ws3_title = h.a.findChat(others[2]).?.title.?;
+
+        if (via_cmd3) {
+            h.press((ui.Shortcut{ .key = '3', .cmd = true }).native());
+        } else {
+            const cap = h.topText(target_title) orelse return error.MissingMultiTabWorkspaceCap;
+            h.t.click(cap.x + cap.w / 2, cap.y + cap.h / 2);
+            h.t.settle(0.2);
+        }
+        if (via_cmd3) try issue47Snap(&h, "multitab-workspace-nav");
+
+        try testing.expectEqualStrings(target, h.a.selected.?);
+        try testing.expectEqual(@as(usize, 2), h.a.tabs.active);
+        try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+        try testing.expectEqual(closed_before, h.a.tabs.closed.items.len);
+
+        // Neighbor workspaces remain visibly reachable in the top bar (and any overflowed workspace via `+N`).
+        try testing.expect(h.topText(ws0_title) != null);
+        try testing.expect(h.topText(ws1_title) != null);
+        try testing.expect(h.topText(target_title) != null);
+        try testing.expect(h.topText(ws3_title) != null or issue47OverflowRect(&h) != null);
+
+        // The active workspace's local tabs remain reachable from the top bar switcher.
+        const local_badge = h.topText("2") orelse return error.MissingLocalTabSwitcher;
+        h.t.click(local_badge.x + local_badge.w / 2, local_badge.y + local_badge.h / 2);
+        h.t.settle(0.2);
+        try testing.expectEqual(strip.Menu.panel, h.a.view.strip.menu.?);
+        const companion_row = issue47MenuText(&h, companion_title) orelse return error.MissingPanelMenuRow;
+        h.t.click(companion_row.x + companion_row.w / 2, companion_row.y + companion_row.h / 2);
+        h.t.settle(0.2);
+        try testing.expectEqualStrings(others[3], h.a.selected.?);
+        try testing.expectEqual(@as(usize, 2), h.a.tabs.active);
+        // Switching local tab inside ws2 still keeps all other workspaces visible!
+        try testing.expect(h.topText(ws0_title) != null);
+
+        // Narrow window overflow keeps all 4 workspaces reachable via the `+N` history menu.
+        h.t.resize(760, 560);
+        h.t.settle(0.2);
+        const overflow = issue47OverflowRect(&h) orelse return error.MissingNarrowOverflow;
+        h.t.click(overflow.x + overflow.w / 2, overflow.y + overflow.h / 2);
+        h.t.settle(0.2);
+        try testing.expectEqual(strip.Menu.history, h.a.view.strip.menu.?);
+        const ws0_menu_row = issue47MenuText(&h, ws0_title) orelse return error.MissingHistoryWs0;
+        try testing.expect(issue47MenuText(&h, ws1_title) != null);
+        try testing.expect(issue47MenuText(&h, ws3_title) != null);
+        // Reverse transition back to ws0 via visible navigation.
+        h.t.click(ws0_menu_row.x + ws0_menu_row.w / 2, ws0_menu_row.y + ws0_menu_row.h / 2);
+        h.t.settle(0.2);
+        try testing.expectEqualStrings(others[0], h.a.selected.?);
+        try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+        try testing.expectEqual(closed_before, h.a.tabs.closed.items.len);
+        for ([_][]const u8{ others[0], others[1], target, others[3], others[2] }) |id| {
+            try testing.expect(h.a.tabs.find(id) != null);
+            try testing.expect(!h.a.findChat(id).?.archived);
+        }
+    }
+}
+
+test "issue #47: Cmd-3 to an already-open independent workspace activates it without grouping" {
+    const sidebar = @import("view_sidebar.zig");
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    try issue47SetChats(&h, true);
+    const visible = sidebar.visibleSessionIds(&h.t.ctx, &h.a);
+    const target = try testing.allocator.dupe(u8, visible[2]);
+    defer testing.allocator.free(target);
+    const source: []const u8 = if (std.mem.eql(u8, target, "a")) "b" else "a";
+    issue47OpenIndependent(&h, source, true);
+    issue47OpenIndependent(&h, target, false);
+    for ([_][]const u8{ "a", "b", "c", "d", "e", "f" }) |id| {
+        if (std.mem.eql(u8, id, source) or std.mem.eql(u8, id, target)) continue;
+        issue47OpenIndependent(&h, id, false);
+        if (h.a.tabs.items.items.len == 4) break;
+    }
+    h.a.showTab(0);
+    h.t.settle(0.2);
+    const target_at = h.a.tabs.find(target).?.tab;
+    h.press((ui.Shortcut{ .key = '3', .cmd = true }).native());
+    try testing.expectEqualStrings(target, h.a.selected.?);
+    try testing.expectEqual(target_at, h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+    if (h.a.tabs.layout()) |layout| try testing.expectEqual(@as(usize, 1), layout.groups[layout.focus].count());
+    try testing.expect(h.topText(h.a.findChat(source).?.title.?) != null);
 }
