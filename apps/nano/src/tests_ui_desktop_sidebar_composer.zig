@@ -399,6 +399,62 @@ test "clicking the composer expand button opens Write even on an attachment-only
     try testing.expect(h.t.hasText("Edit message"));
 }
 
+test "sidebar single-line content is vertically centered inside its box" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.init(dark);
+        defer h.deinit();
+        const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-chat","deviceId":"synthetic-device","title":"Box title","spaceId":"synthetic-project","archived":false}]
+        , .{});
+        defer chats.deinit();
+        try h.a.chats.replace(chats.value);
+        const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"chatId":"synthetic-chat","status":"awaitingInput"}]
+        , .{});
+        defer sessions.deinit();
+        try h.a.sessions.replace(sessions.value);
+        h.a.sessions.items[0].updated_ms = h.a.nowMs();
+        for ([_]@import("motion_rules.zig").UiMode{ .developer, .zen }) |mode| {
+            h.a.settings.applyUiMode(mode);
+            h.a.settings.set(.sidebar_compact, true);
+            h.a.settings.setText("sidebarOrganization", "inOneList");
+            for ([_]bool{ true, false }) |context| {
+                h.a.settings.set(.sidebar_show_harness, context);
+                h.a.settings.set(.sidebar_show_project_icon, context);
+                h.a.settings.set(.sidebar_show_project_label, context);
+                h.a.settings.set(.sidebar_show_branch, context);
+                h.a.settings.set(.sidebar_show_updated, context);
+                for ([_]bool{ true, false }) |waiting| {
+                    h.a.sessions.items[0].status = if (waiting) .awaiting_input else .idle;
+                    h.t.moveTo(1100, 100);
+                    h.t.settle(0.2);
+                    for ([_]bool{ false, true }) |hovered| {
+                        const title = textNode(&h.t, "Box title") orelse return error.NoSessionTitle;
+                        const text = h.t.ctx.node(title).rect;
+                        var parent = h.t.ctx.node(title).parent;
+                        while (parent != 0 and h.t.ctx.node(parent).style.radius != 7 and h.t.ctx.node(parent).style.radius != 8) {
+                            parent = h.t.ctx.node(parent).parent;
+                        }
+                        if (parent == 0) return error.NoSessionBox;
+                        const row = h.t.ctx.node(parent).rect;
+                        if (hovered) {
+                            h.t.moveTo(row.x + 4, row.y + row.h / 2);
+                            h.t.settle(0.2);
+                            const hovered_title = textNode(&h.t, "Box title") orelse return error.NoHoveredTitle;
+                            const ht = h.t.ctx.node(hovered_title).rect;
+                            try testing.expectApproxEqAbs(row.y + row.h / 2, ht.y + ht.h / 2, 0.51);
+                        } else {
+                            if (mode == .developer and context and waiting) h.snap(if (dark) "sidebar-centering-dark" else "sidebar-centering-light");
+                            try testing.expectApproxEqAbs(row.y + row.h / 2, text.y + text.h / 2, 0.51);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "desktop parity layout rules cover narrow wrapping, reserved context, and Write gutters" {
     const widths = [_]f32{ 100, 100, 100 };
     try testing.expectEqual(@as(usize, 2), draft.chipRowEnd(&widths, 0, 206));
