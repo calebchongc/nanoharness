@@ -262,4 +262,6 @@ test {
     _ = @import("app_extras.zig");
     // Windows opened while running and closed by the app, keys.
     _ = @import("tests_window_more.zig");
+    // macOS drag-and-drop NSURL / file-reference resolution.
+    _ = @import("ui/surface_drop.zig");
 }

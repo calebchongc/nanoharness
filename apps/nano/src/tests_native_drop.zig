@@ -48,6 +48,13 @@ const Harness = struct {
         h.t.ctx.input.drop = .{ .point = .{ .x = 1000, .y = 600 }, .urls = urls };
         h.t.frame();
     }
+
+    fn snap(h: *Harness, name: []const u8) !void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+        try h.t.screenshot(path);
+    }
 };
 
 fn dropTargets(a: *App, c: *ui.Context) void {
@@ -222,5 +229,196 @@ test "native drop cancelled hover cannot attach after pane close or resize" {
         h.t.drop(1000, 600, &.{url}, "");
         h.t.frame();
         try testing.expectEqual(@as(usize, 1), h.a.attachments.items.items.len);
+    }
+}
+
+test "macos pasteboard file-reference NSURL resolves identically to picker intake (#43)" {
+    if (comptime @import("builtin").os.tag != .macos) return;
+    const objc = @import("nanoui").objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.dark = false;
+    h.a.view.setup_checked = true;
+    h.t.settle(0.3);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const expected_bytes = @embedFile("icons/close.png");
+    const filename = "synthetic #✓.png";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = filename, .data = expected_bytes });
+    const relative = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, filename });
+    defer testing.allocator.free(relative);
+    const native_path = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, testing.allocator);
+    defer testing.allocator.free(native_path);
+
+    const file_url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString(native_path)});
+    const ref_url = objc.msg(?objc.Object, file_url, "fileReferenceURL", .{}) orelse return error.MissingFileReferenceUrl;
+    try testing.expect(objc.msg(objc.BOOL, ref_url, "isFileReferenceURL", .{}));
+    const raw_ref = objc.fromNSString(objc.msg(?objc.Object, ref_url, "absoluteString", .{}));
+    try testing.expect(std.mem.startsWith(u8, raw_ref, "file:///.file/id="));
+
+    // Write the real macOS file-reference NSURL to a private unique pasteboard
+    // and read it back through nanoui's exact AppKit drop adapter.
+    const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "pasteboardWithUniqueName", .{});
+    defer objc.msg(void, pb, "releaseGlobally", .{});
+    const objs = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{ref_url});
+    try testing.expect(objc.msg(objc.BOOL, pb, "writeObjects:", .{objs}));
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const dropped_urls = ui.surface_drop.readPasteboardUrls(arena.allocator(), pb);
+    try testing.expectEqual(@as(usize, 1), dropped_urls.len);
+
+    // Compare against the NSOpenPanel picker path (NSURL.path -> readFile).
+    const picker_path = objc.fromNSString(objc.msg(?objc.Object, ref_url, "path", .{}));
+    const picker_bytes = try attachments.readFile(&h.a, picker_path);
+    defer testing.allocator.free(picker_bytes);
+    try testing.expectEqualSlices(u8, expected_bytes, picker_bytes);
+
+    h.t.drop(800, 600, dropped_urls, "");
+    h.t.settle(0.3);
+    try h.snap("file-ref-drop-composer");
+
+    try testing.expectEqual(@as(usize, 0), h.a.notice_len);
+    try testing.expect(h.a.file_drop.last_failure == null);
+    try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+    const item = h.a.attachments.items.items[0];
+    try testing.expectEqualStrings(filename, item.name);
+    try testing.expectEqualSlices(u8, picker_bytes, item.bytes);
+}
+
+test "macos pasteboard mixed batch attaches valid file-reference into inactive pane and classifies rejected references (#43)" {
+    if (comptime @import("builtin").os.tag != .macos) return;
+    const objc = @import("nanoui").objc;
+    const drop = @import("view_attachment_drop.zig");
+    const pool = objc.Pool.push();
+    defer pool.pop();
+
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const valid_name = "notes #✓.txt";
+    const valid_bytes = "Synthetic file-reference attachment bytes\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = valid_name, .data = valid_bytes });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "deleted.txt", .data = "gone" });
+
+    const rel_valid = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, valid_name });
+    defer testing.allocator.free(rel_valid);
+    const abs_valid = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel_valid, testing.allocator);
+    defer testing.allocator.free(abs_valid);
+    const rel_deleted = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/deleted.txt", .{tmp.sub_path});
+    defer testing.allocator.free(rel_deleted);
+    const abs_deleted = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel_deleted, testing.allocator);
+    defer testing.allocator.free(abs_deleted);
+
+    const valid_url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString(abs_valid)});
+    const valid_ref = objc.msg(?objc.Object, valid_url, "fileReferenceURL", .{}) orelse return error.MissingFileReferenceUrl;
+    const deleted_url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString(abs_deleted)});
+    const deleted_ref = objc.msg(?objc.Object, deleted_url, "fileReferenceURL", .{}) orelse return error.MissingFileReferenceUrl;
+    try tmp.dir.deleteFile(testing.io, "deleted.txt");
+    const remote_file = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString("file://remote/tmp/a.png")}) orelse return error.InvalidUrl;
+
+    // 1. Rejected-only unresolved reference never activates the inactive pane.
+    {
+        const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "pasteboardWithUniqueName", .{});
+        defer objc.msg(void, pb, "releaseGlobally", .{});
+        const list = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{deleted_ref});
+        try testing.expect(objc.msg(objc.BOOL, pb, "writeObjects:", .{list}));
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const urls = ui.surface_drop.readPasteboardUrls(arena.allocator(), pb);
+        h.t.drop(1000, 600, urls, "");
+        h.t.frame();
+        try testing.expectEqualStrings("drop-a", h.a.selected.?);
+        try testing.expectEqual(@as(usize, 0), attachments.count(&h.a));
+        try testing.expectEqual(@as(?drop.FailureKind, .url_resolution), h.a.file_drop.last_failure);
+        const notice = h.a.noticeText() orelse return error.MissingNotice;
+        try testing.expectEqualStrings(drop.failureNotice(.url_resolution), notice);
+        try testing.expect(std.mem.indexOf(u8, notice, "/.file/id=") == null);
+    }
+
+    // 2. Mixed batch attaches the valid file-reference into drop-b while keeping
+    //    rejected items out and recording the resolution failure without leaking paths.
+    {
+        const pb = objc.msg(objc.Object, objc.class("NSPasteboard"), "pasteboardWithUniqueName", .{});
+        defer objc.msg(void, pb, "releaseGlobally", .{});
+        const list = objc.msg(objc.Object, objc.class("NSMutableArray"), "arrayWithCapacity:", .{@as(objc.NSUInteger, 3)});
+        objc.msg(void, list, "addObject:", .{remote_file});
+        objc.msg(void, list, "addObject:", .{valid_ref});
+        objc.msg(void, list, "addObject:", .{deleted_ref});
+        try testing.expect(objc.msg(objc.BOOL, pb, "writeObjects:", .{list}));
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const urls = ui.surface_drop.readPasteboardUrls(arena.allocator(), pb);
+        h.t.drop(1000, 600, urls, "");
+        h.t.frame();
+        try testing.expectEqualStrings("drop-b", h.a.selected.?);
+        try testing.expectEqual(@as(usize, 1), attachments.count(&h.a));
+        const item = h.a.attachments.items.items[0];
+        try testing.expectEqualStrings(valid_name, item.name);
+        try testing.expectEqualStrings("synthetic-remote", item.target.?);
+        try testing.expectEqualSlices(u8, valid_bytes, item.bytes);
+        try testing.expectEqual(@as(?drop.FailureKind, .url_resolution), h.a.file_drop.last_failure);
+        const notice = h.a.noticeText() orelse return error.MissingNotice;
+        try testing.expect(std.mem.indexOf(u8, notice, "/.file/id=") == null);
+        try testing.expect(std.mem.indexOf(u8, notice, abs_valid) == null);
+    }
+}
+
+test "native drop distinguishes url resolution, missing, directory, empty, and oversize failures without leaking paths (#43)" {
+    const drop = @import("view_attachment_drop.zig");
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel_dir = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(rel_dir);
+    const abs_dir = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel_dir, testing.allocator);
+    defer testing.allocator.free(abs_dir);
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "empty.txt", .data = "" });
+    const empty_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "empty.txt" });
+    defer testing.allocator.free(empty_path);
+
+    const big_file = try tmp.dir.createFile(testing.io, "oversize.bin", .{});
+    try big_file.setLength(testing.io, attachments.max_bytes + 1);
+    big_file.close(testing.io);
+    const oversize_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "oversize.bin" });
+    defer testing.allocator.free(oversize_path);
+
+    const missing_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "missing-file.txt" });
+    defer testing.allocator.free(missing_path);
+
+    const cases = [_]struct { url: []const u8, kind: drop.FailureKind }{
+        .{ .url = "https://example.invalid/image.png", .kind = .not_local_file },
+        .{ .url = "file:///.file/id=6571367.999999", .kind = .url_resolution },
+        .{ .url = missing_path, .kind = .unreadable_file },
+        .{ .url = abs_dir, .kind = .is_directory },
+        .{ .url = empty_path, .kind = .empty_file },
+        .{ .url = oversize_path, .kind = .oversize_file },
+    };
+
+    for (cases, 0..) |case, i| {
+        h.t.drop(1000, 600, &.{case.url}, "");
+        h.t.frame();
+        try testing.expectEqualStrings("drop-a", h.a.selected.?);
+        try testing.expectEqual(@as(usize, 0), attachments.count(&h.a));
+        try testing.expectEqual(@as(?drop.FailureKind, case.kind), h.a.file_drop.last_failure);
+        const notice = h.a.noticeText() orelse return error.MissingNotice;
+        try testing.expectEqualStrings(drop.failureNotice(case.kind), notice);
+        try testing.expect(std.mem.indexOf(u8, notice, abs_dir) == null);
+        try testing.expect(std.mem.indexOf(u8, notice, "6571367") == null);
+        for (cases[0..i]) |prev| {
+            try testing.expect(!std.mem.eql(u8, drop.failureNotice(prev.kind), notice));
+        }
     }
 }
