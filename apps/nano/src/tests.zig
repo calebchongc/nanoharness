@@ -53,6 +53,8 @@ test {
     _ = @import("archive_close.zig");
     _ = @import("tabs.zig");
     _ = @import("tests_ui.zig");
+    _ = @import("tests_selection_speech.zig");
+    _ = @import("tests_composer_selection.zig");
     _ = @import("tests_ui_picker.zig");
     _ = @import("tests_ui_history.zig");
     _ = @import("tests_ui_compact.zig");
