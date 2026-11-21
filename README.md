@@ -5,19 +5,13 @@
 <h1 align="center">NanoHarness</h1>
 
 <p align="center">
-  <strong>One fast, native workspace for your coding agents.</strong><br>
-  Built in Zig on <a href="https://github.com/justrach/nanoui">nanoui</a>. Work locally, review diffs and PRs beside the chat, and move seamlessly between machines.
+  <strong>Run your coding agents, review their diffs, and ship from one native workspace.</strong><br>
+  Built in Zig on <a href="https://github.com/justrach/nanoui">nanoui</a>.
 </p>
 
 <p align="center">
-  <a href="https://github.com/justrach/nanoharness/releases/latest">Download</a> ·
-  <a href="#download-with-curl">Download with curl</a> ·
-  <a href="#the-workspace">Workspace</a> ·
-  <a href="#native-github-and-splits">GitHub Review</a> ·
-  <a href="#get-started">Get Started</a> ·
-  <a href="#native-flint">Native Flint</a> ·
-  <a href="#codegraff">CodeGraff</a> ·
-  <a href="#license">License</a>
+  <strong><a href="https://github.com/justrach/nanoharness/releases/latest">Download NanoHarness</a></strong> ·
+  <a href="#download-with-curl">Download with curl</a>
 </p>
 
 <p align="center">
@@ -31,42 +25,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/readme/nanoharness-workspace-light.png" width="960" alt="NanoHarness desktop workspace in light mode showing a multi-project sidebar, tool summary, native typeset math, color emoji, and code block">
-  <br><sub>NanoHarness in light mode with <strong>Graff</strong>, native Markdown &amp; LaTeX typesetting, color emoji, and viewport-culled transcripts. Synthetic example session.</sub>
+  <img src="docs/media/readme/nanoharness-github-light.png" width="960" alt="NanoHarness with an agent chat beside the GitHub pull request review pane">
+  <br><sub>Review a pull request without leaving the agent conversation. Synthetic example.</sub>
 </p>
-
----
-
-## The workspace
-
-NanoHarness brings **CodeGraff (`graff`)**, Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, Antigravity, and [Exo](https://github.com/exoharness/exo) into one lightweight desktop app. Pick the agent, model, and speed tier for each conversation, keep workspaces and sessions organized, and review code changes beside the chat.
-
-- **Native Zig + nanoui desktop:** instant startup, hardware-accelerated rendering, native light and dark themes, color emoji, and native LaTeX equation typesetting.
-- **Multi-agent, one workflow:** switch between `graff`, Claude Code, Codex, OpenCode, Cursor, and more from the same composer and keyboard shortcuts.
-- **Split panes, files, browser, and terminal:** keep tabs, side-by-side splits, an embedded browser, and terminals right next to your active agent run.
-- **Local-first by default:** starts immediately in local mode with no account required; enable sync only when you want another trusted desktop or iOS device to follow or drive sessions.
-
-## Native GitHub and splits
-
-Open pull requests, inspect file diffs, read review activity, and check CI right beside your conversation without leaving the workspace.
-
-<p align="center">
-  <img src="docs/media/readme/nanoharness-github-light.png" width="960" alt="NanoHarness split workspace in light mode with a live chat beside the native GitHub pull request review pane">
-  <br><sub>Side-by-side chat and native GitHub pull request review in light mode. Synthetic repository and PR data.</sub>
-</p>
-
-## Agents and settings
-
-Enable or configure every installed agent from **Settings → Agents**. Exo is off by default and connects through its agent-cli adapter (`./exo.sh --setup agent-cli`) via Harness's built-in ACP bridge.
-
-<p align="center">
-  <img src="docs/media/readme/nanoharness-agents-light.png" width="960" alt="NanoHarness Settings Agents page in light mode showing Graff, Claude Code, Codex, OpenCode, and Cursor">
-  <br><sub>Installed agents appear in <strong>Settings → Agents</strong>, including Graff's context compaction threshold and one-click CLI updates.</sub>
-</p>
-
-### Native Flint
-
-Run **Flint INT4** locally on Apple Silicon alongside NanoHarness and a compatible Graff build. Licensed weights, resumable downloads, and SHA-256 checksums are available at **[codegraff.com/flint](https://codegraff.com/flint)** (also linked directly from **Settings → Agents**).
 
 ## Get started
 
@@ -81,6 +42,9 @@ Download the latest signed release from **[Releases](https://github.com/justrach
 | **Arch Linux** | `harness-VERSION-linux-x86_64.pkg.tar.zst` (or `-aarch64`) | Install via `sudo pacman -U ./harness-*.pkg.tar.zst` (Vulkan driver required; updates via pacman) |
 
 ### Download with curl
+
+<details>
+<summary>Show commands for macOS, Windows, and Arch Linux</summary>
 
 These commands download the package to the current directory; they do not install it.
 
@@ -105,7 +69,39 @@ version=$(curl -fsSL "$release/latest/download/latest.txt") &&
   curl -fLO "$release/download/v$version/harness-$version-linux-$arch.pkg.tar.zst"
 ```
 
-### Build from source
+</details>
+
+[Workspace](#the-workspace) · [GitHub review](#native-github-and-splits) · [Agents](#agents-and-settings) · [Build from source](#build-from-source) · [License](#license)
+
+## The workspace
+
+- **Bring your agents.** Switch agents, models, and speed tiers from the same composer and keyboard shortcuts.
+- **Review changes beside the chat.** Use side-by-side splits for GitHub review, files, the browser, and terminals.
+- **Work locally, sync when you want.** Start without an account, then opt in to follow or drive sessions from another trusted desktop or iOS device.
+
+<p align="center">
+  <img src="docs/media/readme/nanoharness-workspace-light.png" width="960" alt="NanoHarness desktop workspace in light mode showing a multi-project sidebar, tool summary, native typeset math, color emoji, and code block">
+  <br><sub>NanoHarness in light mode with <strong>Graff</strong>, native Markdown &amp; LaTeX typesetting, color emoji, and viewport-culled transcripts. Synthetic example session.</sub>
+</p>
+
+## Native GitHub and splits
+
+Open pull requests, inspect file diffs, read review activity, and check CI right beside your conversation without leaving the workspace.
+
+## Agents and settings
+
+NanoHarness supports **CodeGraff (`graff`)**, Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, Antigravity, and [Exo](https://github.com/exoharness/exo). Enable or configure installed agents from **Settings → Agents**. Exo is off by default and connects through its agent-cli adapter (`./exo.sh --setup agent-cli`) via Harness's built-in ACP bridge.
+
+<p align="center">
+  <img src="docs/media/readme/nanoharness-agents-light.png" width="960" alt="NanoHarness Settings Agents page in light mode showing Graff, Claude Code, Codex, OpenCode, and Cursor">
+  <br><sub>Installed agents appear in <strong>Settings → Agents</strong>, including Graff's context compaction threshold and one-click CLI updates.</sub>
+</p>
+
+### Native Flint
+
+Run **Flint INT4** locally on Apple Silicon alongside NanoHarness and a compatible Graff build. Licensed weights, resumable downloads, and SHA-256 checksums are available at **[codegraff.com/flint](https://codegraff.com/flint)** (also linked directly from **Settings → Agents**).
+
+## Build from source
 
 Build from a checkout with Zig `0.17.0` and the Rust toolchain in [`rust-toolchain.toml`](rust-toolchain.toml):
 
