@@ -645,4 +645,46 @@ final class AgentReauthenticationTests: XCTestCase {
             return XCTFail("accepted untrusted cursor browser URL")
         }
     }
+
+    func testLoopbackCallbackParserAcceptsValidGetAndRejectsOtherRequests() {
+        XCTAssertEqual(
+            LoopbackCallbackServer.parseCallbackTarget(
+                requestLine: "GET /auth/callback?code=abc&state=st4te HTTP/1.1\r\n",
+                expectedPath: "/auth/callback"
+            ),
+            "/auth/callback?code=abc&state=st4te"
+        )
+        for bad in [
+            "POST /auth/callback?code=abc HTTP/1.1\r\n",
+            "GET /favicon.ico HTTP/1.1\r\n",
+            "GET /auth/callback HTTP/1.1\r\n",
+            "GET /auth/callback? HTTP/1.1\r\n",
+            "GET /other?code=abc HTTP/1.1\r\n",
+            "",
+        ] {
+            XCTAssertNil(LoopbackCallbackServer.parseCallbackTarget(requestLine: bad, expectedPath: "/auth/callback"), bad)
+        }
+    }
+
+    func testLoopbackCallbackServerCapturesMatchingRedirectAndIgnoresFavicon() async throws {
+        let server = LoopbackCallbackServer()
+        let captured = expectation(description: "loopback callback received")
+        final class Box: @unchecked Sendable { var value: String? }
+        let box = Box()
+        let port = try server.start(port: 0, expectedPath: "/auth/callback") { redirect in
+            box.value = redirect
+            captured.fulfill()
+        }
+        defer { server.stop() }
+        XCTAssertGreaterThan(port, 0)
+
+        let (_, faviconResp) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/favicon.ico")!)
+        XCTAssertEqual((faviconResp as? HTTPURLResponse)?.statusCode, 404)
+
+        let (_, callbackResp) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/auth/callback?code=abc&state=st4te")!)
+        XCTAssertEqual((callbackResp as? HTTPURLResponse)?.statusCode, 200)
+
+        await fulfillment(of: [captured], timeout: 5)
+        XCTAssertEqual(box.value, "http://127.0.0.1:\(port)/auth/callback?code=abc&state=st4te")
+    }
 }

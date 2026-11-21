@@ -154,10 +154,14 @@ pub const Browser = struct {
         const n = b.native orelse return;
         const title = n.title();
         if (title.len > 0) b.title.set(title);
-        if (!b.editing) {
-            const url = n.url();
-            if (url.len > 0) b.address.set(url);
+        const url = n.url();
+        if (b.saved_view == null and url.len > 0 and web.allowedNavigation(url) and !std.mem.eql(u8, b.url, url)) {
+            if (b.app.gpa.dupe(u8, url)) |owned| {
+                b.app.gpa.free(b.url);
+                b.url = owned;
+            } else |_| {}
         }
+        if (!b.editing and url.len > 0) b.address.set(url);
         if (n.error_len > 0) b.notice.set(n.error_text[0..n.error_len]) else b.notice.clear();
         b.app.redraw();
     }
