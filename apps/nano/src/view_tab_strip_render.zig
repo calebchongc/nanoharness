@@ -262,8 +262,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
         const device_editable = target == .chat;
-        const dev_text_w = c.text.width(computer, .{ .size = 10 });
-        const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, .{ .size = 10 }) else null;
+        const chip_st: ui.TextStyle = .{ .size = 10, .line_height = 12, .color = k.muted };
+        const dev_text_w = c.text.width(computer, chip_st);
+        const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, chip_st) else null;
         const pick_changeable = if (project) |f| f.changeable else false;
         const chips = @import("motion_rules.zig").slotChipWidths(room, dev_text_w, device_editable, pick_text_w, pick_changeable);
         if (chips.dev_w > 0) {
@@ -279,7 +280,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             }
             icons.icon(c, if (github_child) .@"split-columns" else .monitor, 10, k.muted, 0);
             if (!dev_glyph_only) {
-                kit.ellipsisText(c, computer, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.dev_text_max);
+                kit.ellipsisText(c, computer, chip_st, chips.dev_text_max);
             }
             if (device_editable) {
                 if (!dev_glyph_only) icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
@@ -311,7 +312,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             }
             icons.icon(c, .folder, 10, k.muted, 0);
             if (!pick_glyph_only) {
-                kit.ellipsisText(c, f.name, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.pick_text_max);
+                kit.ellipsisText(c, f.name, chip_st, chips.pick_text_max);
             }
             if (f.changeable) {
                 if (!pick_glyph_only) icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
