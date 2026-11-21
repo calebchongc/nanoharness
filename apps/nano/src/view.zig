@@ -231,43 +231,26 @@ pub fn view(a: *App, c: *ui.Context) void {
                 const content = ui.div(c).absolute().offset(a.view.sidebar_width - side_width, 0).w(side_width).hFull();
                 defer content.end();
                 if (a.view.settings_open) settings_view.nav(c, a, k) else sidebar.sidebar(c, a, k);
-                // Workspace panels own their entire rounded outline; there is
-                // no longer a full-height border at the sidebar's edge.
-                if (a.view.settings_open and !k.is_harp and a.settings.uiMode() != .zen) ui.div(c).absolute().offset(side_width - 1, 0).size(1, c.size.h).bg(k.border).end();
             }
         }
         a.view.seam_inset = 2;
         const zen = a.settings.uiMode() == .zen;
-        const ws_gutter = if (zen) chrome.zen_gutter else chrome.gutter;
+        const ws_gutter = chrome.zen_gutter;
         const layout = a.tabs.layout();
         const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
-        a.view.chrome = if (zen)
-            chrome.zenFrameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host)
-        else
-            chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+        a.view.chrome = chrome.zenFrameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
         if (a.view.settings_open) {
-            if (zen) {
-                const wrap = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
-                defer wrap.end();
-                ui.key(c, "zen-settings-page-card");
-                const card = panel_chrome.zenBody(c, k).grow().w(0).hFull().clip();
-                defer card.end();
-                settings_view.page(c, a, k);
-            } else if (k.is_harp) {
-                const wrap = ui.div(c).row().pt(sidebar.titlebar_h + 8).pr(8).pb(8).hFull().wFull();
-                defer wrap.end();
-                const card = ui.div(c).column().grow().w(0).hFull().p(1).rounded(10).border(k.border).borderW(1).bg(k.background).clip();
-                defer card.end();
-                settings_view.page(c, a, k);
-            } else {
-                _ = c.leaf(.{ .width = .fill, .height = .{ .px = sidebar.titlebar_h } }, .none, null);
-                settings_view.page(c, a, k);
-            }
+            const wrap = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.zen_gutter).pb(chrome.zen_gutter).hFull().wFull();
+            defer wrap.end();
+            ui.key(c, "zen-settings-page-card");
+            const card = panel_chrome.zenBody(c, k).grow().w(0).hFull().clip();
+            defer card.end();
+            settings_view.page(c, a, k);
         } else {
             const workspace = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
             defer workspace.end();
@@ -394,11 +377,10 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
     @import("view_attachment_drop.zig").shade(c, a, k, panel.index);
     if (c.input.pressed and panel.interaction().hovered) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
-    if (strip.rendering.selectedBounds(a)) |selected| panel_chrome.join(c, k, a.view.chrome.chat_width, selected.left, selected.right);
     // Decorative shoulders change node count as the sidebar slides; the
     // writing subtree must keep its identity and keyboard focus.
     ui.key(c, "chat-panel-content");
-    const content = ui.div(c).column().grow().wFull().h(0).rounded(if (zen) chrome.zen_radius - 1 else 9).clip();
+    const content = ui.div(c).column().grow().wFull().h(0).rounded(chrome.zen_radius - 1).clip();
     defer content.end();
     focused(c, a, k);
 }
@@ -446,7 +428,7 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     // Clip content, not the cap/shoulders extending above the body.
     ui.key(c, "workspace-host-content");
-    const content = ui.div(c).column().wFull().hFull().rounded(if (zen) chrome.zen_radius - 1 else 9).clip();
+    const content = ui.div(c).column().wFull().hFull().rounded(chrome.zen_radius - 1).clip();
     defer content.end();
     @import("view_host.zig").host(c, a, k);
 }
@@ -492,7 +474,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
     }
 
     const zen = a.settings.uiMode() == .zen;
-    const ws_gutter = if (zen) chrome.zen_gutter else chrome.gutter;
+    const ws_gutter = chrome.zen_gutter;
     const child_parent = if (githubChildInSplit(a)) @import("app_github_repository.zig").parentPane(a) else null;
     for (s.panes.items, s.shares.items, 0..) |chat, share, ix| {
         ui.key(c, c.print("pane-{d}", .{ix}));
@@ -1008,9 +990,9 @@ fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
 }
 
 fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
-    // In Zen Settings the navigation column sits flush under traffic lights and
-    // is never collapsible, so avoid floating an orphaned sidebar toggle above it.
-    if (a.view.settings_open and a.settings.uiMode() == .zen) return;
+    // In Settings the navigation column sits in a non-collapsible card under
+    // traffic lights, so avoid floating an orphaned sidebar toggle above it.
+    if (a.view.settings_open) return;
     // With no sidebar in view, a running cloud sandbox (billed until turned
     // off) still shows under the sidebar toggle. The GPUI app hides its
     // settings sidebar with the sidebar; this one keeps it, with the strip.
@@ -1021,7 +1003,7 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{ .tip = .{ .text = "Toggle sidebar" } })) toggleSidebar(c, a, true);
     // The history control arrives when the seam finishes collapsing rather
     // than on the ⌘B press, so it never pops over the still-sliding sidebar.
-    if (a.view.sidebar_width <= 1 or (a.view.settings_open and a.settings.uiMode() != .zen)) {
+    if (a.view.sidebar_width <= 1) {
         ui.div(c).w(4).end();
         ui.key(c, "titlebar-chat-history");
         const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
@@ -1045,46 +1027,26 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// The title bar's right end, over the panels: the files panel and the
 /// surface pane's toggles (`shell/tabs.rs`); a new chat has none.
 fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const zen = a.settings.uiMode() == .zen;
-    if (!a.view.settings_open or zen) {
-        const vu = @import("view_updates.zig");
-        const uw = vu.topbarUpdatesWidth(a);
-        if (uw == 0) {
-            a.view.updates_anchor = null;
-            a.view.updates_popover = false;
-        }
-        const show_panel_toggle = zen and !a.view.settings_open;
-        if (uw == 0 and !show_panel_toggle) return;
-        const w = uw + (if (uw > 0 and show_panel_toggle) @as(f32, 6) else 0) + (if (show_panel_toggle) @as(f32, 28) else 0);
-        const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
-        defer bar.end();
-        if (uw > 0) vu.topbarUpdatesButton(c, a, k);
-        if (show_panel_toggle) {
-            ui.key(c, "topbar-right-panel-toggle");
-            if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
-                .size = 28,
-                .on = strip.hasHost(a),
-                .tip = .{ .text = "Toggle side panel" },
-            })) @import("app_panels.zig").toggleHost(a);
-        }
-        return;
+    const vu = @import("view_updates.zig");
+    const uw = vu.topbarUpdatesWidth(a);
+    if (uw == 0) {
+        a.view.updates_anchor = null;
+        a.view.updates_popover = false;
     }
-    if (a.selected == null) return;
-    const va = @import("view_actions.zig");
-    const actions_w = va.controlWidth(c, a);
-    // The actions control, the row's 8-point gap, then the two toggles 4
-    // apart (`PANEL_TOGGLE_GAP`), 6 from the edge
-    // (`TITLEBAR_ACTION_EDGE_INSET`).
-    const w: f32 = 28 * 2 + 4 + (if (actions_w > 0) actions_w + 8 else 0);
-    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
+    const show_panel_toggle = !a.view.settings_open;
+    if (uw == 0 and !show_panel_toggle) return;
+    const w = uw + (if (uw > 0 and show_panel_toggle) @as(f32, 6) else 0) + (if (show_panel_toggle) @as(f32, 28) else 0);
+    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
     defer bar.end();
-    if (actions_w > 0) {
-        va.control(c, a, k);
-        _ = c.leaf(.{ .width = .{ .px = 8 } }, .none, null);
+    if (uw > 0) vu.topbarUpdatesButton(c, a, k);
+    if (show_panel_toggle) {
+        ui.key(c, "topbar-right-panel-toggle");
+        if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
+            .size = 28,
+            .on = strip.hasHost(a),
+            .tip = .{ .text = "Toggle side panel" },
+        })) @import("app_panels.zig").toggleHost(a);
     }
-    if (kit.iconButton(c, k, .@"file-tree", .{ .size = 28, .on = a.panels.files_open })) @import("app_files.zig").toggle(a);
-    _ = c.leaf(.{ .width = .{ .px = 4 } }, .none, null);
-    if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{ .size = 28 })) @import("app_panels.zig").toggleHost(a);
 }
 
 /// The chat's identity in the title bar's row: its agent's mark, its title,

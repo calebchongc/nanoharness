@@ -154,6 +154,42 @@ pub const radius: f32 = 16;
 pub const textarea_min: f32 = 60;
 pub const expanded_min: f32 = textarea_min + 42 + 2;
 
+pub const ExpandedActionsLayout = struct {
+    px: f32,
+    send_pl: f32,
+    show_mic: bool,
+    show_write: bool,
+};
+
+/// Keep the primary Attach and Send/Stop controls strictly inside the composer
+/// pill in narrow split panes by tightening padding before dropping optional
+/// secondary controls (expand-editor, then dictation).
+pub fn expandedActionsLayout(w: f32, has_mic: bool) ExpandedActionsLayout {
+    const inner = @max(0, w - 2);
+    const mic_w: f32 = if (has_mic) 30 else 0;
+    // Normal: px(12)*2 + attach(28) + mic(30?) + write(30) + send(pl 8 + 28).
+    if (inner >= 24 + 28 + mic_w + 30 + 36) return .{ .px = 12, .send_pl = 8, .show_mic = has_mic, .show_write = true };
+    // Tight padding keeps every control down to ~134pt composer width.
+    if (inner >= 12 + 28 + mic_w + 30 + 32) return .{ .px = 6, .send_pl = 4, .show_mic = has_mic, .show_write = true };
+    // Drop expand-editor (still reachable via ⌘⇧E / Ctrl+Alt+E) before mic.
+    if (inner >= 12 + 28 + mic_w + 32) return .{ .px = 6, .send_pl = 4, .show_mic = has_mic, .show_write = false };
+    return .{ .px = 6, .send_pl = 4, .show_mic = false, .show_write = false };
+}
+
+test "expandedActionsLayout keeps primary controls inside narrow split composers" {
+    const wide = expandedActionsLayout(300, true);
+    try std.testing.expectEqual(@as(f32, 12), wide.px);
+    try std.testing.expect(wide.show_mic and wide.show_write);
+    const tight = expandedActionsLayout(140, true);
+    try std.testing.expectEqual(@as(f32, 6), tight.px);
+    try std.testing.expect(tight.show_mic and tight.show_write);
+    const narrow = expandedActionsLayout(128, true);
+    try std.testing.expectEqual(@as(f32, 6), narrow.px);
+    try std.testing.expect(narrow.show_mic and !narrow.show_write);
+    const minimal = expandedActionsLayout(96, true);
+    try std.testing.expect(!minimal.show_mic and !minimal.show_write);
+}
+
 pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corner: f32) void {
     @import("view_composer_completion.zig").menu(c, a, k, w);
     // `border_1` takes its point from inside the box in GPUI: the pill is
@@ -190,41 +226,44 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
             ui.div(c).row().wFull();
         if (shape == .expanded) c.node(area.index).style.min_height = textarea_min;
         defer area.end();
-        if (shape == .compact) attachButtons(c, a, k);
+        if (shape == .compact) attachButtons(c, a, k, dictate.shown(a));
         {
             ui.key(c, "composer-text-inner");
             const base = ui.div(c).column().grow().w(0);
             // Preserve GPUI's expanded baseline and bare-field padding.
-            const inner = if (shape == .compact) base else base.px(16).pt(16 - 1.5).pb(4 + 1.5 - 4);
+            const inner = if (shape == .compact) base else base.px(if (w < 160) 10 else 16).pt(16 - 1.5).pb(4 + 1.5 - 4);
             defer inner.end();
             input(c, a, k, shape);
         }
-        if (shape == .compact) send(c, a, k);
+        if (shape == .compact) send(c, a, k, 8);
     }
     if (shape == .compact) return;
     // Expanded: attach (and the mic) at the start, Send at the end.
-    const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
+    const act = expandedActionsLayout(w, dictate.shown(a));
+    const actions = ui.div(c).row().wFull().h(42).px(act.px).pt(2).pb(8).itemsCenter();
     defer actions.end();
-    attachButtons(c, a, k);
-    // Keep the expand button mounted whenever the composer is expanded
+    attachButtons(c, a, k, act.show_mic);
+    // Keep the expand button mounted whenever the composer is wide enough
     // (`fixed_write_button_survives_focus_blur` in `Nano/FrameSchedule.lean`),
     // so `ui.textField` blurring `c.focus` on `mouseDown` never unmounts
     // `composer-write` before `mouseUp` completes `clicked()`.
-    _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
-    @import("view_write.zig").button(c, a, k);
+    if (act.show_write) {
+        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
+        @import("view_write.zig").button(c, a, k);
+    }
     if (a.view.write_open) a.view.focus_composer = false;
     ui.spacer(c);
-    send(c, a, k);
+    send(c, a, k, act.send_pl);
 }
 
 const dictate = @import("app_dictation.zig");
 
-fn attachButtons(c: *ui.Context, a: *App, k: theme.Colors) void {
+fn attachButtons(c: *ui.Context, a: *App, k: theme.Colors, show_mic: bool) void {
     if (kit.iconButton(c, k, .paperclip, .{ .size = 28, .radius = 14, .icon = 18 }))
         attachments.pick(a);
     // The mic shows where the device's Codex voice was found, and while a
     // session is live.
-    if (!dictate.shown(a)) return;
+    if (!show_mic) return;
     _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
     if (micButton(c, a, k)) dictate.toggle(a);
 }
@@ -447,10 +486,14 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 /// leading edge (`PickerKind::HarnessModel`'s trigger). Returns the width
 /// it takes this frame, for the footer to share out the rest.
 pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
+    return chipWithMax(c, a, k, null);
+}
+
+pub fn chipWithMax(c: *ui.Context, a: *App, k: theme.Colors, max_w_override: ?f32) f32 {
     const mp = @import("model_picker.zig");
     const t = a.target();
-    const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
-    const max_chip_w = @min(248, room);
+    const room = @max(28, transcript_view.paneWidth(c, a) - 32 - 100);
+    const max_chip_w = if (max_w_override) |m| @max(28, @min(248, m)) else @min(248, room);
     const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
     const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
     const label_loading = !unresolved and a.models.items.len == 0 and t.model == null;
@@ -458,8 +501,9 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     const label_text = if (!unresolved and !label_loading) a.modelLabel(t.model) else "";
     const suffix_text: ?[]const u8 = if (!unresolved and !label_loading) (if (t.reasoning) |level| rules.reasoningLabel(level) else null) else null;
     const st_measure: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
+    const icon_only = max_chip_w < 52;
     var wanted_w: f32 = 12 + 16;
-    if (!unresolved) {
+    if (!unresolved and !icon_only) {
         if (label_loading) {
             if (!failed) wanted_w += 6 + 56;
         } else {
@@ -471,13 +515,18 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, target_w, c.time, c.reduced_motion);
     if (width_sample.moving) c.frameIn(1.0 / 120.0);
 
-    var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(6).itemsCenter().rounded(8).clip();
+    var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(if (icon_only) 0 else 6).itemsCenter().rounded(8).clip();
     if (width_sample.moving) base = base.w(width_sample.value);
+    const full_hint: ?[]const u8 = if (!unresolved and !label_loading and (icon_only or wanted_w > max_chip_w))
+        (if (suffix_text) |sfx| c.print("{s} · {s}", .{ label_text, sfx }) else label_text)
+    else
+        null;
+    if (full_hint) |hint| base = @import("view_tooltip.zig").on(base, k, .{ .text = hint });
     // At rest it is its content: the glyph (the 5-point loader until an
     // agent is known) in its insets, the label's gap (kept even for no
     // label), and the words.
     const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
-    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + 6) + glyph_w, max_chip_w);
+    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + (if (icon_only) @as(f32, 0) else 6)) + glyph_w, max_chip_w);
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -492,7 +541,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     // Its label is always a child, empty or not, so its gap stays.
     if (unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
-        _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
+        if (!icon_only) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
         return drawn_w;
     }
     if (a.harnesses.items.len == 0 and !chat_harness) {
@@ -506,6 +555,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
         const mark = icons.harnessMark(t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
     }
+    if (icon_only) return drawn_w;
     if (label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
         if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
@@ -516,8 +566,17 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     const live_t = a.target();
     const live_label = if (!unresolved and !label_loading) a.modelLabel(live_t.model) else label_text;
     const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
-    kit.rollText(c, "composer-model-label", live_label, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
-    if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    const label_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) };
+    const suffix_st: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) };
+    const text_room = @max(0, max_chip_w - (12 + glyph_w + 6));
+    const live_label_w = @ceil(c.text.width(live_label, st_measure));
+    const live_suffix_w: f32 = if (live_suffix) |sfx| 6 + @ceil(c.text.width(sfx, st_measure)) else 0;
+    if (live_label_w + live_suffix_w <= text_room) {
+        kit.rollText(c, "composer-model-label", live_label, label_st);
+        if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, suffix_st);
+    } else {
+        kit.ellipsisText(c, live_label, label_st, text_room);
+    }
     return drawn_w;
 }
 
@@ -544,7 +603,7 @@ pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors, glyph_only: bool) 
     else
         "Follow-ups wait in the queue until the turn finishes. Click to steer immediately";
     ui.key(c, "composer-follow-up-chip");
-    var b = ui.div(c).row().h(20).px(8).gap(5).itemsCenter().rounded(6).hover(k.hover);
+    var b = ui.div(c).row().h(20).px(if (glyph_only) 4 else 8).gap(if (glyph_only) 0 else 5).itemsCenter().rounded(6).hover(k.hover);
     b = @import("view_tooltip.zig").on(b, k, .{ .text = hint });
     defer b.end();
     const hot = b.hovered();
@@ -579,13 +638,13 @@ fn skeleton(c: *ui.Context) void {
 }
 
 /// Send (or queue, while a run goes); Stop with nothing typed mid-run.
-fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
+fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
     const empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0 and attachments.count(a) == 0;
     const running = a.selectedStatus() == .working;
     const stop = running and empty;
     // Dimmed only when it can't send at all; an empty box just does nothing.
     const blocked = !stop and (a.engine.state != .connected or !attachments.ready(a));
-    const pad = ui.div(c).row().pl(8);
+    const pad = ui.div(c).row().pl(pad_left);
     defer pad.end();
     // Filled with the primary accent, its glyph contrast-checked on it
     // (`render_send_button`, `on_primary_accent`). `.circular()` renders a

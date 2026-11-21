@@ -69,61 +69,40 @@ pub fn space(c: *ui.Context, h: f32) void {
 /// In the sidebar's place: "Settings", the search, the sections under their
 /// groups, and Back at the foot.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const zen = a.settings.uiMode() == .zen;
-    if (zen) {
-        const chrome = @import("panel_chrome.zig");
-        const panel_chrome = @import("view_panel_chrome.zig");
-        const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
-            .pt(chrome.header_height).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
-        defer side.end();
-        ui.key(c, "zen-settings-nav-card");
-        const nav_card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(4).clip();
-        defer nav_card.end();
-        navBody(c, a, k, true);
-        return;
-    }
-    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
+    const chrome = @import("panel_chrome.zig");
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
+        .pt(chrome.header_height).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
     defer side.end();
-    navBody(c, a, k, false);
+    ui.key(c, "zen-settings-nav-card");
+    const nav_card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(4).clip();
+    defer nav_card.end();
+    navBody(c, a, k, a.settings.uiMode() == .zen);
 }
 
 fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
     const panel_chrome = @import("view_panel_chrome.zig");
-    const nav_w = if (zen) sidebar.widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else sidebar.widthOf(a);
+    const nav_w = sidebar.widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5;
     {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();
         defer list.end();
         {
-            const h = ui.div(c).row().wFull().px(if (zen) @as(f32, 0) else 4).pt(if (zen) @as(f32, 4) else 10).pb(8).itemsCenter();
+            const h = ui.div(c).row().wFull().pt(4).pb(8).itemsCenter();
             defer h.end();
             ui.key(c, "settings-top-back");
-            if (zen) {
-                const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(30).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
-                const top_hot = top_back.hovered();
-                icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
-                ui.text(c, "Back to chats", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
-                ui.spacer(c);
-                kit.kbdHint(c, k, "esc");
-                if (top_back.clicked()) close(a);
-                top_back.end();
-            } else {
-                const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
-                const top_hot = top_back.hovered();
-                icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
-                ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
-                if (top_back.clicked()) close(a);
-                top_back.end();
-                ui.spacer(c);
-                ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
-            }
+            const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(30).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
+            const top_hot = top_back.hovered();
+            icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
+            ui.text(c, if (zen) "Back to chats" else "Back", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
+            ui.spacer(c);
+            kit.kbdHint(c, k, "esc");
+            if (top_back.clicked()) close(a);
+            top_back.end();
         }
         {
             // 33 tall: GPUI's search is a composer input, 5 above and below.
-            var s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8);
-            s = if (zen)
-                s.bg(if (k.dark) k.ink(0.04) else ui.Color.white.alpha(0.75)).border(panel_chrome.zenEdge(k)).borderW(1)
-            else
-                s.bg(k.ink(0.04));
+            const s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8)
+                .bg(if (k.dark) k.ink(0.04) else ui.Color.white.alpha(0.75)).border(panel_chrome.zenEdge(k)).borderW(1);
             defer s.end();
             icons.icon(c, .magnifer, 14, k.muted, 0);
             const f = ui.div(c).row().grow().w(0);

@@ -254,6 +254,8 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     {
         var list_style: ui.Style = .{ .width = .fill, .max_height = 224, .direction = .column, .gap = 2 };
         if (@hasField(ui.Style, "scrollbar")) list_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        ui.key(c, "spaces-menu-list");
+        const scroll_at = c.nodes.items.len;
         ui.scroll(c, list_style);
         defer ui.end(c);
         const now = a.nowMs();
@@ -263,7 +265,20 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             if (i > 0) caption_at = i;
             break;
         };
-        for (rows, 0..) |row, i| {
+        // Window long project lists so only visible rows are built each frame.
+        const row_step: f32 = 34;
+        const use_window = rows.len > 24;
+        var first: usize = 0;
+        var last: usize = rows.len;
+        if (use_window) {
+            const scroll_id = c.node(@intCast(scroll_at)).id;
+            const max_scroll = @max(0, @as(f32, @floatFromInt(rows.len)) * row_step - 224);
+            const offset = std.math.clamp(c.scroll.get(scroll_id) orelse 0, 0, max_scroll);
+            first = @min(rows.len, @as(usize, @intFromFloat(@floor(@max(0, offset - row_step) / row_step))));
+            last = @min(rows.len, first + @as(usize, @intFromFloat(@ceil(224.0 / row_step))) + 3);
+            if (first > 0) _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(first)) * row_step - 2 } }, .none, null);
+        }
+        for (rows[first..last], first..) |row, i| {
             if (caption_at == i) {
                 const cap = ui.div(c).row().wFull().px(8).pt(8).pb(2);
                 defer cap.end();
@@ -297,6 +312,9 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
                 },
                 .add => {},
             }
+        }
+        if (use_window and last < rows.len) {
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(rows.len - last)) * row_step - 2 } }, .none, null);
         }
     }
     // Full-bleed through the card's inset.

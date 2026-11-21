@@ -24,25 +24,25 @@ pub const width: f32 = @import("settings.zig").sidebar_default;
 pub fn widthOf(a: *const App) f32 {
     return a.settings.sidebarWidth();
 }
-fn cardInnerW(a: *const App) f32 {
-    return if (a.settings.uiMode() == .zen) widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else widthOf(a);
+pub fn cardInnerW(a: *const App) f32 {
+    return widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5;
 }
 pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
+    const chrome = @import("panel_chrome.zig");
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const side = ui.div(c).column().w(widthOf(a)).hFull();
+    defer side.end();
+    sidebarTitlebar(c, a, k);
+    ui.div(c).h(chrome.top_pad).end();
+    const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+    defer wrap.end();
+    ui.key(c, "zen-sidebar-card");
+    const card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(6).clip();
+    defer card.end();
     if (zen) {
-        const chrome = @import("panel_chrome.zig");
-        const panel_chrome = @import("view_panel_chrome.zig");
-        const side = ui.div(c).column().w(widthOf(a)).hFull();
-        defer side.end();
-        sidebarTitlebar(c, a, k);
-        ui.div(c).h(chrome.top_pad).end();
-        const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
-        defer wrap.end();
-        ui.key(c, "zen-sidebar-card");
-        const card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(6).clip();
-        defer card.end();
         zenNavRows(c, a, k);
         filterRow(c, a, k);
         const search = @import("view_sidebar_search.zig");
@@ -56,10 +56,6 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         zenFooter(c, a, k, archived_count);
         return;
     }
-    // The edge is drawn over its last column (view.zig), as the GPUI app's.
-    const side = ui.div(c).column().w(widthOf(a)).hFull().bg(k.sidebar);
-    defer side.end();
-    sidebarTitlebar(c, a, k);
     const search = @import("view_sidebar_search.zig");
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
@@ -423,36 +419,38 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (clicked) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
         return;
     }
-    const row = ui.div(c).row().wFull().px(8).pt(6).pb(4).itemsCenter();
+    const row = ui.div(c).row().wFull().px(10).pt(4).pb(6).itemsCenter();
     defer row.end();
-    const rest_bg = k.ink(if (k.dark) 0.055 else 0.042);
-    const base = ui.div(c).row().grow().w(0).h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
+    const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
+    const base = ui.div(c).row().grow().w(0).h(26).px(8).gap(6).itemsCenter().rounded(7)
+        .border(k.border.alpha(0.55)).borderW(1).clip().control();
     const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
     const t = lh.div;
     defer t.end();
     if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
     if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
-    const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.88);
-    const room = @max(0, widthOf(a) - 16 - 16 - 16 - 8);
+    const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.86);
+    const room = @max(0, cardInnerW(a) - 20 - 16 - 16 - 22);
     if (a.findSpace(a.view.filter)) |s| {
-        const icon_slot = ui.div(c).row().size(16, 16).center();
+        const icon_slot = ui.div(c).row().size(15, 15).center();
         badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
         icon_slot.end();
         const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
         const off = !menus.online(a, s.device_id, a.nowMs());
         const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
-        const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
+        const name_w = @min(c.text.width(s.name, .{ .size = 12.5, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
         const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
         defer box.end();
-        kit.fadeText(c, s.name, .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, name_w);
+        kit.fadeText(c, s.name, .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, name_w);
         kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
         if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
     } else {
-        icons.icon(c, .folder, 15, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.85) else k.muted.alpha(0.85), 16);
+        icons.icon(c, .folder, 14, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.88) else k.muted.alpha(0.85), 14);
         const label = ui.div(c).row().grow().w(0).clip();
         defer label.end();
-        kit.fadeText(c, "All projects", .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, room);
+        kit.fadeText(c, "All projects", .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, room);
     }
+    icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
 }
 
 const RowLookup = struct {
@@ -1971,16 +1969,16 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         @import("view_sandbox_strip.zig").strip(c, a, k, 0);
     @import("view_updates.zig").sidebarFooterRows(c, a, k);
     @import("view_account_notice.zig").strip(c, a, k);
-    const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
+    const f = ui.div(c).row().wFull().h(38).px(7).pt(2).pb(4).gap(3).itemsCenter();
     defer f.end();
     {
-        // The desktop's footer is avatar-only; identity stays in its
-        // accessible tooltip and in the menu, not inside the avatar's row.
         const account = @import("app_account.zig");
         const m = account.menu(a.account.scope, a.account.user, a.account.codegraff);
+        const signed_in = a.account.user != null;
+        const has_identity = signed_in or a.account.codegraff.signed_in;
         const display = m.name orelse m.line;
         ui.key(c, "user-menu");
-        var b = ui.div(c).row().size(21, 21).center().roundedFull();
+        var b = ui.div(c).row().size(24, 24).center().rounded(7);
         b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover);
         b = tip.on(b, k, .{ .text = c.print("Account menu: {s}", .{display}) });
         defer b.end();
@@ -1989,11 +1987,18 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (a.view.account_menu) account.refresh(a);
         }
         if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
-        const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
-        defer av.end();
-        ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
+        const drew_avatar = if (a.account.avatar_bytes) |bytes|
+            bytes.len > 0 and ui.image(c, .{
+                .key = "sidebar-account-avatar",
+                .source = .{ .encoded = bytes },
+                .box = .{ .w = 20, .h = 20 },
+                .radius = 10,
+            })
+        else
+            false;
+        if (!drew_avatar) renderFallbackAvatar(c, k, display, has_identity);
     }
-    ui.div(c).w(6).end();
+    sidebarThemeButton(c, a, k);
     {
         const searching = a.view.search.open;
         ui.key(c, "sidebar-search-trigger");
@@ -2008,16 +2013,16 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         const dev = a.settings.uiMode() == .developer;
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
-            ui.div(c).row().h(26).px(8).gap(5).itemsCenter().rounded(6)
-                .bg(if (dev) k.ink(0.08) else .transparent)
-                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+            ui.div(c).row().h(26).px(7).gap(4).itemsCenter().rounded(7)
+                .bg(if (dev) k.ink(0.065) else .transparent)
+                .border(k.border.alpha(0.55)).borderW(1)
                 .hover(k.hover),
             k,
             .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
         );
         defer pill.end();
-        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 13, if (dev) k.text else k.muted, 0);
-        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11.5, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 12, if (dev) k.text else k.muted, 0);
+        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
         if (pill.clicked()) {
             a.settings.toggleUiMode();
             a.redraw();
@@ -2026,18 +2031,17 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
             a.redraw();
         }
     }
-    ui.div(c).w(6).end();
     {
         ui.key(c, "chat-history");
-        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
+        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(7).hover(k.hover).control(), k, .{ .text = "Chat history", .delay = tip.quick });
         defer history.end();
-        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+        icons.icon(c, .@"clock-circle", 15, k.muted, 0);
         if (history.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
     }
-    ui.div(c).w(6).end();
+    ui.div(c).w(0).end();
     ui.key(c, "sidebar-session-create");
-    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New workspace", .delay = tip.quick });
+    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(7).hover(k.hover).control(), k, .{ .text = "New workspace", .delay = tip.quick });
     defer b.end();
-    icons.icon(c, .plus, 16, k.muted, 0);
+    icons.icon(c, .plus, 15, k.muted, 0);
     if (b.clicked()) a.newWorkspaceSession();
 }

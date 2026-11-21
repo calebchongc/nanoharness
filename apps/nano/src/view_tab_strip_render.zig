@@ -18,7 +18,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     if (!strip.hasHost(a)) a.view.strip.host_tab_rect = null;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
-    const ws_gutter: f32 = if (a.settings.uiMode() == .zen) chrome.zen_gutter else chrome.gutter;
+    const ws_gutter: f32 = chrome.zen_gutter;
     if (strip.count(a) <= 1) return single(c, a, k, left);
     var targets: [tabs.max_panes + 2]strip.Panel = undefined;
     var widths: [tabs.max_panes + 2]f32 = undefined;
@@ -570,15 +570,11 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         else
             slot_w;
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
-        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else chrome.tab_height).px(8).gap(6).itemsCenter().rounded(7).clip().control();
-        if (zen) {
-            cap = if (ix == selected)
-                cap.bg(k.ink(if (k.dark) 0.065 else 0.055)).hover(k.hover)
-            else
-                cap.bg(k.ink(if (k.dark) 0.035 else 0.025)).hover(k.hover);
-        } else if (ix != selected) {
-            cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
-        }
+        var cap = ui.div(c).row().size(pill_w, if (zen) @as(f32, 28) else 30).px(8).gap(6).itemsCenter().rounded(7).clip().control();
+        cap = if (ix == selected)
+            cap.bg(k.ink(if (k.dark) 0.075 else 0.06)).hover(k.hover)
+        else
+            cap.bg(k.ink(if (k.dark) 0.035 else 0.025)).hover(k.hover);
         defer cap.end();
         if (ix == selected) {
             if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;

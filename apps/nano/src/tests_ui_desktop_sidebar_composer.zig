@@ -87,7 +87,7 @@ test "sidebar disclosure arrows stay aligned through hover collapse and Cmd+B" {
     const pinned = try disclosureArrow(&h.t, "Pinned");
     const project = try disclosureArrow(&h.t, "synthetic-notes");
     const archived = try disclosureArrow(&h.t, "Archived");
-    try testing.expectApproxEqAbs(sidebar.widthOf(&h.a) - 28, project.x, 0.01);
+    try testing.expectApproxEqAbs(sidebar.widthOf(&h.a) - 31, project.x, 0.01);
     try testing.expectApproxEqAbs(pinned.x, project.x, 0.01);
     try testing.expectApproxEqAbs(pinned.x, archived.x, 0.01);
 
@@ -181,8 +181,8 @@ test "desktop parity composer alignment matches the reference and compact width 
     try h.init(true);
     defer h.deinit();
     h.a.dictation.probed.store(1, .release);
-    // The shell keeps 234 points outside this pane (sidebar + panel chrome).
-    h.t.resize(606, 440);
+    // The shell keeps 235 points outside this pane (sidebar + inset panel chrome).
+    h.t.resize(607, 440);
     h.t.settle(1);
     const pill = h.a.view.composer_anchor orelse return error.NoComposer;
     const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.NoComposerField;
@@ -220,7 +220,7 @@ test "desktop parity composer alignment matches the reference and compact width 
 
     // GPUI's compact_capacity is the measured field less eight points.
     // Six fewer pane points cross its 200-point compact minimum even empty.
-    h.t.resize(600, 440);
+    h.t.resize(601, 440);
     h.t.settle(1);
     try testing.expect(h.a.view.composer_expanded);
     try testing.expect(h.a.view.composer_anchor.?.h >= composer.expanded_min);
