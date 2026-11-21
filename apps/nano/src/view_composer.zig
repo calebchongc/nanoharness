@@ -59,6 +59,8 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     dictationStatus(c, a, k, w);
     ui.key(c, "queue-tray");
     _ = queue_view.tray(c, a, k, w);
+    ui.key(c, "composer-notice");
+    noticeBanner(c, a, k, w, queued);
     ui.key(c, "composer");
     if (a.wizard != null) {
         const q = ui.div(c).column();
@@ -262,6 +264,50 @@ pub fn dictationStatus(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     kit.ellipsisText(c, text, .{ .size = 11, .line_height = 14, .color = k.faint }, w - 16 - 11);
 }
 
+/// Separate, width-bounded composer status region (#44). Lives above the keyed
+/// composer surface so long notices wrap cleanly without taking horizontal
+/// space from the editable field or resetting caret, focus, selection, or undo.
+fn noticeBanner(c: *ui.Context, a: *App, k: theme.Colors, w: f32, has_gap: bool) void {
+    const text = a.noticeText() orelse return;
+    const wrap = ui.div(c).row().w(w).pb(if (has_gap) 0 else 6);
+    defer wrap.end();
+    const pad_x: f32 = 10;
+    const icon_w: f32 = 14;
+    const close_w: f32 = 18;
+    const gap: f32 = 8;
+    const border_w: f32 = 2;
+    const show_icon = w >= 160;
+    const chrome_w = border_w + pad_x * 2 + (if (show_icon) icon_w + gap else 0) + gap + close_w;
+    const text_w = @max(1, w - chrome_w);
+    const card = ui.div(c).row().wFull().px(pad_x).py(6).gap(gap).itemsStart().rounded(10)
+        .bg(k.danger.alpha(if (k.dark) 0.14 else 0.08))
+        .border(k.danger.alpha(if (k.dark) 0.30 else 0.22)).borderW(1);
+    defer card.end();
+    if (show_icon) {
+        const ic = ui.div(c).row().pt(1.5);
+        defer ic.end();
+        icons.icon(c, .@"danger-triangle", icon_w, k.danger, 0);
+    }
+    {
+        const body = ui.div(c).column().w(text_w).maxH(96).scrollY();
+        defer body.end();
+        ui.text(c, text, .{ .size = 12, .line_height = 17, .color = k.danger, .wrap = true });
+    }
+    ui.key(c, "composer-notice-dismiss");
+    if (kit.iconButton(c, k, .close, .{
+        .size = close_w,
+        .radius = 4,
+        .icon = 11,
+        .color = k.danger.alpha(0.78),
+        .label = "Dismiss notice",
+    })) {
+        a.clearNotice();
+        a.view.focus_composer = true;
+        c.changed = true;
+        a.redraw();
+    }
+}
+
 fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // Compact, GPUI's line sits half a point lower than nano's centred one.
     const box = if (shape == .compact) ui.div(c).row().wFull().px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
@@ -348,11 +394,6 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         if (a.queue.items.len > 0) a.queueSendNow(a.queue.items[a.queue.items.len - 1].id);
     }
     if (a.queue_edit != null and c.shortcut(.{ .key = ui.Shortcut.escape })) a.queueFinishEdit(.cancel);
-    if (a.noticeText()) |n| {
-        const line = ui.div(c).row().pt(4);
-        defer line.end();
-        ui.text(c, n, .{ .size = 11, .color = k.danger });
-    }
 }
 
 /// The message caret (composer.rs, the input's paint: "a rounded accent

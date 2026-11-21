@@ -1738,6 +1738,10 @@ pub const App = struct {
         a.notice_len = n;
     }
 
+    pub fn clearNotice(a: *App) void {
+        a.notice_len = 0;
+    }
+
     pub fn noticeText(a: *const App) ?[]const u8 {
         return if (a.notice_len == 0) null else a.notice[0..a.notice_len];
     }

@@ -305,3 +305,182 @@ test "composer dock separates queue tray jump button and growing input" {
         try t.expect(tester.ctx.scroll_follow.get(777) orelse false);
     };
 }
+
+fn findNoticeRect(tester: *const ui.Tester, needle: []const u8) ?ui.Rect {
+    for (tester.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.eql(u8, node.content.text.str, needle)) return node.rect;
+    }
+    return null;
+}
+
+fn sendControlRect(tester: *const ui.Tester, pill: ui.Rect) ?ui.Rect {
+    var best: ?ui.Rect = null;
+    for (tester.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.w == 28 and r.h == 28 and r.x >= pill.x + pill.w - 48 and
+            r.y >= pill.y and r.y + r.h <= pill.y + pill.h)
+        {
+            best = r;
+        }
+    }
+    return best;
+}
+
+fn attachControlRect(tester: *const ui.Tester, pill: ui.Rect) ?ui.Rect {
+    for (tester.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.w == 28 and r.h == 28 and r.x >= pill.x and r.x <= pill.x + 24 and
+            r.y >= pill.y and r.y + r.h <= pill.y + pill.h)
+            return r;
+    }
+    return null;
+}
+
+fn rectsOverlap(a: ui.Rect, b: ui.Rect) bool {
+    return a.x < b.x + b.w - 0.5 and b.x < a.x + a.w - 0.5 and
+        a.y < b.y + b.h - 0.5 and b.y < a.y + a.h - 0.5;
+}
+
+test "composer long notice stays separate from the editable field across compact, expanded, narrow, Send and Stop states (#44)" {
+    theme.registerFonts();
+    const long_notice = "Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.";
+    const Case = struct { width: usize, draft: []const u8, working: bool, snap_name: ?[]const u8 = null };
+    const cases = [_]Case{
+        .{ .width = 640, .draft = "Example draft", .working = false, .snap_name = "compact-send" },
+        .{ .width = 640, .draft = "", .working = true, .snap_name = "compact-stop" },
+        .{ .width = 640, .draft = "Example draft", .working = true, .snap_name = "compact-working-draft" },
+        .{ .width = 640, .draft = "Example draft\nSecond line", .working = false, .snap_name = "expanded" },
+        .{ .width = 320, .draft = "Example draft", .working = false, .snap_name = "narrow-split" },
+        .{ .width = 240, .draft = "Example draft", .working = true },
+    };
+
+    for (cases) |tc| {
+        var a: App = .init(t.allocator, t.io, 1);
+        defer a.deinit();
+        a.offscreen = true;
+        a.dark = false;
+        a.selected = try a.gpa.dupe(u8, "synthetic");
+        a.view.strip.focused = .{ .chat = 0 };
+        a.view.focus_composer = true;
+        if (tc.working) {
+            const sessions = try std.json.parseFromSlice(std.json.Value, t.allocator,
+                \\[{"chatId":"synthetic","status":"working","updatedAt":"2099-01-01T00:00:00Z"}]
+            , .{});
+            defer sessions.deinit();
+            try a.sessions.replace(sessions.value);
+        }
+        a.composer.set(tc.draft);
+        a.setNotice(long_notice);
+
+        var tester: ui.Tester = undefined;
+        try tester.init(t.allocator, .init(&a, view), .{
+            .width = @floatFromInt(tc.width),
+            .height = 220,
+            .scale = 2,
+            .dark = false,
+            .theme = theme.ui(false),
+        });
+        defer tester.deinit();
+        tester.settle(0.3);
+
+        if (tc.snap_name) |name| {
+            if (std.c.getenv("NANO_NOTICE_SNAP_DIR")) |dir| {
+                var buf: [1024]u8 = undefined;
+                const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+                try tester.screenshot(path);
+            }
+        }
+
+        const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        const field = tester.ctx.rects.get(a.view.composer_id) orelse return error.MissingComposerField;
+        const notice_rect = findNoticeRect(&tester, long_notice) orelse return error.MissingNoticeText;
+        const send_btn = sendControlRect(&tester, pill) orelse return error.MissingSendOrStopButton;
+        const attach_btn = attachControlRect(&tester, pill) orelse return error.MissingAttachButton;
+
+        // Draft text must remain intact in storage.
+        try t.expectEqualStrings(tc.draft, a.composer.text());
+        // The editable field must keep a positive usable width (never crushed by the notice).
+        const min_field_w: f32 = if (tc.width >= 640) 300 else 120;
+        try t.expect(field.w >= min_field_w);
+        try t.expect(field.h >= 20);
+        // The notice must stay strictly inside the composer's horizontal width budget (wrapped, never clipped off right).
+        try t.expect(notice_rect.x >= pill.x - 0.5);
+        try t.expect(notice_rect.x + notice_rect.w <= pill.x + pill.w + 0.5);
+        // The notice must not overlap the text field, attach button, or Send/Stop control.
+        try t.expect(!rectsOverlap(notice_rect, field));
+        try t.expect(!rectsOverlap(notice_rect, send_btn));
+        try t.expect(!rectsOverlap(notice_rect, attach_btn));
+        try t.expect(!rectsOverlap(field, send_btn));
+        try t.expect(!rectsOverlap(field, attach_btn));
+    }
+}
+
+test "composer notice appearance, update, and dismissal preserve draft text, focus, caret, selection, and undo (#44)" {
+    theme.registerFonts();
+    var a: App = .init(t.allocator, t.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = false;
+    a.selected = try a.gpa.dupe(u8, "synthetic");
+    a.view.strip.focused = .{ .chat = 0 };
+    a.view.focus_composer = true;
+
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&a, view), .{
+        .width = 640,
+        .height = 220,
+        .scale = 2,
+        .dark = false,
+        .theme = theme.ui(false),
+    });
+    defer tester.deinit();
+    tester.settle(0.2);
+
+    a.composer.set("Example");
+    tester.settle(0.1);
+    tester.textOps(&.{.{ .command = .move_line_end }});
+    tester.textOps(&.{.{ .insert = " draft" }});
+    tester.settle(0.1);
+    const id_before = a.view.composer_id;
+    try t.expect(id_before != 0);
+    try t.expectEqual(id_before, tester.ctx.focus);
+    // Select "draft" inside the field so we verify selection + caret survival.
+    if (tester.ctx.edits.getPtr(id_before)) |e| {
+        e.anchor = 8;
+        e.caret = 13;
+    }
+
+    // Appearance of a long notice keeps the same field id, focus, draft, caret, and selection.
+    a.setNotice("Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.");
+    tester.settle(0.1);
+    try t.expectEqual(id_before, a.view.composer_id);
+    try t.expectEqual(id_before, tester.ctx.focus);
+    try t.expectEqualStrings("Example draft", a.composer.text());
+    const edit_during = tester.ctx.edits.get(id_before) orelse return error.MissingEditState;
+    try t.expectEqual(@as(usize, 8), edit_during.anchor);
+    try t.expectEqual(@as(usize, 13), edit_during.caret);
+
+    // Updating the notice text keeps all editing state intact.
+    a.setNotice("Only local files and images can be attached. Use Attach files to choose one.");
+    tester.settle(0.1);
+    try t.expectEqual(id_before, a.view.composer_id);
+    try t.expectEqual(id_before, tester.ctx.focus);
+    try t.expectEqualStrings("Example draft", a.composer.text());
+
+    // Dismissing the notice via its close control keeps draft, focus, and undo history intact.
+    const pill = a.view.composer_anchor orelse return error.MissingComposer;
+    const dismiss_btn = for (tester.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.interactive and r.w == 18 and r.h == 18 and r.y + r.h <= pill.y) break r;
+    } else return error.MissingNoticeDismissButton;
+    tester.click(dismiss_btn.x + dismiss_btn.w / 2, dismiss_btn.y + dismiss_btn.h / 2);
+    tester.settle(0.1);
+    try t.expect(a.noticeText() == null);
+    try t.expectEqual(id_before, a.view.composer_id);
+    try t.expectEqual(id_before, tester.ctx.focus);
+    try t.expectEqualStrings("Example draft", a.composer.text());
+    tester.ctx.undo_op = .undo;
+    tester.frame();
+    tester.settle(0.1);
+    try t.expectEqualStrings("Example", a.composer.text());
+}
