@@ -31,6 +31,7 @@ pub const FrameStats = ctx_mod.FrameStats;
 pub const frame_log = @import("frame_log.zig");
 pub const FrameLog = frame_log.FrameLog;
 pub const Surface = if (@import("builtin").os.tag == .macos) @import("surface.zig").Surface else void;
+pub const surface_drop = if (@import("builtin").os.tag == .macos) @import("surface_drop.zig") else struct {};
 pub const KeysReleased = if (@import("builtin").os.tag == .macos) @import("surface.zig").KeysReleased else void;
 pub const Shortcut = ctx_mod.Shortcut;
 /// A text field's editing keys: the system's, Emacs's or Vim's.

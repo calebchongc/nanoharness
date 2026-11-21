@@ -222,7 +222,10 @@ pub fn stage(a: *App, name: []const u8, bytes: []const u8) !void {
 /// Shared picker/Paste/drop validation. Native drops must validate before
 /// activating another pane; the returned bytes are owned by the caller.
 pub fn readFile(a: *App, path: []const u8) ![]u8 {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(a.io, path, a.gpa, .limited(max_bytes));
+    const bytes = std.Io.Dir.cwd().readFileAlloc(a.io, path, a.gpa, .limited(max_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return error.AttachmentTooLarge,
+        else => return err,
+    };
     if (bytes.len == 0) {
         a.gpa.free(bytes);
         return error.EmptyAttachment;

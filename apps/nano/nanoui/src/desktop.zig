@@ -81,7 +81,12 @@ pub const clipboard = struct {
         for (0..n) |i| {
             const url = objc.msg(objc.Object, urls, "objectAtIndex:", .{i});
             if (!objc.msg(objc.BOOL, url, "isFileURL", .{})) continue;
-            try out.append(gpa, try gpa.dupe(u8, objc.fromNSString(objc.msg(?objc.Object, url, "path", .{}))));
+            const host = objc.fromNSString(objc.msg(?objc.Object, url, "host", .{}));
+            if (host.len > 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) continue;
+            const resolved = objc.msg(?objc.Object, url, "filePathURL", .{}) orelse continue;
+            const p = objc.fromNSString(objc.msg(?objc.Object, resolved, "path", .{}));
+            if (p.len == 0) continue;
+            try out.append(gpa, try gpa.dupe(u8, p));
         }
         if (out.items.len == 0) {
             out.deinit(gpa);

@@ -6,12 +6,24 @@ const App = @import("app.zig").App;
 const attachments = @import("app_attachments.zig");
 const Allocator = std.mem.Allocator;
 
+pub const FailureKind = enum {
+    not_local_file,
+    url_resolution,
+    is_directory,
+    unreadable_file,
+    empty_file,
+    oversize_file,
+    staging_failed,
+};
+
 pub const State = struct {
     pending: ?Pending = null,
     // Native surfaces own the payload/window. Keep destination ownership here
     // across hover frames; rebuilding a mounted box must not retarget a drag.
     mounted: [@import("tabs.zig").max_panes]?Mounted = @splat(null),
     hover: ?struct { id: u64, destination: u64, cancelled: bool = false } = null,
+    /// Last intake error category (never stores personal paths or reference IDs).
+    last_failure: ?FailureKind = null,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         if (s.pending) |p| p.deinit(gpa);
@@ -151,6 +163,50 @@ pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
     a.redraw();
 }
 
+pub fn failureNotice(kind: FailureKind) []const u8 {
+    return switch (kind) {
+        .not_local_file => "Only local files and images can be attached. Use Attach files to choose one.",
+        .url_resolution => "Couldn't resolve the dropped file reference. Try dragging it again or use Attach files.",
+        .is_directory => "Folders can't be attached directly. Drop individual files or use Attach files.",
+        .unreadable_file => "Couldn't read the dropped file. Check that it exists and is readable, or use Attach files.",
+        .empty_file => "Empty files can't be attached. Choose a non-empty file.",
+        .oversize_file => "The dropped file is larger than the 24 MB attachment limit.",
+        .staging_failed => "Couldn't stage the dropped file for upload. Try Attach files.",
+    };
+}
+
+fn classifyPathError(err: anyerror) FailureKind {
+    return switch (err) {
+        error.NotLocalFile => .not_local_file,
+        error.UnresolvedFileReference, error.InvalidFileUrl, error.InvalidCharacter => .url_resolution,
+        error.OutOfMemory => .staging_failed,
+        else => .url_resolution,
+    };
+}
+
+fn classifyReadError(err: anyerror) FailureKind {
+    return switch (err) {
+        error.EmptyAttachment => .empty_file,
+        error.AttachmentTooLarge, error.StreamTooLong => .oversize_file,
+        error.IsDir => .is_directory,
+        error.OutOfMemory => .staging_failed,
+        else => .unreadable_file,
+    };
+}
+
+fn classifyStageError(err: anyerror) FailureKind {
+    return switch (err) {
+        error.EmptyAttachment => .empty_file,
+        error.AttachmentTooLarge => .oversize_file,
+        else => .staging_failed,
+    };
+}
+
+fn recordFailure(a: *App, kind: FailureKind) void {
+    a.file_drop.last_failure = kind;
+    a.setNotice(failureNotice(kind));
+}
+
 pub fn prepare(a: *App) void {
     const pending = a.file_drop.pending orelse return;
     a.file_drop.pending = null;
@@ -159,18 +215,19 @@ pub fn prepare(a: *App) void {
         a.setNotice("The drop destination changed. Drop the files into the intended chat again.");
         return;
     }
+    a.file_drop.last_failure = null;
     var focused = false;
     for (pending.urls) |url| {
         if (url.len == 0) continue;
-        const path = filePath(a.gpa, url) catch {
-            a.setNotice("Only local files and images can be attached. Use Attach files to choose one.");
+        const path = filePath(a.gpa, url) catch |err| {
+            recordFailure(a, classifyPathError(err));
             continue;
         };
         defer a.gpa.free(path);
         // Reject bad/empty/oversize files before activating a different pane
         // or disturbing its draft/queue edit. Valid siblings still attach.
-        const bytes = attachments.readFile(a, path) catch {
-            a.setNotice("Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.");
+        const bytes = attachments.readFile(a, path) catch |err| {
+            recordFailure(a, classifyReadError(err));
             continue;
         };
         defer a.gpa.free(bytes);
@@ -184,16 +241,23 @@ pub fn prepare(a: *App) void {
             }
             focused = true;
         }
-        attachments.stage(a, std.fs.path.basename(path), bytes) catch {
-            a.setNotice("Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.");
+        attachments.stage(a, std.fs.path.basename(path), bytes) catch |err| {
+            recordFailure(a, classifyStageError(err));
         };
     }
 }
 
-/// AppKit supplies file URLs (percent-encoded UTF-8), Windows also supplies
-/// absolute paths. Never treat a remote URL/authority as a local filename.
+pub fn isFileReferencePath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "/.file/id=");
+}
+
+/// AppKit resolves local macOS file URLs (including file-reference URLs) to
+/// native paths before discarding the NSURL; Windows and synthetic tests also
+/// supply absolute paths or local `file://` URLs. Never treat a remote
+/// authority or an unresolved macOS file-reference path as a local filename.
 pub fn filePath(gpa: Allocator, url: []const u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, url, 0) != null) return error.InvalidFileUrl;
+    if (isFileReferencePath(url)) return error.UnresolvedFileReference;
     if (std.fs.path.isAbsolute(url)) return gpa.dupe(u8, url);
     if (!std.mem.startsWith(u8, url, "file://")) return error.NotLocalFile;
     const rest = url[7..];
@@ -216,14 +280,25 @@ pub fn filePath(gpa: Allocator, url: []const u8) ![]u8 {
         path[n] = byte;
         n += 1;
     }
+    if (isFileReferencePath(path[0..n])) return error.UnresolvedFileReference;
     return gpa.realloc(path, n);
 }
 
-test "file drop paths decode local URLs without accepting remote hosts or NULs" {
+test "file drop paths decode local URLs without accepting remote hosts, NULs, or unresolved file references" {
     const a = std.testing.allocator;
     const path = try filePath(a, "file://localhost/tmp/synthetic%20%23%E2%9C%93.png");
     defer a.free(path);
     try std.testing.expectEqualStrings("/tmp/synthetic #✓.png", path);
-    for ([_][]const u8{ "https://example.invalid/image.png", "file://remote/tmp/image.png", "file:///tmp/%00.png", "file:///tmp/%xx", "file:///tmp/%" }) |url|
-        try std.testing.expectError(if (std.mem.startsWith(u8, url, "https") or std.mem.startsWith(u8, url, "file://remote")) error.NotLocalFile else if (std.mem.endsWith(u8, url, "%xx")) error.InvalidCharacter else error.InvalidFileUrl, filePath(a, url));
+    for ([_][]const u8{ "https://example.invalid/image.png", "file://remote/tmp/image.png", "file:///tmp/%00.png", "file:///tmp/%xx", "file:///tmp/%", "file:///.file/id=6571367.1", "file://localhost/.file/id=6571367.1", "file:///%2Efile/id=6571367.1", "/.file/id=6571367.1" }) |url|
+        try std.testing.expectError(
+            if (std.mem.startsWith(u8, url, "https") or std.mem.startsWith(u8, url, "file://remote"))
+                error.NotLocalFile
+            else if (std.mem.indexOf(u8, url, "file/id=") != null)
+                error.UnresolvedFileReference
+            else if (std.mem.endsWith(u8, url, "%xx"))
+                error.InvalidCharacter
+            else
+                error.InvalidFileUrl,
+            filePath(a, url),
+        );
 }
