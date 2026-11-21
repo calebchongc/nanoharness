@@ -118,7 +118,7 @@ fn questionMark(c: *ui.Context, k: theme.Colors, pending: bool) bool {
     return true;
 }
 
-fn workspaceChatId(a: *const App, ws: usize) ?[]const u8 {
+pub fn workspaceChatId(a: *const App, ws: usize) ?[]const u8 {
     const primary = if (ws == a.tabs.active) a.selected else a.tabs.items.items[ws];
     if (primary != null) return primary;
     if (ws < a.tabs.splits.items.len) if (a.tabs.splits.items[ws]) |s| {
@@ -424,14 +424,70 @@ fn singleRightExtra(a: *const App, settings_open: bool) f32 {
         vu.topbarTrailingReserve(a);
 }
 
+pub const SingleItem = union(enum) {
+    global: usize,
+    panel: struct { pane: usize, tab: usize },
+};
+
+pub const SingleSpec = struct {
+    n: usize,
+    selected: usize,
+    active_ws: usize,
+    pane: usize,
+    group_len: usize,
+    group_active: usize,
+
+    pub fn itemAt(spec: SingleSpec, ix: usize) SingleItem {
+        if (spec.group_len <= 1) return .{ .global = ix };
+        if (ix < spec.active_ws) return .{ .global = ix };
+        if (ix < spec.active_ws + spec.group_len) {
+            return .{ .panel = .{ .pane = spec.pane, .tab = ix - spec.active_ws } };
+        }
+        return .{ .global = ix - (spec.group_len - 1) };
+    }
+};
+
+pub fn singleSpec(a: *const App) SingleSpec {
+    const ws_n = a.tabs.items.items.len;
+    const active_ws = a.tabs.active;
+    if (a.tabs.layout()) |s| {
+        const g = &s.groups[s.focus];
+        if (g.count() > 1) {
+            return .{
+                .n = ws_n + g.count() - 1,
+                .selected = active_ws + g.active,
+                .active_ws = active_ws,
+                .pane = s.focus,
+                .group_len = g.count(),
+                .group_active = g.active,
+            };
+        }
+    }
+    return .{
+        .n = ws_n,
+        .selected = active_ws,
+        .active_ws = active_ws,
+        .pane = 0,
+        .group_len = 0,
+        .group_active = 0,
+    };
+}
+
+pub fn singleItemChat(a: *const App, spec: SingleSpec, ix: usize) ?[]const u8 {
+    return switch (spec.itemAt(ix)) {
+        .global => |ws| workspaceChatId(a, ws),
+        .panel => |pt| if (ix == spec.selected) a.selected else a.tabs.layout().?.groups[pt.pane].items.items[pt.tab].chat,
+    };
+}
+
 pub fn selectedBounds(a: *const App) ?Selected {
     if (a.settings.uiMode() == .zen) return null;
     if (a.view.settings_open) return null;
     if (strip.count(a) != 1) return null;
-    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
-    const n = if (group) |g| g.count() else a.tabs.items.items.len;
+    const spec = singleSpec(a);
+    const n = spec.n;
     if (n == 0) return null;
-    const selected = if (group) |g| g.active else a.tabs.active;
+    const selected = spec.selected;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     const dev_room: f32 = if (showDevicePicker(a)) chrome.device_room else 0;
     const right_extra = singleRightExtra(a, false);
@@ -457,9 +513,9 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const show_dev = !settings_open and showDevicePicker(a);
     const dev_room: f32 = if (show_dev) chrome.device_room else 0;
     const right_extra = singleRightExtra(a, settings_open);
-    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
-    const n = if (group) |g| g.count() else a.tabs.items.items.len;
-    const selected = if (group) |g| g.active else a.tabs.active;
+    const spec = singleSpec(a);
+    const n = spec.n;
+    const selected = spec.selected;
     const lane_x = if (zen) zenTabStartX(a) else a.view.sidebar_width + left;
     const available = if (zen)
         @max(0, c.size.w - lane_x - dev_room - caption.trailing - right_extra - 12)
@@ -473,7 +529,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const hidden_count = win.hidden_count;
     const slot_w = win.slot_w;
     if (zen and n == 1) {
-        const only_chat = if (group) |g| (if (selected == 0) a.selected else g.items.items[0].chat) else workspaceChatId(a, 0);
+        const only_chat = singleItemChat(a, spec, 0);
         if (only_chat == null) {
             if (show_dev) devicePicker(c, a, k);
             return;
@@ -485,8 +541,12 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const row = ui.div(c).absolute().offset(0, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
     defer row.end();
     for (win_start..win_end) |ix| {
-        const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else workspaceChatId(a, ix);
-        const panes_n = if (group != null) @as(usize, 1) else workspacePaneCount(a, ix);
+        const item = spec.itemAt(ix);
+        const chat = singleItemChat(a, spec, ix);
+        const panes_n = switch (item) {
+            .global => |ws| workspacePaneCount(a, ws),
+            .panel => @as(usize, 1),
+        };
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         const pill_w: f32 = if (zen and n == 1)
@@ -508,7 +568,10 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
             if (c.rects.get(c.node(cap.index).id)) |r| a.view.strip.active_tab_anchor = r;
         }
         const hot = cap.hovered();
-        const pending_question = if (group != null) chatNeedsInput(a, chat) else workspaceNeedsInput(a, ix);
+        const pending_question = switch (item) {
+            .global => |ws| workspaceNeedsInput(a, ws),
+            .panel => chatNeedsInput(a, chat),
+        };
         if (!questionMark(c, k, pending_question)) {
             if (zen and panes_n == 1 and ch != null) {
                 @import("view_sidebar.zig").zenMonogram(c, a, k, ch.?, 16);
@@ -541,17 +604,18 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         if (!settings_open and (hot or (n > 1 and ix == selected))) {
             if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
                 handled = true;
-                if (group != null) {
-                    // Close the selected panel tab only after promoting it.
-                    strip.queue(a, .{ .close_panel_tab = .{ .pane = a.tabs.layout().?.focus, .tab = ix } });
-                } else strip.queue(a, .{ .close_global_tab = ix });
+                switch (item) {
+                    .panel => |pt| strip.queue(a, .{ .close_panel_tab = .{ .pane = pt.pane, .tab = pt.tab } }),
+                    .global => |ws| strip.queue(a, .{ .close_global_tab = ws }),
+                }
             }
         } else if (!zen or (!settings_open and n > 1)) ui.div(c).size(16, 16).end();
         if (!handled and cap.clicked() and (settings_open or ix != selected)) {
             if (settings_open) @import("view_settings.zig").close(a);
-            if (ix != selected) {
-                if (group != null) strip.queue(a, .{ .panel_tab = .{ .pane = a.tabs.layout().?.focus, .tab = ix } }) else strip.queue(a, .{ .global_tab = ix });
-            }
+            if (ix != selected) switch (item) {
+                .panel => |pt| strip.queue(a, .{ .panel_tab = .{ .pane = pt.pane, .tab = pt.tab } }),
+                .global => |ws| strip.queue(a, .{ .global_tab = ws }),
+            };
         }
         if (kit.secondaryClicked(cap)) strip.open(a, .panel, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(cap.index).id));
     }

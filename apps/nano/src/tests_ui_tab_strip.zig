@@ -47,6 +47,12 @@ pub const Harness = struct {
         };
         return null;
     }
+    fn snap(h: *Harness, name: []const u8) void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name }) catch return;
+        h.t.screenshot(path) catch {};
+    }
 };
 fn replace(list: anytype, text: []const u8) !void {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
@@ -741,4 +747,159 @@ test "singleWindow pure layout matches visible slot for first, last, and narrow 
     try testing.expectApproxEqAbs(@as(f32, 90), narrow.slot_w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 0), narrow.selected_left, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 90), narrow.selected_right, 0.01);
+}
+
+test "switching into a workspace with local panel tabs keeps all global workspaces reachable (#47)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/p1"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/p2"},
+        \\ {"id":"p3","deviceId":"local","path":"/synthetic/p3"},
+        \\ {"id":"p4","deviceId":"local","path":"/synthetic/p4"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"p1","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","spaceId":"p2","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"p3","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","spaceId":"p4","archived":false},
+        \\ {"id":"e","deviceId":"local","title":"Epsilon","spaceId":"p3","archived":false}]
+    );
+    h.a.settings.setText("sidebarOrganization", "inOneList");
+    h.a.settings.setText("sidebarLastActivity", "all");
+    h.a.openChat("a", "p1");
+    h.a.newWorkspaceSession();
+    h.a.openChat("b", "p2");
+    h.a.newWorkspaceSession();
+    h.a.openChat("c", "p3");
+    try h.a.tabs.isolateWorkspace();
+    h.a.addChatTab(true);
+    h.a.tabs.setCurrent("e");
+    h.a.select("e", "p3");
+    h.a.newWorkspaceSession();
+    h.a.openChat("d", "p4");
+    h.a.showTab(0);
+    h.t.settle(1);
+
+    try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+    const ids = @import("view_sidebar.zig").visibleSessionIds(&h.t.ctx, &h.a);
+    try testing.expectEqualStrings("c", ids[2]);
+
+    // Cmd-3 navigates to Gamma (workspace 2, which has 2 local panel tabs [Gamma, Epsilon]).
+    h.press((ui.Shortcut{ .key = '3', .cmd = true }).native());
+    const missing_other = h.topText("Alpha") == null or h.topText("Beta") == null;
+    if (missing_other) h.snap("tab-47-switch-before") else h.snap("tab-47-switch-after");
+
+    try testing.expectEqualStrings("c", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+    try testing.expect(h.topText("Alpha") != null);
+    try testing.expect(h.topText("Beta") != null);
+    try testing.expect(h.topText("Gamma") != null);
+    try testing.expect(h.topText("Epsilon") != null);
+
+    // Widening to 1800px displays all five workspace + local panel tabs without overflow.
+    h.t.resize(1800, 780);
+    h.t.settle(1);
+    try testing.expect(h.topText("Delta") != null);
+
+    // Reverse transition: click Alpha in the top bar.
+    const alpha = h.topText("Alpha").?;
+    h.t.click(alpha.x + alpha.w / 2, alpha.y + alpha.h / 2);
+    h.t.settle(1);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+
+    // Pointer click back to Gamma keeps all workspaces reachable in narrow overflow too.
+    const gamma = h.topText("Gamma").?;
+    h.t.click(gamma.x + gamma.w / 2, gamma.y + gamma.h / 2);
+    h.t.settle(1);
+    h.t.resize(520, 640);
+    h.t.settle(1);
+    const tab = h.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
+    const sel = @import("view_tab_strip_render.zig").selectedBounds(&h.a) orelse return error.MissingSelectedBounds;
+    const body_x = h.a.view.sidebar_width + h.a.view.chrome.leading;
+    try testing.expectApproxEqAbs(tab.x, body_x + sel.left, 0.5);
+    try testing.expectApproxEqAbs(tab.x + tab.w, body_x + sel.right, 0.5);
+    var overflow: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (tx.str.len >= 2 and tx.str[0] == '+' and node.rect.y < chrome.header_height and node.rect.x >= h.a.view.sidebar_width) {
+            overflow = node.rect;
+        },
+        else => {},
+    };
+    const more = overflow orelse return error.MissingOverflowPill;
+    h.t.click(more.x + more.w / 2, more.y + more.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(strip.Menu.history, h.a.view.strip.menu.?);
+    try testing.expect(h.t.hasText("Alpha"));
+    try testing.expect(h.t.hasText("Beta"));
+    try testing.expect(h.t.hasText("Delta"));
+}
+
+test "Cmd-3 and openChatInTab keep projectless conversations independent and never hide other workspaces (#47)" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/p1"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/p2"},
+        \\ {"id":"p3","deviceId":"local","path":"/synthetic/p3"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"p1","archived":false},
+        \\ {"id":"b","deviceId":"local","title":"Beta","spaceId":"p2","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","archived":false},
+        \\ {"id":"d","deviceId":"local","title":"Delta","spaceId":"p1","archived":false},
+        \\ {"id":"e","deviceId":"local","title":"Epsilon","archived":false},
+        \\ {"id":"f","deviceId":"local","title":"Zeta","spaceId":"p3","archived":false}]
+    );
+    h.a.settings.setText("sidebarOrganization", "inOneList");
+    h.a.settings.setText("sidebarLastActivity", "all");
+    h.a.openChat("a", "p1");
+    h.a.newWorkspaceSession();
+    h.a.openChat("b", "p2");
+    h.a.newWorkspaceSession();
+    h.a.openChat("e", null);
+    h.a.newWorkspaceSession();
+    h.a.openChat("f", "p3");
+    h.a.showTab(2); // Active unsplit projectless workspace (Epsilon)
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 4), h.a.tabs.items.items.len);
+
+    // Cmd-3 targets unopened projectless Gamma: must open an independent workspace, not group with Epsilon.
+    h.press((ui.Shortcut{ .key = '3', .cmd = true }).native());
+    if (h.a.tabs.items.items.len == 4) h.snap("tab-47-group-before") else h.snap("tab-47-group-after");
+    try testing.expectEqualStrings("c", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 5), h.a.tabs.items.items.len);
+    if (h.a.tabs.layout()) |s| {
+        try testing.expectEqual(@as(usize, 1), s.panes.items.len);
+        try testing.expectEqual(@as(usize, 1), s.groups[0].count());
+    }
+    try testing.expect(h.topText("Beta") != null);
+    try testing.expect(h.topText("Epsilon") != null);
+    try testing.expect(h.topText("Zeta") != null);
+
+    // Unopened same-project Delta (p1) reuses p1's workspace while keeping all other workspaces visible at 1920px.
+    h.t.resize(1920, 780);
+    h.t.settle(1);
+    h.a.showTab(3);
+    h.t.settle(1);
+    h.a.openChatInTab("d");
+    h.t.settle(1);
+    try testing.expectEqualStrings("d", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 5), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    try testing.expect(h.topText("Alpha") != null);
+    try testing.expect(h.topText("Delta") != null);
+    try testing.expect(h.topText("Beta") != null);
+    try testing.expect(h.topText("Epsilon") != null);
+    try testing.expect(h.topText("Zeta") != null);
+    try testing.expect(h.topText("Gamma") != null);
+
+    // Already-open independent workspace Beta via Cmd-2 switches without adding or grouping.
+    h.press((ui.Shortcut{ .key = '2', .cmd = true }).native());
+    try testing.expectEqualStrings("b", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 5), h.a.tabs.items.items.len);
 }

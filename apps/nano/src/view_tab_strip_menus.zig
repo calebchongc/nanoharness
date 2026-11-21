@@ -64,9 +64,23 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     if (menu == .history) {
-        for (a.tabs.items.items, 0..) |id, ix| {
-            const title = if (id) |chat| (if (a.findChat(chat)) |ch| @import("view_sidebar.zig").chatLabel(ch) else "Conversation") else "New tab";
-            if (row(c, a, k, .@"chat-round-line", title, ix == a.tabs.active)) strip.queue(a, .{ .global_tab = ix });
+        const render = @import("view_tab_strip_render.zig");
+        if (strip.count(a) <= 1) {
+            const spec = render.singleSpec(a);
+            for (0..spec.n) |ix| {
+                const chat = render.singleItemChat(a, spec, ix);
+                const title = if (chat) |id| (if (a.findChat(id)) |ch| @import("view_sidebar.zig").chatLabel(ch) else "Conversation") else "New tab";
+                if (row(c, a, k, .@"chat-round-line", title, ix == spec.selected)) switch (spec.itemAt(ix)) {
+                    .global => |ws| strip.queue(a, .{ .global_tab = ws }),
+                    .panel => |pt| strip.queue(a, .{ .panel_tab = .{ .pane = pt.pane, .tab = pt.tab } }),
+                };
+            }
+        } else {
+            for (0..a.tabs.items.items.len) |ix| {
+                const chat = render.workspaceChatId(a, ix);
+                const title = if (chat) |id| (if (a.findChat(id)) |ch| @import("view_sidebar.zig").chatLabel(ch) else "Conversation") else "New tab";
+                if (row(c, a, k, .@"chat-round-line", title, ix == a.tabs.active)) strip.queue(a, .{ .global_tab = ix });
+            }
         }
         separator(c, k);
         if (row(c, a, k, .plus, "New tab", false)) strip.queue(a, .{ .new = strip.active(a) });

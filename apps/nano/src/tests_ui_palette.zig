@@ -90,18 +90,16 @@ const Harness = struct {
 
     /// Conversation tabs live in the focused workspace's panel.
     fn tabCount(h: *Harness) usize {
-        return if (h.a.tabs.layout()) |split| split.groups[split.focus].count() else h.a.tabs.items.items.len;
+        return @import("view_tab_strip_render.zig").singleSpec(&h.a).n;
     }
 
     fn activeTab(h: *Harness) usize {
-        return if (h.a.tabs.layout()) |split| split.groups[split.focus].active else h.a.tabs.active;
+        return @import("view_tab_strip_render.zig").singleSpec(&h.a).selected;
     }
 
     fn tabIs(h: *Harness, i: usize, want: []const u8) !void {
-        const chat = if (h.a.tabs.layout()) |split| blk: {
-            const group = &split.groups[split.focus];
-            break :blk if (i == group.active) h.a.selected else group.items.items[i].chat;
-        } else h.a.tabs.items.items[i];
+        const render = @import("view_tab_strip_render.zig");
+        const chat = render.singleItemChat(&h.a, render.singleSpec(&h.a), i);
         try testing.expectEqualStrings(want, chat orelse "");
     }
 
