@@ -48,7 +48,8 @@ plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+# 0.41 bundles patched SQLite; fallible_uint retains checked u64 count reads.
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 # misc
 # Global allocator on macOS only: libmalloc retains the churn high-water mark
@@ -67,7 +68,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
-zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"
 pulldown-cmark = { version = "0.12", default-features = false }
