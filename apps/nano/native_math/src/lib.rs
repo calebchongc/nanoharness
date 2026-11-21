@@ -3,8 +3,8 @@
 //! are shared with that implementation; nano paints trusted paths/rules via
 //! its native SVG primitive. No browser, scripts, URLs, or input XML.
 use latex_rust::{
-    BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathParams, MathStyle,
-    MatrixStyle, ParseOptions, SpaceKind, SvgOptions, Token,
+    AtomKind, BoxContent, Dim, EnvRow, EqNumber, MathBox, MathFont, MathNode, MathParams,
+    MathStyle, MatrixStyle, ParseOptions, SpaceKind, SvgOptions, Token,
 };
 use std::{cell::RefCell, collections::VecDeque, sync::OnceLock};
 const MAX_SOURCE_BYTES: usize = 4096;
@@ -229,14 +229,20 @@ fn scalar(dim: &Dim) -> Result<f32, String> {
     Ok(value)
 }
 
-// Explicit glue is classless upstream. It can erase automatic glue or
-// reclassify a binary operator as unary. Admit known zero-glue boundaries,
-// including ordinary letters and punctuation/delimiters, but never Bin atoms.
-fn spacing_atom_kind(node: &MathNode) -> Option<latex_rust::AtomKind> {
-    use latex_rust::AtomKind;
+// Explicit glue is classless upstream. Track known atom classes so we can
+// restore missing glue without interfering with binary reclassification.
+fn spacing_atom_kind(node: &MathNode) -> Option<AtomKind> {
     match node {
         MathNode::Atom(_, kind) | MathNode::SizedDelim(_, _, kind) => Some(*kind),
         MathNode::Text(_, _) | MathNode::Ref(_) => Some(AtomKind::Ord),
+        MathNode::Operator(_, _)
+        | MathNode::Sum(_, _)
+        | MathNode::Product(_, _)
+        | MathNode::Integral(_, _, _)
+        | MathNode::Limit(_) => Some(AtomKind::Op),
+        MathNode::Fraction(_, _) | MathNode::Radical(_, _) | MathNode::Delimited(_, _, _) => {
+            Some(AtomKind::Inner)
+        }
         MathNode::Symbol(name) => Some(latex_rust::symbol_atom_kind(name)),
         MathNode::Row(nodes) if nodes.len() == 1 => spacing_atom_kind(&nodes[0]),
         MathNode::Row(_) => Some(AtomKind::Ord),
@@ -250,13 +256,13 @@ fn spacing_atom_kind(node: &MathNode) -> Option<latex_rust::AtomKind> {
     }
 }
 
-fn zero_implicit_glue(left: &MathNode, right: &MathNode) -> bool {
-    use latex_rust::AtomKind::*;
+fn zero_implicit_glue(left: Option<AtomKind>, right: Option<AtomKind>) -> bool {
+    use AtomKind::*;
     // Zero entries in TeX's inter-atom spacing table, excluding Bin because
     // a classless neighbor also changes binary reclassification. Unknown
     // compound atom classes conservatively retain their source instead.
     matches!(
-        (spacing_atom_kind(left), spacing_atom_kind(right)),
+        (left, right),
         (Some(Ord | Close), Some(Ord | Open | Close | Punct))
             | (
                 Some(Open),
@@ -268,30 +274,79 @@ fn zero_implicit_glue(left: &MathNode, right: &MathNode) -> bool {
     )
 }
 
-fn validate_row_spacing(nodes: &[MathNode]) -> Result<(), String> {
-    let mut previous = None;
-    let mut spaced = false;
-    for node in nodes {
-        if matches!(node, MathNode::Space(_)) {
-            spaced = true;
-            continue;
+// Nonzero relation entries in latex-rust's TeX inter-atom spacing table.
+// All but Rel→Open are suppressed in script styles. No Bin touches these gaps.
+fn relation_glue(
+    left: Option<AtomKind>,
+    right: Option<AtomKind>,
+    script: bool,
+) -> Option<SpaceKind> {
+    use AtomKind::*;
+    match (left, right) {
+        (Some(Rel), Some(Open)) => Some(SpaceKind::Thick),
+        (Some(Ord | Op | Close | Inner), Some(Rel)) | (Some(Rel), Some(Ord | Op | Inner))
+            if !script =>
+        {
+            Some(SpaceKind::Thick)
         }
-        if let Some(previous) = previous {
-            if spaced && !zero_implicit_glue(previous, node) {
-                return Err("Explicit spacing affecting automatic math glue is unsupported".into());
-            }
-        }
-        previous = Some(node);
-        spaced = false;
+        (Some(Punct), Some(Rel)) if !script => Some(SpaceKind::Thin),
+        _ => None,
     }
-    Ok(())
+}
+
+// Yield one boundary per run of explicit skips, not one per skip.
+fn spaced_boundaries(
+    nodes: &[MathNode],
+) -> impl Iterator<Item = (usize, Option<AtomKind>, Option<AtomKind>)> + '_ {
+    let mut previous = None;
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| !matches!(node, MathNode::Space(_)))
+        .filter_map(move |(index, right)| {
+            let (left_index, left) = previous.replace((index, right))?;
+            (index - left_index > 1)
+                .then(|| (index, spacing_atom_kind(left), spacing_atom_kind(right)))
+        })
+}
+
+fn validate_row_spacing(nodes: &[MathNode]) -> Result<bool, String> {
+    let mut restore_relation_glue = false;
+    for (_, left, right) in spaced_boundaries(nodes) {
+        if relation_glue(left, right, false).is_some() {
+            restore_relation_glue = true;
+        } else if !zero_implicit_glue(left, right) {
+            return Err("Explicit spacing affecting automatic math glue is unsupported".into());
+        }
+    }
+    Ok(restore_relation_glue)
+}
+
+fn restore_row_relation_glue(nodes: &mut Vec<MathNode>, style: MathStyle) {
+    let script = style.script_level() > 0;
+    let extra: Vec<_> = spaced_boundaries(nodes)
+        .filter_map(|(index, left, right)| Some((index, relation_glue(left, right, script)?)))
+        .collect();
+    if extra.is_empty() {
+        return;
+    }
+    let mut row = Vec::with_capacity(nodes.len() + extra.len());
+    let mut extra = extra.into_iter().peekable();
+    for (index, node) in nodes.drain(..).enumerate() {
+        if let Some((_, glue)) = extra.next_if(|(at, _)| *at == index) {
+            row.push(MathNode::Space(glue));
+        }
+        row.push(node);
+    }
+    *nodes = row;
 }
 
 // Validate the AST before potentially expensive grid/assembly layout. This also
 // catches left-associated script chains which need not nest source braces.
-fn validate_ast(root: &MathNode) -> Result<(), String> {
+fn validate_ast(root: &MathNode) -> Result<bool, String> {
     let mut pending = vec![(root, 0usize)];
     let mut count = 0;
+    let mut restore_relation_glue = false;
     while let Some((node, depth)) = pending.pop() {
         count += 1;
         if count > MAX_AST_NODES || depth > MAX_DEPTH {
@@ -328,7 +383,7 @@ fn validate_ast(root: &MathNode) -> Result<(), String> {
             | MathNode::Tag { body, .. } => push(body),
             MathNode::Row(nodes) | MathNode::Substack(nodes) => {
                 if matches!(node, MathNode::Row(_)) {
-                    validate_row_spacing(nodes)?;
+                    restore_relation_glue |= validate_row_spacing(nodes)?;
                 }
                 for node in nodes {
                     push(node);
@@ -389,7 +444,7 @@ fn validate_ast(root: &MathNode) -> Result<(), String> {
             _ => {}
         }
     }
-    Ok(())
+    Ok(restore_relation_glue)
 }
 
 // Rewrite only real math commands, never substrings in literal text, comments,
@@ -517,14 +572,14 @@ fn normalize_absolute_hspace(source: &str, size: f32) -> Result<(String, Vec<Dim
 
 // Mirror latex-rust's layout style transitions. Cramping does not affect scale,
 // but retaining it here makes nested fractions/scripts follow the engine too.
-fn resolve_absolute_hspace(
+fn resolve_layout_spacing(
     node: &mut MathNode,
     style: MathStyle,
     spaces: &[Dim],
     params: &MathParams,
 ) {
     let visit = |node: &mut MathNode, style| {
-        resolve_absolute_hspace(node, style, spaces, params);
+        resolve_layout_spacing(node, style, spaces, params);
     };
     match node {
         MathNode::Space(SpaceKind::Hspace(value)) => {
@@ -597,6 +652,7 @@ fn resolve_absolute_hspace(
             }
         }
         MathNode::Row(nodes) => {
+            restore_row_relation_glue(nodes, style);
             for node in nodes {
                 visit(node, style);
             }
@@ -680,7 +736,7 @@ fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, Stri
         latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
             .map_err(|e| e.to_string())?;
     // Reject user-provided marker values and bound traversal before rewriting.
-    validate_ast(&ast)?;
+    let restore_relation_glue = validate_ast(&ast)?;
     let (normalized, spaces) = normalize_absolute_hspace(source, size)?;
     let mut ast = if normalized == source {
         ast
@@ -694,9 +750,9 @@ fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, Stri
     } else {
         MathStyle::Text
     };
-    if !spaces.is_empty() {
+    if restore_relation_glue || !spaces.is_empty() {
         let params = MathParams::from_font(font()?).map_err(|e| e.to_string())?;
-        resolve_absolute_hspace(&mut ast, style, &spaces, &params);
+        resolve_layout_spacing(&mut ast, style, &spaces, &params);
     }
     validate_ast(&ast)?;
     // Layout's own recursion guard is 32. The AST is restricted further above.
@@ -925,6 +981,55 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn explicit_relation_spacing_adds_to_automatic_glue() {
+        for display in [false, true] {
+            let width = |source: &str| value(&layout_source(source, display, 20.).unwrap().width);
+            let relation = width("a=b");
+            let thin = width(r"a\;b") - width("ab");
+            for (source, skips) in [(r"a\;=b", 1.), (r"a=\;b", 1.), (r"a\;=\;b", 2.)] {
+                assert!(
+                    (width(source) - relation - skips * thin).abs() < 0.0005,
+                    "spacing must supplement, not replace, automatic glue: {source}"
+                );
+            }
+
+            let consecutive = width(r"a\;\,b") - width("ab");
+            assert!(
+                (width(r"a\;\,=b") - relation - consecutive).abs() < 0.0005,
+                "consecutive explicit skips must preserve relation glue"
+            );
+
+            let absolute = width(r"a\hspace{1pt}b") - width("ab");
+            for source in [r"a\hspace{1pt}=b", r"a=\hspace{1pt}b"] {
+                assert!(
+                    (width(source) - relation - absolute).abs() < 0.0005,
+                    "absolute spacing must supplement relation glue: {source}"
+                );
+            }
+
+            let arrow = width(r"a\longrightarrow b");
+            for source in [r"a\;\longrightarrow b", r"a\longrightarrow\;b"] {
+                assert!(
+                    (width(source) - arrow - thin).abs() < 0.0005,
+                    "arrow spacing must supplement automatic glue: {source}"
+                );
+            }
+
+            let script = width("x^{a=b}");
+            let script_thin = width(r"x^{a\;b}") - width("x^{ab}");
+            assert!(
+                (width(r"x^{a\;=\;b}") - script - 2. * script_thin).abs() < 0.0005,
+                "explicit script spacing must remain without text-style relation glue"
+            );
+
+            assert!(
+                layout_source(r"a\;+\;b", display, 20.).is_err(),
+                "spacing that can reclassify a binary atom must remain unsupported"
+            );
         }
     }
 
