@@ -1121,6 +1121,62 @@ test "unified updates Skip persists per version token and reappears only when a 
     try testing.expect(h.a.view.updates_anchor != null);
 }
 
+test "topbar updates pill disappears automatically once agent or engine updates finish" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+
+    // 1. Available agent update renders the topbar updates pill.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"available","canApply":true}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 1), vu.topbarUpdatesCount(&h.a));
+    try testing.expect(h.a.view.updates_anchor != null);
+
+    // 2. Once the agent finishes updating (`phase: "updated"`), the topbar pill goes away automatically.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.322","phase":"updated","canApply":false}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    h.snap("completed-update-pill");
+    try testing.expectEqual(@as(usize, 0), vu.topbarUpdatesCount(&h.a));
+    try testing.expectEqual(@as(f32, 0), vu.topbarUpdatesWidth(&h.a));
+    try testing.expect(h.a.view.updates_anchor == null);
+    try testing.expect(!h.a.view.updates_popover);
+
+    // 3. A completed Codegraff engine update (`graff_kind == .updated`) also stays out of the topbar pill,
+    //    while a staged desktop app update awaiting Restart (`app_ready == true`) still stays actionable.
+    const to = "0.302.99.0";
+    @memcpy(h.a.updates.graff_to[0..to.len], to);
+    h.a.updates.graff_to_len = to.len;
+    h.a.updates.graff_kind = .updated;
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 0), vu.topbarUpdatesCount(&h.a));
+
+    const app_ver = "99.0.0";
+    @memcpy(h.a.release.latest[0..app_ver.len], app_ver);
+    h.a.release.latest_len = app_ver.len;
+    h.a.updates.app_ready = true;
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 1), vu.topbarUpdatesCount(&h.a));
+    try testing.expect(h.a.view.updates_anchor != null);
+}
+
 test "sidebar star banner, right-click menu, bottom account row, and compact model account popover" {
     var h: Harness = undefined;
     try h.init(true);
