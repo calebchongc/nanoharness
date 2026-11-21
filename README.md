@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/justrach/nanoharness/releases/latest">Download</a> ·
+  <a href="#download-with-curl">Download with curl</a> ·
   <a href="#the-workspace">Workspace</a> ·
   <a href="#native-github-and-splits">GitHub Review</a> ·
   <a href="#get-started">Get Started</a> ·
@@ -76,8 +77,33 @@ Download the latest signed release from **[Releases](https://github.com/justrach
 | Platform | Package | Notes |
 | --- | --- | --- |
 | **macOS (Apple Silicon)** | `Harness-macos-arm64.dmg` | Developer ID signed &amp; notarized; auto-updates in-app |
-| **Windows (x64)** | `harness-VERSION-windows-x64.zip` | Portable `harness.exe`; keep `harness-update.json` beside it for in-app updates |
+| **Windows (x64)** | `Harness-windows-x86_64.zip` | Portable `harness.exe`; keep `harness-update.json` beside it for in-app updates |
 | **Arch Linux** | `harness-VERSION-linux-x86_64.pkg.tar.zst` (or `-aarch64`) | Install via `sudo pacman -U ./harness-*.pkg.tar.zst` (Vulkan driver required; updates via pacman) |
+
+### Download with curl
+
+These commands download the package to the current directory; they do not install it.
+
+**macOS (Apple Silicon):**
+
+```sh
+curl -fLO https://github.com/justrach/nanoharness/releases/latest/download/Harness-macos-arm64.dmg
+```
+
+**Windows (x64, PowerShell):**
+
+```powershell
+curl.exe -fLO https://github.com/justrach/nanoharness/releases/latest/download/Harness-windows-x86_64.zip
+```
+
+**Arch Linux (x86_64; set `arch=aarch64` for ARM64):**
+
+```sh
+release=https://github.com/justrach/nanoharness/releases
+arch=x86_64
+version=$(curl -fsSL "$release/latest/download/latest.txt") &&
+  curl -fLO "$release/download/v$version/harness-$version-linux-$arch.pkg.tar.zst"
+```
 
 ### Build from source
 
