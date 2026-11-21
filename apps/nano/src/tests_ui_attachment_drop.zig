@@ -40,6 +40,8 @@ const Harness = struct {
 
 fn fixtureUrl() ![]u8 {
     const path = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, "src/icons/project-default.png", testing.allocator);
+    // Windows native drops supply absolute paths, not file://D:\... URLs.
+    if (@import("builtin").os.tag == .windows) return path;
     defer testing.allocator.free(path);
     return std.fmt.allocPrint(testing.allocator, "{f}", .{std.Uri{ .scheme = "file", .host = .{ .raw = "" }, .path = .{ .raw = path } }});
 }
