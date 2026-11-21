@@ -124,6 +124,7 @@ test {
     _ = @import("tests_ui_sidebar_scrollbars.zig");
     _ = @import("markdown.zig");
     _ = @import("markdown_html.zig");
+    _ = @import("view_markdown.zig");
     _ = @import("highlight.zig");
     _ = @import("graff_worktree.zig");
     _ = @import("view_session_footer.zig");
