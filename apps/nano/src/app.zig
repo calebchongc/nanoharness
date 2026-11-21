@@ -1046,17 +1046,22 @@ pub const App = struct {
             a.select(chat_id, project);
             return;
         }
-        const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
+        const destination: ?usize = if (project != null) blk: {
+            if (sameProject(a.workspaceProject(a.tabs.active), project)) break :blk a.tabs.active;
+            for (0..a.tabs.items.items.len) |ix| {
+                if (sameProject(a.workspaceProject(ix), project)) break :blk ix;
+            }
+            break :blk null;
+        } else if ((if (a.tabs.layout()) |s| s.panes.items.len > 1 else false) and a.workspaceProject(a.tabs.active) == null)
             a.tabs.active
-        else for (0..a.tabs.items.items.len) |ix| {
-            if (sameProject(a.workspaceProject(ix), project)) break ix;
-        } else null;
+        else
+            null;
         if (destination) |ix| {
             a.showTab(ix);
             a.tabs.isolateWorkspace() catch return;
             a.addChatTab(true);
         } else {
-            a.newWorkspaceSession();
+            a.openWorkspaceSession(true);
             a.tabs.isolateWorkspace() catch return;
         }
         a.tabs.setCurrent(chat_id);
@@ -1074,7 +1079,9 @@ pub const App = struct {
     }
 
     fn sameProject(left: ?[]const u8, right: ?[]const u8) bool {
-        return if (left) |id| (if (right) |other| std.mem.eql(u8, id, other) else false) else right == null;
+        const a_id = left orelse return false;
+        const b_id = right orelse return false;
+        return std.mem.eql(u8, a_id, b_id);
     }
 
     /// `/resume`'s choice: `chat_id` in the current tab (or pane), wherever
@@ -1151,15 +1158,12 @@ pub const App = struct {
         a.view.focus_composer = true;
     }
 
-    /// Sidebar "+": an independent workspace, not another
-    /// tab inside the focused panel. Keep the entire old split and its
-    /// focused draft parked together for when that workspace is reopened.
-    pub fn newWorkspaceSession(a: *App) void {
+    fn openWorkspaceSession(a: *App, at_end: bool) void {
         a.tabs.isolateWorkspace() catch return;
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
         a.tabs.park(a.tabs.active, null, d);
-        a.tabs.newTab();
+        if (at_end) a.tabs.appendTab() else a.tabs.newTab();
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1167,6 +1171,13 @@ pub const App = struct {
         a.select(null, null);
         drafts.adopt(a, fresh);
         a.view.focus_composer = true;
+    }
+
+    /// Sidebar "+": an independent workspace, not another
+    /// tab inside the focused panel. Keep the entire old split and its
+    /// focused draft parked together for when that workspace is reopened.
+    pub fn newWorkspaceSession(a: *App) void {
+        a.openWorkspaceSession(false);
     }
 
     /// Switch tabs inside the focused split panel; its neighbors stay put.
