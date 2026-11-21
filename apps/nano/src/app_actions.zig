@@ -54,6 +54,7 @@ pub const Actions = struct {
     list: []Action = &.{},
     error_text: ?[]const u8 = null,
     space: ?[]u8 = null,
+    request: ?u64 = null,
     menu: bool = false,
     anchor: ?nanoui.ui.Rect = null,
     editor: ?Editor = null,
@@ -108,17 +109,55 @@ fn host(a: *const App) ?[]const u8 {
 pub fn refresh(a: *App) void {
     const x = &a.actions;
     const sid = spaceOf(a) orelse return;
+    if (!a.engine.up()) {
+        if (x.space) |s| if (!std.mem.eql(u8, s, sid)) {
+            a.retireSlice(s);
+            x.space = null;
+            x.list = &.{};
+            x.error_text = null;
+            x.status = .idle;
+            x.request = null;
+        };
+        return;
+    }
     if (x.space) |s| if (std.mem.eql(u8, s, sid) and x.status != .idle) return;
     if (x.space) |s| a.retireSlice(s);
     x.space = x.gpa.dupe(u8, sid) catch null;
+    x.error_text = null;
     x.status = .loading;
-    a.request(requests.listActions(sid, host(a)), .of(App, a, onSnapshot));
+    x.request = null;
+    x.request = a.send_(requests.listActions(sid, host(a)), .of(App, a, onSnapshot));
 }
 
-fn onSnapshot(a: *App, _: u64, r: rpc.Reply) void {
+pub fn disconnected(a: *App) void {
     const x = &a.actions;
+    if (x.status == .loading) {
+        x.status = .idle;
+        x.request = null;
+    }
+}
+
+pub fn reconnected(a: *App) void {
+    const x = &a.actions;
+    if (x.status == .loading or x.status == .unavailable or x.status == .unsupported) {
+        x.status = .idle;
+        x.error_text = null;
+        x.request = null;
+    }
+    if (a.selected != null) refresh(a);
+}
+
+fn onSnapshot(a: *App, id: u64, r: rpc.Reply) void {
+    const x = &a.actions;
+    if (x.request) |expected| {
+        if (id != expected) return;
+    } else if (x.status != .loading and (x.editor == null or !x.editor.?.saving)) {
+        return;
+    }
+    x.request = null;
     switch (r) {
         .ok => |v| {
+            x.error_text = null;
             a.retireArena(x.arena);
             x.arena = .init(x.gpa);
             const ar = x.arena.allocator();
@@ -209,7 +248,8 @@ pub fn save(a: *App) void {
         null;
     if (e.err != null) return a.redraw();
     e.saving = true;
-    a.request(requests.upsertAction(sid, e.id, .{ .name = name, .command = command, .icon = icons[e.icon], .runOnWorktreeCreate = e.setup }, host(a)), .of(App, a, onSnapshot));
+    x.request = null;
+    x.request = a.send_(requests.upsertAction(sid, e.id, .{ .name = name, .command = command, .icon = icons[e.icon], .runOnWorktreeCreate = e.setup }, host(a)), .of(App, a, onSnapshot));
 }
 
 pub fn delete(a: *App) void {
@@ -219,7 +259,8 @@ pub fn delete(a: *App) void {
     const sid = x.space orelse return;
     e.saving = true;
     e.confirm_delete = false;
-    a.request(requests.deleteAction(sid, id, host(a)), .of(App, a, onSnapshot));
+    x.request = null;
+    x.request = a.send_(requests.deleteAction(sid, id, host(a)), .of(App, a, onSnapshot));
 }
 
 /// Runs `act` in the chat's checkout; its output opens in the dock.
