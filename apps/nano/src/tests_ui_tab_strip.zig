@@ -798,8 +798,9 @@ test "switching into a workspace with local panel tabs keeps all global workspac
     try testing.expect(h.topText("Gamma") != null);
     try testing.expect(h.topText("Epsilon") != null);
 
-    // Widening to 1800px displays all five workspace + local panel tabs without overflow.
-    h.t.resize(1800, 780);
+    // Widening displays all five workspace + local panel tabs without overflow.
+    const caption_trailing = @import("window_chrome.zig").trailing;
+    h.t.resize(1800 + caption_trailing, 780);
     h.t.settle(1);
     try testing.expect(h.topText("Delta") != null);
 
@@ -814,7 +815,7 @@ test "switching into a workspace with local panel tabs keeps all global workspac
     const gamma = h.topText("Gamma").?;
     h.t.click(gamma.x + gamma.w / 2, gamma.y + gamma.h / 2);
     h.t.settle(1);
-    h.t.resize(520, 640);
+    h.t.resize(520 + caption_trailing, 640);
     h.t.settle(1);
     const tab = h.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
     const sel = @import("view_tab_strip_render.zig").selectedBounds(&h.a) orelse return error.MissingSelectedBounds;
@@ -880,8 +881,8 @@ test "Cmd-3 and openChatInTab keep projectless conversations independent and nev
     try testing.expect(h.topText("Epsilon") != null);
     try testing.expect(h.topText("Zeta") != null);
 
-    // Unopened same-project Delta (p1) reuses p1's workspace while keeping all other workspaces visible at 1920px.
-    h.t.resize(1920, 780);
+    // Unopened same-project Delta (p1) reuses p1's workspace while keeping all other workspaces visible.
+    h.t.resize(1920 + @import("window_chrome.zig").trailing, 780);
     h.t.settle(1);
     h.a.showTab(3);
     h.t.settle(1);
