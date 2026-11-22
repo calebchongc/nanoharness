@@ -174,6 +174,28 @@ final class DemoDataset {
         "/srv/deploys": ["edge", "landing"],
     ]
 
+    func startPhoneCloudSandbox(size: String?) -> String {
+        if let existing = cloud.sandboxes.sandboxes.first(where: {
+            $0.provider == "fleet" && $0.deviceName == CloudGateway.deviceName(for: $0.id)
+        }) { return existing.id }
+        cloud.create(size: size)
+        guard let index = cloud.sandboxes.sandboxes.indices.last else { return "" }
+        let id = cloud.sandboxes.sandboxes[index].id
+        let name = CloudGateway.deviceName(for: id)
+        cloud.sandboxes.sandboxes[index].deviceName = name
+        let deviceId = "demo-cloud-\(String(id.suffix(8)))"
+        let now = nowMs()
+        devices.removeAll { $0.id == deviceId }
+        devices.append(DeviceRow(id: deviceId, name: name, platform: "linux",
+                                 lastSeenAt: now, createdAt: now))
+        agents[deviceId] = [AgentDescriptor(id: ChatMode.harness)]
+        return id
+    }
+
+    func isPhoneCloudDevice(_ deviceId: String) -> Bool {
+        devices.first(where: { $0.id == deviceId })?.name.hasPrefix("Harness phone ") == true
+    }
+
     func homePath(deviceId: String) -> String {
         deviceId == "dev-vps" ? "/srv" : "/Users/dev"
     }

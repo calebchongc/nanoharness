@@ -106,6 +106,28 @@ Developer-role `AC_API_KEY_*` secrets the macOS release notarizes with.
   explore the UI with no infrastructure. Launch args for screenshot rigs:
   `-demo [-route chat:<id>|space:<id>] [-stream]`.
 
+### Phone-only cloud start
+
+On a signed-in phone with no computer online, Home can provision or reuse one
+Harness fleet sandbox, show its current hourly rate before confirmation, and
+wait for the exact sandbox-derived device name, a live Graff catalog, and a
+live hosted Auto model before opening the chat composer. The gateway API key is
+separate from sync credentials and stored in Keychain. Settings → Cloud
+sandboxes can target **This phone** to inspect, stop, or delete that sandbox.
+The phone does not attach to a sandbox by display-name prefix; it uses a
+collision-resistant name derived from the full sandbox ID. If sandbox creation
+returns an ambiguous network failure, the app refuses to issue another billable
+create automatically.
+
+This path requires the edge to return the optional `graffKey` from
+`POST /auth/exchange` and the gateway to support the existing personal sandbox
+routes. Cross-device at-most-one creation is not promised without a gateway
+idempotency/default-sandbox contract. Offline `-demo -onboarding-nocomputer
+-demo-phone-cloud` tests exercise the first-run UI and scripted first reply; they
+do not prove live gateway provisioning or billing. A live release check must
+use an approved funded test account, verify an actual reply, then stop the
+sandbox and confirm billing ends.
+
 ### Sessions without a project
 
 Home's **+ → Session without a project…** opens the execution-device picker,
