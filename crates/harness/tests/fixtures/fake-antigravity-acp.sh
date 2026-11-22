@@ -36,7 +36,11 @@ while read -r line; do
       emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"plan\",\"description\":\"Plan carefully\"},{\"name\":\"logout\",\"description\":\"Log out and clear stored credentials.\"}]}}}"
     fi
   elif has "$line" '"method":"session/load"'; then
-    emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
+    if has "$line" '"sessionId":"missing-session"'; then
+      emit "{\"id\":$id,\"error\":{\"code\":-32602,\"message\":\"Session not found\"}}"
+    else
+      emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
+    fi
   elif has "$line" '"method":"authenticate"'; then
     has "$line" '"methodId":"oauth-personal"' || exit 1
     printf 'Sign in here: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2

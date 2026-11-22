@@ -39,17 +39,15 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     // the queue's scroll viewport or use decorative padding as scroll content.
     const outer = ui.div(c).column().wFull().px(16).pb(40).gap(if (queued) queue_view.gap else 0).itemsCenter();
     defer outer.end();
-    // Above-dock affordances anchor to the whole stack, not just the input:
-    // queued rows and attachments must not grow underneath the jump button.
+    // Anchor the work cue to the whole dock so it clears queued rows.
     {
-        ui.key(c, "dock-overlays");
-        const top = ui.div(c).column().w(w).h(0);
-        defer top.end();
-        jumpToBottom(c, a, k, w);
         const work = @import("view_turn_work.zig");
         if (work.changes(c, a)) |t| {
+            ui.key(c, "dock-overlays");
+            const top = ui.div(c).column().w(w).h(0);
+            defer top.end();
             ui.key(c, "turn-work-cue");
-            const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap + (if (a.view.jump_shown) @as(f32, 36) else 0)));
+            const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap));
             defer cue.end();
             work.card(c, a, k, t, w + 16);
         }
@@ -659,50 +657,5 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
         _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = k.onAccent() }, .none, null);
     } else {
         icons.icon(c, .@"arrow-up", 14, k.onAccent(), 0);
-    }
-}
-
-const jump_show: f32 = 320;
-const jump_hide: f32 = 70;
-
-// Horizontal padding (11 + 13), arrow (13), and its gap (6).
-const jump_chrome: f32 = 43;
-
-fn jumpChipWidth(available: f32, label_width: f32) f32 {
-    return @max(0, @min(available, @ceil(label_width) + jump_chrome));
-}
-
-/// GPUI's labeled pill, six pixels above the entire dock. Narrow panes wrap
-/// the label and grow upward, keeping the same clearance above the queue.
-/// Shown once the reader is 320 points off the end, and kept until within 70.
-fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const box = a.view.jump_box;
-    if (box == 0) return;
-    const show = if (a.view.jump_shown) a.view.jump_distance > jump_hide else a.view.jump_distance > jump_show;
-    a.view.jump_shown = show;
-    if (!show) return;
-    const label = "Scroll to bottom";
-    const st = kit.style(c, 13, 18, .{ .color = k.text, .wrap = true });
-    const chip_w = jumpChipWidth(w, c.text.width(label, st));
-    const label_w = @max(0, chip_w - jump_chrome);
-    const lines = c.text.wrap(label, st, label_w);
-    const chip_h = @max(30, c.text.lineHeight(st) * @as(f32, @floatFromInt(lines.len)) + 12);
-    ui.key(c, "jump-to-bottom");
-    const row = ui.div(c).row().absolute().offset(0, -chip_h - 6).w(w).justifyCenter();
-    defer row.end();
-    const jump_chip = kit.shadowLg(ui.div(c).row().size(chip_w, chip_h).pl(11).pr(13).gap(6).itemsCenter().rounded(15).bg(k.composer).border(k.border).borderW(1));
-    defer jump_chip.end();
-    icons.icon(c, .@"alt-arrow-down", 13, k.muted, 0);
-    {
-        const words = ui.div(c).column().w(label_w);
-        defer words.end();
-        ui.text(c, label, st);
-    }
-    if (jump_chip.clicked()) {
-        c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
-        c.scroll_follow.put(c.gpa, box, true) catch {};
-        a.view.jump_shown = false;
-        a.view.jump_distance = 0;
-        c.changed = true;
     }
 }

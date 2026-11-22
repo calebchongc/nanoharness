@@ -2282,6 +2282,35 @@ async fn antigravity_load_and_prompt_auth_expiry_point_to_sign_in() {
 }
 
 #[tokio::test]
+async fn antigravity_missing_session_does_not_send_a_contextless_followup() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("Do option one.");
+    req.model = None;
+    req.resume = Some("missing-session".into());
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _, _) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { .. } | AgentEvent::TextDelta { .. }
+        )),
+        "must not start a replacement session or send a follow-up: {events:?}"
+    );
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored, "{events:?}");
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("your message was not sent"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn antigravity_empty_reply_completes_once() {
     let workspace = tempfile::Builder::new()
         .prefix("empty-reply")
