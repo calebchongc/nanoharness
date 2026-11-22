@@ -1159,7 +1159,7 @@ test "topbar updates pill disappears automatically once agent or engine updates 
     try testing.expect(!h.a.view.updates_popover);
 
     // 3. A completed Codegraff engine update (`graff_kind == .updated`) also stays out of the topbar pill,
-    //    while a staged desktop app update awaiting Restart (`app_ready == true`) still stays actionable.
+    //    while a staged desktop app update awaiting Restart (matching installed version) still stays actionable.
     const to = "0.302.99.0";
     @memcpy(h.a.updates.graff_to[0..to.len], to);
     h.a.updates.graff_to_len = to.len;
@@ -1170,7 +1170,7 @@ test "topbar updates pill disappears automatically once agent or engine updates 
     const app_ver = "99.0.0";
     @memcpy(h.a.release.latest[0..app_ver.len], app_ver);
     h.a.release.latest_len = app_ver.len;
-    h.a.updates.app_ready = true;
+    h.a.updates.setAppInstalled(app_ver);
     h.t.settle(1);
     h.t.frame();
     try testing.expectEqual(@as(usize, 1), vu.topbarUpdatesCount(&h.a));
@@ -1383,7 +1383,7 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
         \\  {"id":"t1","kind":"tool","resolved":true,"call":{"kind":"shell","command":"git status --short"}},
         \\  {"id":"t2","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"apps/nano/src/view_question.zig"}},
         \\  {"id":"m1","kind":"text","text":"Checking where `main`, the branches and the worktrees stand before changing anything."},
-        \\  {"id":"q1","kind":"input","resolved":true,"questions":[{"id":"q-main","header":"Cleanup","question":"This worktree is now on `main`, level with `origin/main` (b3727a7), which cleanup mode should run?","options":["Prune clean throwaway worktrees","Keep all worktrees"]}]}
+        \\  {"id":"q1","kind":"input","resolved":false,"questions":[{"id":"q-main","header":"Cleanup","question":"This worktree is now on `main`, level with `origin/main` (b3727a7), which cleanup mode should run?","options":["Prune clean throwaway worktrees","Keep all worktrees"]}]}
         \\]}]}
     , .{});
     defer doc_b.deinit();

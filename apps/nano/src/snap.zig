@@ -405,9 +405,6 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
         if (u.get("desktopUpdate")) |b| if (b == .bool) {
             a.updates.desktop_update = b.bool;
         };
-        if (u.get("appReady")) |b| if (b == .bool) {
-            a.updates.app_ready = b.bool;
-        };
         if (u.get("appCanInstall")) |b| if (b == .bool) {
             a.updates.app_can_install = b.bool;
         };
@@ -417,6 +414,9 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
         if (str(u, "appLatest")) |ver| {
             copyFixed(&a.release.latest, &a.release.latest_len, ver);
             a.release.succeeded = true;
+            if (u.get("appReady")) |b| if (b == .bool and b.bool) {
+                a.updates.setAppInstalled(ver);
+            };
         }
         if (str(u, "graffKind")) |gk| {
             if (std.mem.eql(u8, gk, "none")) a.updates.graff_kind = .none else if (std.mem.eql(u8, gk, "updating")) a.updates.graff_kind = .updating else if (std.mem.eql(u8, gk, "updated")) a.updates.graff_kind = .updated else if (std.mem.eql(u8, gk, "available")) a.updates.graff_kind = .available;

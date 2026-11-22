@@ -155,11 +155,32 @@ pub fn summary(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
 }
 
 /// Slower desktop 3.4s title shimmer (not the per-file scramble clock).
-pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool, max_w: f32) void {
+pub fn title(c: *ui.Context, k: theme.Colors, full: []const u8, parts: []const tr.Part, active: bool, hot: bool, max_w: f32) void {
     const st = kit.style(c, 15, 18, .{ .color = if (hot) k.text else k.muted });
-    if (!active or c.reduced_motion) return kit.fadeText(c, text, st, max_w);
-    const box = ui.div(c).row().maxW(max_w).clip();
+    const overflow = c.text.width(full, st) > max_w;
+    // A half-visible count ("read 5…") is ambiguous. Use a complete shorter
+    // summary at split widths and keep the full breakdown on hover.
+    var text = full;
+    var box = ui.div(c).row().maxW(max_w).clip();
     defer box.end();
+    if (overflow) {
+        var calls: usize = 0;
+        var failures: usize = 0;
+        for (parts) |p| if (p.kind == .tool) {
+            calls += 1;
+            if (p.is_error) failures += 1;
+        };
+        if (calls > 0) {
+            text = c.print("{d} tool call{s}", .{ calls, if (calls == 1) "" else "s" });
+            if (failures > 0) {
+                const with_failures = c.print("{s} · {d} failed", .{ text, failures });
+                if (c.text.width(with_failures, st) <= max_w) text = with_failures;
+            }
+            if (c.text.width(text, st) > max_w) text = "Tools";
+        }
+        box = @import("view_tooltip.zig").on(box, k, .{ .text = full });
+    }
+    if (!active or c.reduced_motion or c.text.width(text, st) > max_w) return kit.ellipsisText(c, text, st, max_w);
     const phase: f32 = @floatCast(@mod(c.time / 3.4, 1));
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();

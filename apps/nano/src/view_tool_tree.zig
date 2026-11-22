@@ -59,7 +59,7 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         const max_title_w = if (c.rects.get(c.node(h.index).id)) |hr| @import("motion_rules.zig").toolGroupTitleCap(hr.w, 28, 8) else @import("motion_rules.zig").toolGroupTitleCap(col_est, 28, 8);
         const title_slot = ui.div(c).row().grow().w(0).clip();
         defer title_slot.end();
-        chrome.title(c, k, tools.label(buf, parts), active, h.hovered(), max_title_w);
+        chrome.title(c, k, tools.label(buf, parts), parts, active, h.hovered(), max_title_w);
     }
     const fold_id = state.key(parent, key, "group-fold");
     const initial_height = 2 + @as(f32, @floatFromInt(parts.len)) * rules.row_height + rules.footer_gap + rules.footer_height;
@@ -493,9 +493,9 @@ fn fileBadge(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8, name: [
     if (relative) |file| if (badge.clicked()) @import("app_files.zig").openFile(a, file);
     if (!compact) {
         const well = ui.div(c).row().size(20, 20).center().rounded(4).bg(ui.Color.hex(if (k.dark) 0x000000 else 0xffffff).alpha(0.16));
-        defer well.end();
         file_icons.icon(c, path, false, k.dark, 14);
-        kit.fadeText(c, name, kit.style(c, 12, 18, .{ .mono = true, .color = k.muted }), @max(width - 33, 0));
+        well.end();
+        kit.ellipsisText(c, name, kit.style(c, 12, 18, .{ .mono = true, .color = k.muted }), @max(width - 33, 0));
     } else {
         kit.ellipsisText(c, name, kit.style(c, 11.5, 18, .{ .mono = true, .color = k.text.alpha(0.84) }), @max(width - 6, 0));
     }
