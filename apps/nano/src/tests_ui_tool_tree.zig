@@ -491,7 +491,7 @@ test "narrow split tool tree shows target filenames and commands instead of anon
     try f.a.transcript.apply(parsed.value);
     f.a.view.toggleGroup(f.a.gpa, "synthetic-parent/reply/r1", false);
 
-    for ([_]f32{ 160, 190 }) |w| {
+    for ([_]f32{ 160, 190, 240, 320 }) |w| {
         var t: ui.Tester = undefined;
         try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = w, .height = 340, .scale = 2, .dark = true });
         defer t.deinit();
@@ -501,6 +501,17 @@ test "narrow split tool tree shows target filenames and commands instead of anon
             const path = try std.fmt.bufPrint(&buf, "{s}/narrow-tool-tree.png", .{std.mem.span(dir)});
             try t.screenshot(path);
         };
+        if (w == 240) {
+            const file = try textRect(&t, "view_diffs.zig");
+            for (t.ctx.nodes.items) |node| switch (node.content) {
+                .text => |tx| if (std.mem.eql(u8, tx.str, "view_diffs.zig")) {
+                    const badge = t.ctx.node(node.parent).rect;
+                    try testing.expect(file.x + file.w <= badge.x + badge.w + 0.5);
+                },
+                else => {},
+            };
+            try testing.expect(t.hasText("5 tool calls"));
+        }
         const expected_prefixes = [_][]const u8{ "view_di", "view_co", "zig bui", "git sta", "view_to" };
         for (expected_prefixes) |prefix| {
             var visible = false;

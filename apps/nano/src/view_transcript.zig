@@ -893,6 +893,9 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .visual => @import("view_visual.zig").draw(c, a, k, e, p),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {
+            // The stored part still records the request for history and sync;
+            // a resolved question is no longer an actionable transcript chip.
+            if (p.resolved) return;
             const q = if (p.questions.len > 0) p.questions[0] else null;
             const label = if (q) |x| (if (x.question.len > 0) x.question else x.header) else "Question";
             @import("view_question.zig").chip(c, k, label, p.resolved, at.col);
@@ -1033,7 +1036,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
             const active = e.status == .streaming and for (work) |p| {
                 if ((p.kind == .reasoning and at.closes) or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered(), max_title_w);
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), work, active, h.hovered(), max_title_w);
         }
     }
     const state = @import("tool_ui_state.zig");
@@ -1345,7 +1348,7 @@ pub fn estimateEntryHeight(e: *const tr.Entry, col_w: f32) f32 {
                 },
                 .input => {
                     in_tools = false;
-                    h += 120;
+                    if (!p.resolved) h += 42;
                 },
                 .@"error" => {
                     in_tools = false;
