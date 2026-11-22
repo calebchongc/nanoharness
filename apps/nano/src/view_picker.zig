@@ -551,6 +551,15 @@ fn pickerFooter(c: *ui.Context, a: *App, k: theme.Colors, open: bool) void {
     }
 }
 
+pub fn visibleRowRange(row_count: usize, offset: f32, list_h: f32, row_h: f32) struct { first: usize, last: usize } {
+    if (row_count == 0 or row_h <= 0) return .{ .first = 0, .last = 0 };
+    const visible_h = @max(@as(f32, 0), list_h);
+    const clamped_offset = std.math.clamp(offset, 0, @max(0, @as(f32, @floatFromInt(row_count)) * row_h + 6 - visible_h));
+    const first = @min(row_count, @as(usize, @intFromFloat(@floor(@max(0, clamped_offset - row_h) / row_h))));
+    const last = @min(row_count, first + @as(usize, @intFromFloat(@ceil(visible_h / row_h))) + 3);
+    return .{ .first = first, .last = last };
+}
+
 /// The models: a 34-point row each, in sections by route while browsing
 /// one agent's catalog, flat for a search or the starred.
 fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open: bool, exit: ui.motion.Frame) void {
@@ -564,10 +573,11 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open
         if (r.header != null) break true;
     } else false;
     const row_h: f32 = 34;
+    const visible_h = @max(@as(f32, 30), list_h);
     var hovered: ?usize = null;
     var detail_row: ?ui.Rect = null;
     {
-        const style: ui.Style = .{ .width = .fill, .height = .{ .px = @max(30, list_h) }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
+        const style: ui.Style = .{ .width = .fill, .height = .{ .px = visible_h }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
         ui.key(c, "model-picker-list");
         const at = c.nodes.items.len;
         ui.scroll(c, style);
@@ -577,13 +587,13 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open
         var offset = c.scroll.get(id) orelse 0;
         if (p.reveal) {
             const top = @as(f32, @floatFromInt(p.active)) * row_h;
-            if (top < offset) offset = top else if (top + row_h > offset + list_h - 8) offset = top + row_h - list_h + 8;
+            if (top < offset) offset = top else if (top + row_h > offset + visible_h - 8) offset = top + row_h - visible_h + 8;
             c.scroll.put(c.gpa, id, @max(0, offset)) catch {};
             p.reveal = false;
         }
-        offset = std.math.clamp(offset, 0, @max(0, @as(f32, @floatFromInt(rows.len)) * row_h + 6 - list_h));
-        const first = @min(rows.len, @as(usize, @intFromFloat(@floor(@max(0, offset - row_h) / row_h))));
-        const last = @min(rows.len, first + @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 3);
+        const range = visibleRowRange(rows.len, offset, visible_h, row_h);
+        const first = range.first;
+        const last = range.last;
         space(c, @as(f32, @floatFromInt(first)) * row_h);
         for (rows[first..last], first..) |r, i| {
             ui.key(c, c.print("model-result-{s}-{s}-{d}-{any}", .{ r.harness, r.model.id, i, r.header != null }));

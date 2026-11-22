@@ -152,10 +152,11 @@ fn refMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     ui.scroll(c, list_style);
     defer ui.end(c);
     const scroll_id = c.node(@intCast(scroll_at)).id;
-    const max_scroll = @max(0, @as(f32, @floatFromInt(total)) * row_h - list_h);
+    const visible_h = @max(@as(f32, 0), list_h);
+    const max_scroll = @max(0, @as(f32, @floatFromInt(total)) * row_h - visible_h);
     const offset = std.math.clamp(c.scroll.get(scroll_id) orelse 0, 0, max_scroll);
     const first = @min(total, @as(usize, @intFromFloat(@floor(@max(0, offset - row_h) / row_h))));
-    const visible_count = @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 3;
+    const visible_count = @as(usize, @intFromFloat(@ceil(visible_h / row_h))) + 3;
     const last = @min(total, first + visible_count);
     if (first > 0) _ = c.leaf(.{ .width = .fill, .height = .{ .px = @as(f32, @floatFromInt(first)) * row_h } }, .none, null);
     for (first..last) |idx| {

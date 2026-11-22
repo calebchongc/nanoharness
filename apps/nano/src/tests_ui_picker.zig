@@ -989,3 +989,78 @@ test "graff model with empty reasoningLevels never inherits harness ladder or se
     try testing.expectEqual(@as(usize, 2), h.a.levelsOf("claude-synthetic").len);
     try testing.expectEqualStrings("high", h.a.target().reasoning.?);
 }
+
+test "expanding compact model picker from a zero-effort local model like Flint does not panic during height transition" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+
+    // Use real motion so ScalarTransition animates from compact_single_height (46pt) up to list_height (480pt).
+    h.t.ctx.reduced_motion = false;
+    h.t.settle(1);
+
+    const graff_harnesses = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"graff","name":"Codegraff","installed":true,"enabled":true,
+        \\  "reasoningLevels":["low","medium","high","xhigh"]}]
+    , .{});
+    defer graff_harnesses.deinit();
+    try h.a.harnesses.replace(graff_harnesses.value);
+
+    const graff_models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"nanoattention/flint","label":"Flint","maker":"nanoattention","billing":"local","context":65536,
+        \\  "reasoningLevels":[]},
+        \\ {"id":"codex/gpt-6.2-sol","label":"GPT-6.2 Sol","maker":"openai","billing":"plan","context":500000,
+        \\  "reasoningLevels":["low","medium","high","xhigh"]}]
+    , .{});
+    defer graff_models.deinit();
+    try h.a.models.replace(graff_models.value);
+    if (h.a.view.model_picker.catalogs.get("graff")) |cat| {
+        try cat.models.replace(graff_models.value);
+        cat.loaded = true;
+    }
+
+    h.a.setModel("nanoattention/flint");
+    h.t.settle(1);
+
+    // Open the compact picker on Flint (single-row 46pt compact card with no reasoning slider or account rows).
+    h.a.togglePickerCompact();
+    h.t.frame();
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqual(@as(f32, @import("view_picker.zig").compact_single_height), h.a.view.model_picker.height);
+
+    // Click the Flint row in the compact card to expand into the full model list.
+    // On the first frame of the transition, h is still 46pt so list_h = 46 - 107 = -61pt.
+    const chip = h.a.view.chip_anchor orelse return error.MissingChip;
+    var model_btn: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |t| if (std.mem.eql(u8, t.str, "Flint") and (n.rect.y + n.rect.h < chip.y or n.rect.y > chip.y + chip.h)) {
+            model_btn = n.rect;
+        },
+        else => {},
+    };
+    const btn_rect = model_btn orelse return error.MissingCompactModelButton;
+    h.t.click(btn_rect.x + 12, btn_rect.y + 4);
+    h.t.frame();
+    h.t.settle(1);
+    h.snap("flint-compact-expanded");
+
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expect(h.a.view.model_picker.can_return_compact);
+    try testing.expect(h.t.hasText("GPT-6.2 Sol"));
+}
+
+test "model picker visibleRowRange handles negative and zero viewport heights safely" {
+    const picker = @import("view_picker.zig");
+    const neg = picker.visibleRowRange(20, 0, -61.0, 34.0);
+    try testing.expectEqual(@as(usize, 0), neg.first);
+    try testing.expectEqual(@as(usize, 3), neg.last);
+
+    const zero = picker.visibleRowRange(2, 100.0, 0.0, 34.0);
+    try testing.expect(zero.first <= zero.last);
+    try testing.expect(zero.last <= 2);
+
+    const empty = picker.visibleRowRange(0, 0, -61.0, 34.0);
+    try testing.expectEqual(@as(usize, 0), empty.first);
+    try testing.expectEqual(@as(usize, 0), empty.last);
+}
