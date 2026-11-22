@@ -866,7 +866,12 @@ pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Ent
         a.view.tool_ui.veils.getOrCreate(a.gpa, part_id, live and p.text.items.len > 64, c.time * 1000.0)
     else
         null;
-    @import("view_markdown.zig").withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    const markdown = @import("view_markdown.zig");
+    if (e.role == .assistant and e.status == .complete and p.kind == .text) {
+        markdown.withCommandBlocks(c, k, p.text.items, a, chat_id, row_veil);
+    } else {
+        markdown.withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    }
     if (!live and row_veil != null) {
         a.view.tool_ui.veils.pruneSettled(a.gpa, part_id);
     }

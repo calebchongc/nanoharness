@@ -262,6 +262,8 @@ pub mod methods {
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
+    /// Local desktop IPC only; regular and relay RPC do not expose this method.
+    pub const OPEN_LOCAL_COMMAND_TERMINAL: &str = "OpenLocalCommandTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";

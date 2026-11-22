@@ -350,6 +350,16 @@ pub fn runAction(space_id: []const u8, chat_id: []const u8, action_id: []const u
     return .{ .method = "RunProjectAction", .params = .{ .spaceId = space_id, .chatId = chat_id, .actionId = action_id, .cols = 80, .rows = 24, .targetDeviceId = host } };
 }
 
+pub const TerminalCommand = struct { shell: []const u8, source: []const u8 };
+
+pub fn openCommandTerminal(chat: []const u8, cwd: []const u8, command: TerminalCommand) Request(struct { chatId: []const u8, cwd: []const u8, command: TerminalCommand, cols: u16, rows: u16 }) {
+    return .{ .method = "OpenLocalCommandTerminal", .params = .{ .chatId = chat, .cwd = cwd, .command = command, .cols = 80, .rows = 24 } };
+}
+
+pub fn writeTerminal(terminal_id: []const u8, data: []const u8) Request(struct { terminalId: []const u8, data: []const u8 }) {
+    return .{ .method = "WriteTerminal", .params = .{ .terminalId = terminal_id, .data = data } };
+}
+
 pub fn subscribeTerminal(terminal_id: []const u8, host: ?[]const u8) Request(struct { terminalId: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "SubscribeTerminal", .params = .{ .terminalId = terminal_id, .targetDeviceId = host } };
 }

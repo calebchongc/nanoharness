@@ -664,17 +664,123 @@ pub struct EngineRuntime {
     host_relay: std::sync::Mutex<Option<harness_rpc::HostRelay>>,
 }
 
-/// IPC-only lifecycle control owned by `harness headless`. The regular
-/// [`EngineRpc`] deliberately does not expose this method, so a viewport
-/// attached to another headed process cannot shut down that process's engine.
+/// Operations reserved for local `harness headless` IPC, not relayed to peers.
 struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    #[cfg(unix)]
+    terminals: Terminals,
+}
+
+fn open_local_command_terminal(
+    #[cfg(unix)] terminals: &Terminals,
+    params: serde_json::Value,
+) -> Result<RpcReply, RpcError> {
+    #[cfg(not(unix))]
+    {
+        let _ = params;
+        Err(RpcError::Failed(
+            "Transcript commands are not supported on this host".into(),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            #[serde(rename = "chatId")]
+            _chat_id: String,
+            cwd: String,
+            command: Command,
+            cols: u16,
+            rows: u16,
+        }
+        #[derive(serde::Deserialize)]
+        struct Command {
+            shell: String,
+            source: String,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|_| RpcError::Failed("Invalid command terminal parameters".into()))?;
+        if !std::path::Path::new(&p.cwd).is_absolute() {
+            return Err(RpcError::Failed(
+                "An absolute working directory is required".into(),
+            ));
+        }
+        let source = &p.command.source;
+        if source.trim().is_empty()
+            || source.len() > 32 * 1024
+            || source
+                .bytes()
+                .any(|b| (b < 32 && b != b'\n' && b != b'\t') || b == 127)
+        {
+            return Err(RpcError::Failed("Invalid terminal command source".into()));
+        }
+        let session = terminals
+            .open_transcript_command(&p.cwd, p.cols, p.rows, &p.command.shell, source)
+            .map_err(|err| RpcError::Failed(err.to_string()))?;
+        RpcReply::value(&session)
+    }
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn local_command_terminal_keeps_its_pty_interactive() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use harness_proto::TerminalEvent;
+
+    let cwd = tempfile::tempdir().unwrap();
+    let terminals = Terminals::new();
+    let source = "stty -echo\nprintf 'Synthetic input: '\nIFS= read -r reply\nstty echo\n[ \"$reply\" = synthetic-answer ] && printf 'Synthetic response accepted\\n'";
+    let params = serde_json::json!({
+        "chatId": "synthetic-chat", "cwd": cwd.path(), "cols": 80, "rows": 24,
+        "command": {"shell": "sh", "source": source}
+    });
+    let mut remote = params.clone();
+    remote["targetDeviceId"] = serde_json::json!("synthetic-peer");
+    assert!(open_local_command_terminal(&terminals, remote).is_err());
+
+    let value = open_local_command_terminal(&terminals, params)
+        .unwrap()
+        .into_value()
+        .unwrap();
+    let id = value["id"].as_str().unwrap();
+    let mut rx = terminals.subscribe(id, None).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        let mut output = Vec::new();
+        let mut answered = false;
+        while let Some(event) = rx.recv().await {
+            if let TerminalEvent::Data { data, .. } = event {
+                output.extend(STANDARD.decode(data).unwrap());
+                let text = String::from_utf8_lossy(&output);
+                if text.contains("Synthetic input: ") && !answered {
+                    terminals.write_bytes(id, b"synthetic-answer\r").unwrap();
+                    answered = true;
+                }
+                if text.contains("Synthetic response accepted") {
+                    assert!(!text.contains("synthetic-answer"));
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    terminals.close(id).unwrap();
+    assert_eq!(result.ok(), Some(true));
 }
 
 #[async_trait]
 impl RpcService for HeadlessRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::OPEN_LOCAL_COMMAND_TERMINAL {
+            return open_local_command_terminal(
+                #[cfg(unix)]
+                &self.terminals,
+                params,
+            );
+        }
         if method != methods::STOP_ENGINE {
             return self.inner.handle(method, params).await;
         }
@@ -1043,6 +1149,8 @@ impl Engine {
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
             inner: runtime.core().rpc_service(),
             stop_tx,
+            #[cfg(unix)]
+            terminals: runtime.core().terminals.clone(),
         });
         let server = serve_ipc(config.ipc_port, service).await?;
         // Bot routines run only while this engine does: it checks them once

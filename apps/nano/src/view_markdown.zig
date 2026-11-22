@@ -25,6 +25,7 @@ const LinkOwner = struct { app: *@import("app.zig").App, parent: []const u8 };
 var link_owner: ?LinkOwner = null;
 var active_veil: ?*veil_mod.RowVeil = null;
 var active_streaming: bool = false;
+var transcript_commands: bool = false;
 var veil_now_ms: f64 = 0;
 var current_elem_ix: usize = 0;
 var provider_mode: bool = false;
@@ -57,6 +58,21 @@ fn toggleMermaidSource(id: u64) void {
 /// including when a subagent is drawn beside it.
 pub fn withLinks(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@import("app.zig").App, parent: ?[]const u8) void {
     withLinksVeil(c, colors, src, a, parent, null, false);
+}
+
+/// Only a finished agent reply can offer to run a code fence.
+pub fn withCommandBlocks(
+    c: *ui.Context,
+    colors: theme.Colors,
+    src: []const u8,
+    a: *@import("app.zig").App,
+    parent: ?[]const u8,
+    row_veil: ?*veil_mod.RowVeil,
+) void {
+    const previous = transcript_commands;
+    transcript_commands = true;
+    defer transcript_commands = previous;
+    withLinksVeil(c, colors, src, a, parent, row_veil, false);
 }
 
 /// Draws Markdown `src` with optional streaming fade-in veil and live
@@ -428,6 +444,21 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8, feedback: *kit.C
             // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
             _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
         }
+        if (transcript_commands) if (link_owner) |owner| {
+            const actions = @import("app_actions.zig");
+            if (actions.commandShell(lang, src)) |shell| {
+                const running = actions.commandRun(owner.app, owner.parent, block_id) != null;
+                if (running or actions.commandCwd(owner.app, owner.parent) != null) {
+                    ui.key(c, "code-terminal");
+                    if (kit.iconButton(c, k, if (running) .terminal else .@"action-play", .{
+                        .size = 22,
+                        .radius = 5,
+                        .icon = 13,
+                        .tip = .{ .text = if (running) "Open command terminal" else "Review command to run" },
+                    })) actions.openCommand(owner.app, owner.parent, block_id, shell, src);
+                }
+            }
+        };
         ui.key(c, "code-copy");
         if (kit.copyButton(c, k, feedback, .{ .size = 22, .radius = 5, .icon = 12 })) c.clipboard.write(c.clipboard.ctx, src);
     }

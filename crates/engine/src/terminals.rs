@@ -214,6 +214,26 @@ impl Terminals {
         self.open_session(cwd, cols, rows, None, environment, Some(command))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn open_transcript_command(
+        &self,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        shell: &str,
+        command: &str,
+    ) -> Result<TerminalSession, EngineError> {
+        let shell = match shell {
+            "sh" => Some("/bin/sh"),
+            "bash" => Some("bash"),
+            "zsh" => Some("zsh"),
+            "fish" => Some("fish"),
+            "shell" => None,
+            _ => return Err(EngineError::Other("Unsupported command shell".into())),
+        };
+        self.open_session(cwd, cols, rows, shell, &HashMap::new(), Some(command))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn open_session(
         &self,
