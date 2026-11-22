@@ -11,6 +11,14 @@ fn apply(a: *App, text: []const u8) !void {
     try a.transcript.apply(parsed.value);
 }
 
+fn jumpButton(t: *ui.Tester) ?ui.Rect {
+    for (t.ctx.a11y_items.items) |item| {
+        if (item.role == .button and item.enabled and std.mem.eql(u8, item.label, "Scroll to bottom"))
+            return t.ctx.node(item.node_index).rect;
+    }
+    return null;
+}
+
 fn visible(t: *ui.Tester, text: []const u8) !void {
     const rect = t.findText(text) orelse return error.MissingLiveText;
     if (!(rect.h > 0 and rect.y >= 38 and rect.y + rect.h < t.size.h - 80)) {
@@ -174,7 +182,7 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 800, .dark = true });
     defer t.deinit();
     t.frame();
-    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(jumpButton(&t) == null);
     // The rail's tick is a 12-point dash. A chat that fits must not draw one
     // in the empty band above the prompt.
     for (t.ctx.nodes.items) |n| if (n.content == .none and n.rect.h <= 2 and n.rect.w >= 12 and n.rect.w <= 20 and n.rect.x < 80) {
@@ -198,10 +206,10 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
     t.frame();
     t.frame();
-    const pill = t.findText("Scroll to bottom") orelse return error.NoJumpPill;
-    t.click(pill.x + 8, pill.y + 8);
+    const pill = jumpButton(&t) orelse return error.NoJumpPill;
+    t.click(pill.x + pill.w / 2, pill.y + pill.h / 2);
     t.frame();
-    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(jumpButton(&t) == null);
     try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
 }
 
@@ -287,8 +295,8 @@ test "current reply stays near the top instead of following growing work to the 
         }
         // The reader can still explicitly request bottom-follow.
         t.frame();
-        const pill = t.findText("Scroll to bottom") orelse return error.MissingBottomChoice;
-        t.click(pill.x + 8, pill.y + 8);
+        const pill = jumpButton(&t) orelse return error.MissingBottomChoice;
+        t.click(pill.x + pill.w / 2, pill.y + pill.h / 2);
         t.settle(1);
         try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
         t.scroll(450, 300, 100);

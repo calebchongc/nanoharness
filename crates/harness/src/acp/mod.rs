@@ -3939,7 +3939,7 @@ async fn run_session(session: Session) {
                         "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
                     )));
                 }
-                Err(e) if harness == HarnessId::Graff => {
+                Err(e) if matches!(harness, HarnessId::Graff | HarnessId::Antigravity) => {
                     // Never send a retry without its native conversation context
                     // or replace the stored reference with an empty session.
                     return Err(HarnessError::Protocol(format!(

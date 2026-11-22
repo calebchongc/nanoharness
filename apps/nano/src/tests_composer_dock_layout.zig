@@ -43,11 +43,18 @@ fn attach(a: *App) !void {
     try a.attachments.items.append(a.gpa, item);
 }
 
-fn parentOfText(tester: *ui.Tester, label: []const u8) !u32 {
-    for (tester.ctx.nodes.items) |n| {
-        if (n.content == .text and std.mem.eql(u8, n.content.text.str, label)) return n.parent;
+fn jumpRect(tester: *ui.Tester) !ui.Rect {
+    for (tester.ctx.a11y_items.items) |item| {
+        if (item.role == .button and item.enabled and std.mem.eql(u8, item.label, "Scroll to bottom"))
+            return tester.ctx.node(item.node_index).rect;
     }
-    return error.MissingDockText;
+    return error.MissingJumpButton;
+}
+
+fn clickJump(tester: *ui.Tester) !void {
+    const r = try jumpRect(tester);
+    tester.click(r.x + r.w / 2, r.y + r.h / 2);
+    tester.settle(0.1);
 }
 
 fn pillRect(tester: *ui.Tester) !ui.Rect {
@@ -213,7 +220,7 @@ test "composer dock wrapped queue controls dispatch their original actions" {
     };
 }
 
-test "composer dock jump label wraps within narrow panes and remains clickable" {
+test "composer dock puts the jump action below the input at every pane width" {
     theme.registerFonts();
     var a: App = .init(t.allocator, t.io, 1);
     defer a.deinit();
@@ -232,35 +239,13 @@ test "composer dock jump label wraps within narrow panes and remains clickable" 
         a.view.jump_distance = 800;
         tester.ctx.scroll_follow.put(t.allocator, 777, false) catch unreachable;
         tester.settle(0.5);
-        const label_index = blk: {
-            for (tester.ctx.nodes.items, 0..) |n, i| {
-                if (n.content == .text and std.mem.eql(u8, n.content.text.str, "Scroll to bottom")) break :blk @as(u32, @intCast(i));
-            }
-            return error.MissingJumpLabel;
-        };
-        const label = tester.ctx.node(label_index);
-        var chip_index = label.parent;
-        while (tester.ctx.node(chip_index).style.border == null) chip_index = tester.ctx.node(chip_index).parent;
-        const chip = tester.ctx.node(chip_index).rect;
-        const tray = try trayRect(&tester, try pillRect(&tester));
-        const dir = std.c.getenv("NANO_JUMP_SNAP_DIR");
-        if (dir != null and (width == 140 or width == 520)) {
-            var buf: [1024]u8 = undefined;
-            const path = try std.fmt.bufPrint(&buf, "{s}/jump-{d}.png", .{ std.mem.span(dir.?), width });
-            try tester.screenshot(path);
-        }
-        try t.expect(chip.x >= 16 and chip.x + chip.w <= tester.size.w - 16 + 0.5);
-        try t.expect(label.rect.x >= chip.x and label.rect.x + label.rect.w <= chip.x + chip.w);
-        try t.expect(label.rect.y >= chip.y and label.rect.y + label.rect.h <= chip.y + chip.h);
-        try t.expect(chip.y >= 0 and chip.y + chip.h + 5 <= tray.y);
-        if (width == 140) {
-            try t.expect(label.content.text.lines.len > 1);
-            try t.expect(chip.h > 30);
-        } else if (width == 520) {
-            try t.expectEqual(@as(f32, 18), label.rect.h);
-            try t.expectEqual(@as(f32, 30), chip.h);
-        }
-        try tester.clickText("Scroll to bottom");
+        try t.expect(!tester.hasText("Scroll to bottom"));
+        const chip = try jumpRect(&tester);
+        const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        try t.expect(chip.x >= pill.x and chip.x + chip.w <= pill.x + pill.w + 0.5);
+        try t.expect(chip.y >= pill.y + pill.h and chip.y + chip.h <= tester.size.h);
+        try t.expectEqual(@as(f32, 20), chip.h);
+        try clickJump(&tester);
         try t.expect(tester.ctx.scroll_follow.get(777) orelse false);
         try t.expectEqual(@as(f32, 0), a.view.jump_distance);
     }
@@ -286,10 +271,9 @@ test "composer dock separates queue tray jump button and growing input" {
         try snap(&tester, width, draft, count);
         const pill = a.view.composer_anchor orelse return error.MissingComposer;
         const tray = try trayRect(&tester, pill);
-        const jump = tester.ctx.node(try parentOfText(&tester, "Scroll to bottom")).rect;
+        const jump = try jumpRect(&tester);
         try t.expect(tray.y + tray.h + 7 <= pill.y);
-        try t.expect(jump.y + jump.h + 5 <= tray.y);
-        try t.expect(jump.y >= 0);
+        try t.expect(pill.y + pill.h <= jump.y and jump.y + jump.h <= 600);
         try t.expect(pill.y + pill.h <= 600);
         if (count == 8) {
             const viewport = for (tester.ctx.nodes.items) |node| {
@@ -301,7 +285,7 @@ test "composer dock separates queue tray jump button and growing input" {
             const last = tester.findText("Synthetic queued message 7") orelse return error.MissingLastQueuedRow;
             try t.expect(last.y >= viewport.y and last.y + last.h <= viewport.y + viewport.h);
         }
-        try tester.clickText("Scroll to bottom");
+        try clickJump(&tester);
         try t.expect(tester.ctx.scroll_follow.get(777) orelse false);
     };
 }
