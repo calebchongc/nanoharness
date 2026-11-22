@@ -603,6 +603,31 @@ test "the model picker keeps its agent tabs below the titlebar in a short window
     for ([_][]const u8{ "Navigate", "Configure", "Close", "Plan", "500k" }) |label| {
         try testing.expect(h.t.hasText(label));
     }
+
+    // A transient collapsed viewport has less room than the list chrome.
+    // Rendering must stay safe and the rows must return at normal height.
+    h.t.size.h = 120;
+    h.t.settle(1);
+    try testing.expect(h.a.picker == .model);
+    h.t.size.h = 460;
+    h.t.settle(1);
+    try testing.expect(inPicker(&h, "Synthetic Plan") != null);
+}
+
+test "compact model picker expands by keyboard with an empty catalog" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    try @import("model_picker.zig").copyModels(&h.a.models, &.{});
+    h.a.setModel("synthetic/local");
+    h.t.settle(1);
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expect(h.t.shortcut(.{ .key = ui.Shortcut.enter }));
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expect(h.t.hasText("No models found"));
 }
 
 test "compact model picker exposes Orchestrator Off Auto On, sends Mutate setChatConfig on open chats" {
@@ -918,6 +943,13 @@ test "graff model with empty reasoningLevels never inherits harness ladder or se
     try testing.expect(!h.t.hasText("REASONING"));
     try testing.expect(h.a.view.model_picker.stage != null);
     try testing.expect(h.a.view.model_picker.stage.?.level == null);
+
+    // Expand the 46-point compact card through its model-change control.
+    // The full list must also render while the container is still growing.
+    try clickRow(&h, "Flint");
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expect(h.t.containsText("Search models"));
+    try testing.expect(inPicker(&h, "MiMo-V2.6-Pro") != null);
 
     // Sending a new chat on Flint must never forward stale "xhigh".
     h.a.picker = .none;
