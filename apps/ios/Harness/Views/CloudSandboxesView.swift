@@ -14,8 +14,11 @@ enum CodegraffHosts {
     @MainActor
     static func hosts(_ model: AppModel) -> [DeviceRow] {
         let candidates = model.devices.filter(\.canHostSessions)
-        return candidates.filter { model.deviceOnline($0.id) }
+        let computers = candidates.filter { model.deviceOnline($0.id) }
             + candidates.filter { !model.deviceOnline($0.id) }
+        guard model.hasPhoneGatewayKey else { return computers }
+        let phone = DeviceRow(id: model.deviceId, name: "This phone", platform: "ios")
+        return computers + [phone]
     }
 
     /// A load that failed: an older computer, or the relay's reason.
@@ -108,8 +111,10 @@ struct CloudSandboxesView: View {
     var body: some View {
         List {
             if hosts.isEmpty {
-                ContentUnavailableView("No computers yet", systemImage: "desktopcomputer",
-                    description: Text("Cloud sandboxes are managed through the computers that run your agents. Open Harness on one and sign in."))
+                ContentUnavailableView("No cloud access yet", systemImage: "desktopcomputer",
+                    description: Text(model.hasPhoneGatewayKey
+                        ? "No computers are connected. This phone can manage a cloud sandbox after signing in with Codegraff."
+                        : "Sign in with Codegraff on this phone or a connected computer to manage cloud sandboxes."))
             } else {
                 if hosts.count > 1 {
                     CodegraffHostPicker(hosts: hosts, deviceId: Binding(
