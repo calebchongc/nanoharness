@@ -1,7 +1,7 @@
 ﻿param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
-    # `dist` is what ships; CI passes `release` to package the build it has.
-    [ValidateSet('dist', 'release')][string]$CargoProfile = 'dist'
+    # `headless` is the smaller shipped engine; CI passes `release` for smoke.
+    [ValidateSet('headless', 'dist', 'release')][string]$CargoProfile = 'headless'
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
