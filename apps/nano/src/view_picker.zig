@@ -553,7 +553,10 @@ fn pickerFooter(c: *ui.Context, a: *App, k: theme.Colors, open: bool) void {
 
 /// The models: a 34-point row each, in sections by route while browsing
 /// one agent's catalog, flat for a search or the starred.
-fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open: bool, exit: ui.motion.Frame) void {
+fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, available_h: f32, open: bool, exit: ui.motion.Frame) void {
+    // When expanding from the compact card, there may not yet be room for
+    // the full list chrome. Use the same viewport height for layout and row bounds.
+    const list_h = @max(30, available_h);
     const p = &a.view.model_picker;
     const rows = models.rows(a, c.alloc()) catch return;
     if (rows.len > 0 and (p.active >= rows.len or rows[p.active].header != null)) p.active = firstModel(rows);
@@ -567,7 +570,7 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open
     var hovered: ?usize = null;
     var detail_row: ?ui.Rect = null;
     {
-        const style: ui.Style = .{ .width = .fill, .height = .{ .px = @max(30, list_h) }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
+        const style: ui.Style = .{ .width = .fill, .height = .{ .px = list_h }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
         ui.key(c, "model-picker-list");
         const at = c.nodes.items.len;
         ui.scroll(c, style);
