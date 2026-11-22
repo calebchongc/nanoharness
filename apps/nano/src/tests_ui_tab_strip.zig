@@ -160,14 +160,14 @@ test "unified strip: one panel has top folder tabs and a 42px content boundary" 
         const title = h.topText("Alpha") orelse return error.MissingTopTab;
         try testing.expect(title.y >= 5 and title.y + title.h <= 37);
         try testing.expectEqual(@as(f32, 42), h.a.view.chrome.y);
-        try testing.expectEqual(@as(f32, 730), h.a.view.chrome.height);
+        try testing.expectEqual(@as(f32, 732), h.a.view.chrome.height);
         try testing.expect(!h.a.view.chrome.strip);
         const computer = h.topText(@import("strip_device.zig").localLabel()) orelse return error.MissingDeviceLabel;
         try testing.expect(computer.x > 1000 - @import("window_chrome.zig").trailing);
         try testing.expect(computer.x + computer.w <= 1200 - @import("window_chrome.zig").trailing);
         var surface = false;
         for (h.t.ctx.nodes.items) |node| {
-            if (node.style.radius == 10 and @abs(node.rect.y - 42) < 0.1 and node.rect.x >= h.a.view.sidebar_width) surface = true;
+            if (node.style.radius == chrome.zen_radius and @abs(node.rect.y - 42) < 0.1 and node.rect.x >= h.a.view.sidebar_width) surface = true;
         }
         try testing.expect(surface);
     }
@@ -1167,16 +1167,9 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     }
 
     // 2. Topbar `+` (`instrument-new-tab`) sits cleanly left of `Toggle side panel` with zero overlap,
-    //    and pane 2's tab stays aligned over its column below (both edges on macOS; left edge on Windows
-    //    where trailing caption buttons share panes 2..3).
+    //    and all 4 split tabs stay evenly sized across the top bar.
     const active_tab = h.a.view.strip.active_tab_anchor orelse return error.MissingActiveTabAnchor;
-    const pane2_w = chrome.paneSpanIn(h.a.view.chrome.chat_width, h.a.tabs.layout().?.shares.items[2], 3, true, chrome.zen_gutter);
-    const pane2_right = host_left - chrome.zen_gutter;
-    const pane2_left = pane2_right - pane2_w;
-    try testing.expectApproxEqAbs(pane2_left, active_tab.x, 1.5);
-    if (@import("window_chrome.zig").trailing == 0) {
-        try testing.expectApproxEqAbs(pane2_right, active_tab.x + active_tab.w, 1.5);
-    }
+    try testing.expect(active_tab.w >= 100);
     var plus_rect: ?ui.Rect = null;
     var toggle_rect: ?ui.Rect = null;
     for (h.t.ctx.a11y_items.items) |item| {
@@ -1188,4 +1181,92 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     const plus = plus_rect orelse return error.MissingNewTabButton;
     const toggle = toggle_rect orelse return error.MissingSidePanelToggle;
     try testing.expect(plus.x + plus.w <= toggle.x - 2);
+}
+
+test "collapsed-sidebar 4-pane split keeps top tabs even instead of lopsided" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/workshop"}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c1","deviceId":"local","title":"Lean Proofs","spaceId":"p1","archived":false},
+        \\ {"id":"c2","deviceId":"local","title":"Debug Layout","spaceId":"p1","archived":false},
+        \\ {"id":"c3","deviceId":"local","title":"Review And Test Integration","spaceId":"p2","archived":false},
+        \\ {"id":"c4","deviceId":"local","title":"Release Notes","spaceId":"p2","archived":false}]
+    );
+    h.a.openChat("c1", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c2", "p1");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c3", "p2");
+    h.a.splitPane(.horizontal);
+    h.a.openChat("c4", "p2");
+    h.a.focusPane(1);
+    h.a.view.sidebar_open = false;
+    h.a.view.sidebar_width = 0;
+
+    const caption_trailing = @import("window_chrome.zig").trailing;
+    h.t.resize(780 + caption_trailing, 420);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/split-tabs-even.png", .{std.mem.span(dir)});
+        try h.t.screenshot(path);
+    }
+
+    var min_w: f32 = std.math.floatMax(f32);
+    var max_w: f32 = 0;
+    var count: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.y < chrome.header_height and @abs(node.rect.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and node.rect.w >= 40) {
+            min_w = @min(min_w, node.rect.w);
+            max_w = @max(max_w, node.rect.w);
+            count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 4), count);
+    try testing.expect(max_w - min_w <= 2.0);
+}
+
+test "developer mode uses the same inset rounded-12 card chrome as zen while keeping developer hierarchy" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    try replace(&h.a.spaces,
+        \\[{"id":"p1","deviceId":"local","path":"/synthetic/fieldnotes","gitDetected":true},
+        \\ {"id":"p2","deviceId":"local","path":"/synthetic/workshop","gitDetected":true}]
+    );
+    try replace(&h.a.chats,
+        \\[{"id":"c1","deviceId":"local","title":"Cedar Integration","spaceId":"p1","cwd":"/synthetic/fieldnotes","branch":"feat/cards","archived":false,"config":{"harness":"graff","model":"gpt-5.4"}},
+        \\ {"id":"c2","deviceId":"local","title":"Maple Draft","spaceId":"p2","cwd":"/synthetic/workshop","branch":"main","archived":false}]
+    );
+    h.a.openChat("c1", "p1");
+    h.a.view.sidebar_open = true;
+    h.a.view.sidebar_width = h.a.settings.sidebarWidth();
+    h.t.resize(1100, 680);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/dev-mode-chrome.png", .{std.mem.span(dir)});
+        try h.t.screenshot(path);
+    }
+
+    var sidebar_card = false;
+    var main_card = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (@abs(n.style.radius - chrome.zen_radius) < 0.1 and n.rect.h > 400 and n.style.border != null and n.style.shadows.len == 0) {
+            if (n.rect.x < h.a.view.sidebar_width and n.rect.w > 180) sidebar_card = true;
+            if (n.rect.x >= h.a.view.sidebar_width and n.rect.w > 400) main_card = true;
+        }
+    }
+    try testing.expect(sidebar_card);
+    try testing.expect(main_card);
+    // Developer hierarchy controls remain present.
+    try testing.expect(h.t.hasText("Local checkout"));
+    try testing.expect(h.t.hasText("Dev"));
 }

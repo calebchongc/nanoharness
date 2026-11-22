@@ -18,15 +18,23 @@ pub fn chevron(c: *ui.Context, k: theme.Colors, open: bool, size: f32) void {
 }
 
 pub fn counts(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64) void {
-    const box = ui.div(c).row().gap(6).itemsCenter();
+    countsCompact(c, k, additions, deletions, false);
+}
+
+pub fn countsCompact(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64, compact: bool) void {
+    const box = ui.div(c).row().gap(if (compact) 3 else 6).itemsCenter();
     defer box.end();
     if (additions > 0) ui.text(c, c.print("+{d}", .{additions}), kit.style(c, 11, 18, .{ .color = k.success }));
     if (deletions > 0) ui.text(c, c.print("−{d}", .{deletions}), kit.style(c, 11, 18, .{ .color = k.danger }));
 }
 
 pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32) void {
+    trailCompact(c, k, result, opacity, false);
+}
+
+pub fn trailCompact(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32, compact: bool) void {
     var box = ui.div(c).row().itemsCenter().motion(.{ .opacity = opacity });
-    if (result.washed()) {
+    if (result.washed() and !compact) {
         const label = result.passed;
         box = box.w(@max(80, c.text.width(label, .{ .size = 11, .weight = .semibold }) + 12)).justifyEnd();
     }
@@ -39,14 +47,14 @@ pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32)
             if (c.reduced_motion) c.frameIn(1) else kit.loaderFrame(c, 0.1);
         },
         .summary => |text| ui.text(c, text, kit.style(c, 11, 18, .{ .color = k.muted })),
-        .diff => |d| counts(c, k, d.additions, d.deletions),
+        .diff => |d| countsCompact(c, k, d.additions, d.deletions, compact),
         .passed => |text| {
             const color = k.success;
-            const pill = ui.div(c).row().h(18).px(6).itemsCenter().rounded(5).bg(color);
+            const pill = ui.div(c).row().h(if (compact) 16 else 18).px(if (compact) 4 else 6).itemsCenter().rounded(if (compact) 4 else 5).bg(color);
             defer pill.end();
             // WCAG luminance comparison, as desktop's fg_on(color).
             const on = foreground(color);
-            ui.text(c, text, kit.style(c, 11, 18, .{ .weight = .semibold, .color = on }));
+            ui.text(c, text, kit.style(c, if (compact) 10 else 11, if (compact) 16 else 18, .{ .weight = .semibold, .color = on }));
         },
     }
 }

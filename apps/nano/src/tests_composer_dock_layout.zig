@@ -484,3 +484,76 @@ test "composer notice appearance, update, and dismissal preserve draft text, foc
     tester.settle(0.1);
     try t.expectEqualStrings("Example", a.composer.text());
 }
+
+test "narrow split composer keeps Stop/Send unclipped and footer model + context ring inside bounds" {
+    theme.registerFonts();
+    for ([_]usize{ 160, 180, 200, 240 }) |width| {
+        var a: App = .init(t.allocator, t.io, 1);
+        defer a.deinit();
+        a.offscreen = true;
+        a.dark = true;
+        const spaces = try std.json.parseFromSlice(std.json.Value, t.allocator,
+            \\[{"id":"p1","deviceId":"d","path":"/synthetic/fieldnotes","gitDetected":true}]
+        , .{});
+        defer spaces.deinit();
+        try a.spaces.replace(spaces.value);
+        const chats = try std.json.parseFromSlice(std.json.Value, t.allocator,
+            \\[{"id":"synthetic","deviceId":"d","title":"Narrow Pane","archived":false,"spaceId":"p1","cwd":"/synthetic/fieldnotes","branch":"main","config":{"harness":"graff","model":"Gemini 4","reasoning":"max"}}]
+        , .{});
+        defer chats.deinit();
+        try a.chats.replace(chats.value);
+        const sessions = try std.json.parseFromSlice(std.json.Value, t.allocator,
+            \\[{"chatId":"synthetic","status":"working","updatedAt":"2099-01-01T00:00:00Z"}]
+        , .{});
+        defer sessions.deinit();
+        try a.sessions.replace(sessions.value);
+        a.openChat("synthetic", null);
+        a.transcript.window = 200_000;
+        a.transcript.tokens = 96_000;
+        // Simulate macOS dictation availability so Attach + Mic + Expand + Stop all contend for width.
+        a.dictation.runtime = .{
+            .codex = try a.gpa.dupe(u8, "/synthetic/codex"),
+            .helper = try a.gpa.dupe(u8, "/synthetic/helper"),
+        };
+        a.dictation.probed.store(1, .release);
+
+        var tester: ui.Tester = undefined;
+        try tester.init(t.allocator, .init(&a, view), .{
+            .width = @floatFromInt(width),
+            .height = 240,
+            .scale = 2,
+            .dark = true,
+            .theme = theme.ui(true),
+        });
+        defer tester.deinit();
+        tester.settle(0.5);
+
+        if (width == 160) if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
+            var buf: [1024]u8 = undefined;
+            const path = try std.fmt.bufPrint(&buf, "{s}/narrow-composer-footer.png", .{std.mem.span(dir)});
+            try tester.screenshot(path);
+        };
+
+        const pill = a.view.composer_anchor orelse return error.MissingComposer;
+        const stop_btn = sendControlRect(&tester, pill) orelse return error.MissingSendOrStopButton;
+        // Stop/Send button must sit strictly inside the composer pill's right edge.
+        try t.expect(stop_btn.x >= pill.x + 1.0);
+        try t.expect(stop_btn.x + stop_btn.w <= pill.x + pill.w - 0.5);
+
+        const chip_rect = a.view.chip_anchor orelse return error.MissingModelChipAnchor;
+        const ctx_rect = a.view.context.anchor orelse return error.MissingContextAnchor;
+        // Context ring pill and model chip must stay inside the composer width and never overlap.
+        try t.expect(ctx_rect.x + ctx_rect.w <= pill.x + pill.w + 0.5);
+        try t.expect(chip_rect.x + chip_rect.w <= ctx_rect.x + 0.5);
+
+        // No text inside the footer row may overflow past its chip or the composer's right edge.
+        const footer_top = pill.y + pill.h + 4;
+        for (tester.ctx.nodes.items) |node| {
+            if (node.content != .text or node.rect.y < footer_top) continue;
+            try t.expect(node.rect.x + node.rect.w <= pill.x + pill.w + 0.5);
+            if (node.rect.x >= chip_rect.x - 1 and node.rect.x < ctx_rect.x) {
+                try t.expect(node.rect.x + node.rect.w <= chip_rect.x + chip_rect.w + 0.5);
+            }
+        }
+    }
+}

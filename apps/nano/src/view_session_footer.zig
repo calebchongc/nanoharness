@@ -55,24 +55,57 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
     return if (std.mem.eql(u8, cwd, space.path)) .local else .worktree;
 }
 
-/// The footer's row, `w` wide: `px(10)`, the model chip, the open chat's
-/// workspace labels when its project has git, and at the right end the
-/// context ring (`composer-footer`).
+/// The footer's row, `w` wide: `px(10)` (or `px(2)` when narrow), the model
+/// chip, the open chat's workspace labels when its project has git, and at the
+/// right end the context ring (`composer-footer`).
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
+    const composer_view = @import("view_composer.zig");
+    const acct_view = @import("view_account_usage.zig");
+    const ctx_view = @import("view_context.zig");
+    const narrow = w < 180;
+    const pad_x: f32 = if (narrow) 2 else 10;
+    const item_gap: f32 = if (narrow) 2 else 4;
+    const has_ctx = ctx_view.hasWindow(a);
+    const compact_ctx = has_ctx and w < 220;
+    const has_follow = composer_view.followUpShown(a);
+    const follow_glyph_only = w < 240;
+    const show_follow = has_follow and w >= 120;
+    const show_acct = acct_view.hasRing(a) and w >= 200;
+    const show_agent_work = w >= 200;
+
+    const ctx_w: f32 = if (!has_ctx) 0 else if (compact_ctx) 24 else 60;
+    const follow_w: f32 = if (!show_follow) 0 else if (follow_glyph_only) 20 else 68;
+    const acct_w: f32 = if (show_acct) 64 else 0;
+    const left_gaps: f32 = if (show_follow) item_gap else 0;
+    const trailing_total: f32 = ctx_w + acct_w + (if (show_acct and has_ctx) item_gap else 0);
+    const mid_gap: f32 = if (trailing_total > 0) item_gap else 0;
+    const chip_budget: f32 = @max(28, @min(248, w - pad_x * 2 - follow_w - left_gaps - trailing_total - mid_gap));
+
+    const row = ui.div(c).row().w(w).h(height).px(pad_x).itemsCenter().clip();
     defer row.end();
-    const model_w = @import("view_composer.zig").chip(c, a, k);
-    @import("view_composer.zig").followUpChip(c, a, k, false);
+    var model_w: f32 = 0;
     {
-        const rings_w: f32 = if (@import("view_account_usage.zig").hasRing(a)) 128 else 64;
+        const leading = ui.div(c).row().hFull().gap(item_gap).itemsCenter();
+        defer leading.end();
+        model_w = composer_view.chipWithMax(c, a, k, chip_budget);
+        if (show_follow) composer_view.followUpChip(c, a, k, follow_glyph_only);
+    }
+    {
+        const rings_w: f32 = if (show_acct) 128 else if (has_ctx) ctx_w else 0;
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
-        const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - rings_w);
-        session(c, a, k, slot_w);
+        if (w >= 220) {
+            const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - pad_x * 2 - model_w - follow_w - rings_w);
+            session(c, a, k, slot_w);
+        }
     }
-    @import("view_account_usage.zig").indicator(c, a, k);
-    @import("view_agent_work.zig").indicator(c, a, k);
-    @import("view_context.zig").indicator(c, a, k);
+    if (show_acct or show_agent_work or has_ctx) {
+        const trailing = ui.div(c).row().hFull().gap(item_gap).itemsCenter();
+        defer trailing.end();
+        if (show_acct) acct_view.indicator(c, a, k);
+        if (show_agent_work) @import("view_agent_work.zig").indicator(c, a, k);
+        if (has_ctx) ctx_view.indicatorCompact(c, a, k, compact_ctx);
+    }
 }
 
 fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {

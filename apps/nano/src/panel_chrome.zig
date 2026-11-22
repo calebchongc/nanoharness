@@ -43,9 +43,13 @@ pub const Frame = struct {
 /// 520 by default) while every other panel keeps `panel_min`, or an
 /// equal share when the window is narrower than that.
 pub fn sidePanelShare(width: f32, others: usize, preferred: f32) f32 {
+    return sidePanelShareIn(width, others, preferred, gutter);
+}
+
+pub fn sidePanelShareIn(width: f32, others: usize, preferred: f32, gap: f32) f32 {
     const o: f32 = @floatFromInt(others);
     const equal = 1.0 / (o + 1.0);
-    const available = width - gutter * o;
+    const available = width - gap * o;
     if (available <= 0) return equal;
     const room = available - o * panel_min;
     return std.math.clamp(@min(preferred, room) / available, equal, 1.0);
@@ -99,7 +103,7 @@ pub fn zenFrameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar:
     const gaps = zen_gutter * @as(f32, @floatFromInt(count - 1));
     const available = @max(0, room - gaps);
     const host_width: f32 = if (host and horizontal)
-        available * sidePanelShare(room, count - 1, preferred)
+        available * sidePanelShareIn(room, count - 1, preferred, zen_gutter)
     else if (host)
         available / @as(f32, @floatFromInt(count))
     else
@@ -142,11 +146,11 @@ pub fn sharedSlotRoom(width: f32, left: f32, right: f32, count: usize) f32 {
     return @max(0, (width - left - right - 24 - n * 4) / n);
 }
 
-/// Slot widths align to columns whenever every slot can keep at least
-/// `slot_min`. When the leading titlebar controls (collapsed sidebar) or
-/// trailing toolbar squeeze an edge pane below `slot_min`, only that edge
-/// group shares its combined header span so interior and opposite-edge slots
-/// remain aligned over their panes.
+/// Slot widths align to columns only when every slot keeps at least `slot_min`
+/// without leading/trailing titlebar controls heavily squeezing an edge slot
+/// (which would otherwise leave neighboring split tabs visibly uneven). When an
+/// edge cannot align cleanly, return false so the strip falls back to uniform
+/// equal-width shared tabs.
 pub fn columns(widths: []const f32, leading: f32, left: f32, right: f32, out: []f32) bool {
     if (widths.len == 0 or out.len < widths.len) return false;
     const n = widths.len;
@@ -154,30 +158,7 @@ pub fn columns(widths: []const f32, leading: f32, left: f32, right: f32, out: []
     out[0] -= left - leading;
     out[n - 1] -= new_tab_room + @max(0, right - gutter);
 
-    if (out[0] < slot_min) {
-        var sum: f32 = out[0];
-        var end: usize = 0;
-        while (end + 1 < n and sum / @as(f32, @floatFromInt(end + 1)) < slot_min) {
-            end += 1;
-            sum += out[end];
-        }
-        const each = sum / @as(f32, @floatFromInt(end + 1));
-        if (each < slot_min) return false;
-        for (0..end + 1) |i| out[i] = each;
-    }
-
-    if (out[n - 1] < slot_min) {
-        var sum: f32 = out[n - 1];
-        var start: usize = n - 1;
-        while (start > 0 and sum / @as(f32, @floatFromInt(n - start)) < slot_min) {
-            start -= 1;
-            sum += out[start];
-        }
-        const each = sum / @as(f32, @floatFromInt(n - start));
-        if (each < slot_min) return false;
-        for (start..n) |i| out[i] = each;
-    }
-
+    if (n > 1 and left - leading > 24 and out[0] < widths[0] * 0.72) return false;
     for (out[0..n]) |w| if (w < slot_min) return false;
     return true;
 }
@@ -188,13 +169,9 @@ test "desktop strip columns keep their panels' widths and reserve the trailing p
     try std.testing.expectEqual(@as(f32, 468), out[0]);
     try std.testing.expectEqual(@as(f32, 436), out[1]);
     try std.testing.expect(!columns(&.{ 95, 95 }, 8, 44, 8, &out));
-    // Collapsed sidebar squeezes pane 0 below slot_min: panes 0..1 share their
-    // combined span while panes 2 and 3 stay pixel-aligned over their columns.
-    try std.testing.expect(columns(&.{ 187, 187, 187, 189 }, 6, 182, 46, &out));
-    try std.testing.expectEqual(@as(f32, 99), out[0]);
-    try std.testing.expectEqual(@as(f32, 99), out[1]);
-    try std.testing.expectEqual(@as(f32, 187), out[2]);
-    try std.testing.expectEqual(@as(f32, 119), out[3]);
+    // Collapsed sidebar squeezing pane 0 falls back to even shared tabs instead
+    // of producing lopsided 99 | 99 | 187 | 119 slot widths.
+    try std.testing.expect(!columns(&.{ 187, 187, 187, 189 }, 6, 182, 46, &out));
     try std.testing.expectEqual(@as(f32, 240), tabWidth(1000, 2));
     try std.testing.expectEqual(@as(f32, 112), tabWidth(200, 4));
 }

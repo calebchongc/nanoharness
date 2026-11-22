@@ -1154,9 +1154,7 @@ pub fn topbarUpdatesWidth(a: *const App) f32 {
 pub fn topbarTrailingReserve(a: *const App) f32 {
     if (a.view.settings_open) return 0;
     const uw = topbarUpdatesWidth(a);
-    const zen = a.settings.uiMode() == .zen;
-    if (uw == 0 and !zen) return 0;
-    const total = uw + (if (uw > 0 and zen) @as(f32, 6) else 0) + (if (zen) @as(f32, 28) else 0);
+    const total = uw + (if (uw > 0) @as(f32, 6) else 0) + 28;
     return total + 10;
 }
 

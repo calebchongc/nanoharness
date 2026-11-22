@@ -440,7 +440,7 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var extent: f32 = 0;
         while (rects.next()) |entry| {
             const r = entry.value_ptr.*;
-            if (r.w == @import("view_sidebar.zig").widthOf(&h.a) - 16 and r.h > extent) {
+            if (r.w == @import("view_sidebar.zig").cardInnerW(&h.a) - 16 and r.h > extent) {
                 body = entry.key_ptr.*;
                 extent = r.h;
             }
@@ -2289,6 +2289,23 @@ test "bottom-docked checkout and ref popovers open upward above the composer foo
     h.t.settle(1);
     try testing.expectEqualStrings("From feature/popover-upward", if (h.t.findText("From feature/popover-upward")) |_| "From feature/popover-upward" else "");
     try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
+
+    // Populate 400 synthetic branches and confirm refMenu virtualizes rows in view
+    // instead of capping at 8 or building all 400 rows at once.
+    for (0..400) |bi| {
+        var bbuf: [48]u8 = undefined;
+        const bname = try std.fmt.bufPrint(&bbuf, "feature/branch-{d:0>3}", .{bi});
+        try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, bname));
+    }
+    h.a.view.ref_menu = true;
+    h.t.settle(0.5);
+    var branch_nodes: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.startsWith(u8, node.content.text.str, "feature/branch-")) {
+            branch_nodes += 1;
+        }
+    }
+    try testing.expect(branch_nodes > 0 and branch_nodes < 24);
 }
 
 test "Settings Devices and the sidebar footer surface desktop app updates and hourly checks" {

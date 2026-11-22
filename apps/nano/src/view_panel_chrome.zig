@@ -57,7 +57,8 @@ pub fn body(c: *ui.Context, k: theme.Colors) ui.Div {
 }
 
 pub fn bodyFor(c: *ui.Context, k: theme.Colors, zen: bool) ui.Div {
-    return if (zen) zenBody(c, k) else body(c, k);
+    _ = zen;
+    return zenBody(c, k);
 }
 
 /// Join before panel content, outside its rounded clip: the selected cap and

@@ -59,7 +59,7 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
     const total = a.view.chrome.chat_width;
     const chrome = @import("panel_chrome.zig");
-    const ws_gutter = if (a.settings.uiMode() == .zen) chrome.zen_gutter else chrome.gutter;
+    const ws_gutter = chrome.zen_gutter;
     const target = chrome.paneSpanIn(total, s.shares.items[s.focus], s.panes.items.len, true, ws_gutter);
     const span = if (a.view.split_reveal) |r| blk: {
         if (r.tab != a.tabs.active or r.new_index >= s.panes.items.len) break :blk target;
@@ -152,16 +152,12 @@ pub fn entries(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript
 /// `inset_top(TITLEBAR_HEIGHT)`), here as the column's colour laid over
 /// them a point at a time.
 fn topFade(c: *ui.Context, a: *const App, k: theme.Colors, scroll_box: u64) void {
-    const zen = a.settings.uiMode() == .zen;
-    // A tint overlay can imitate a solid background, not a native backdrop:
-    // on glass it makes an opaque stripe even when there is no text here.
-    if (!zen and k.frosted) return;
-    // In Zen mode, leave unscrolled conversations completely clean at the top
-    // and gently fade scrolled rows into the Zen panel plane instead of the
-    // darker shell background.
-    if (zen and (c.scroll.get(scroll_box) orelse 0) <= 1.0) return;
-    const fade_bg = if (zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
-    const band: f32 = if (zen) 18 else 24;
+    _ = a;
+    // Leave unscrolled conversations completely clean at the top and gently
+    // fade scrolled rows into the inset card plane.
+    if ((c.scroll.get(scroll_box) orelse 0) <= 1.0) return;
+    const fade_bg = @import("view_panel_chrome.zig").zenPageBg(k);
+    const band: f32 = 18;
     var y: f32 = 0;
     while (y < band) : (y += 1) {
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = fade_bg.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
@@ -343,6 +339,27 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const steer_chat: ?u64 = if (subagent == null) (if (chat_id) |id| steer_order.hash(id) else null) else null;
     if (steer_chat) |chat| steer.observe(chat, entries_);
     const steered = if (steer_chat) |chat| steer.any(chat) else false;
+    // Cold-open bottom-anchor estimation (#1496): when opening a long chat at
+    // its end before rows have been measured, estimate heights from the bottom
+    // up so far-offscreen historical replies stand in as spacers on frame 1.
+    var cold_cutoff: usize = 0;
+    if (cull.on and anchor == null and (c.scroll_follow.get(drawn.box) orelse true)) {
+        if (scroll_rect) |view| {
+            const budget = view.h + cull.pad * 2;
+            var acc: f32 = 0;
+            var idx = entries_.len;
+            while (idx > 0) {
+                idx -= 1;
+                const ent = &entries_[idx];
+                const h_est = if (ent.cached_h > 0) ent.cached_h else estimateEntryHeight(ent, col);
+                acc += h_est + (if (idx > 0) @as(f32, 16) else 0);
+                if (acc > budget) {
+                    cold_cutoff = idx;
+                    break;
+                }
+            }
+        }
+    }
     var turn_node: ?u32 = null;
     defer if (turn_node != null) c.end();
     for (entries_, 0..) |*e, i| {
@@ -376,7 +393,14 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         const row_id = c.peekId(null);
         const row_pinned = sel_pin.isPinned(row_id);
-        if (spacer(c, cull, !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+        const can_cull = !row_pinned and (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming;
+        if (can_cull and i < cold_cutoff and e.cached_h == 0 and c.rects.get(row_id) == null) {
+            const est = estimateEntryHeight(e, col);
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = est } }, .none, null);
+            sel_pin.noteCulled();
+            continue;
+        }
+        if (spacer(c, cull, can_cull, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
             sel_pin.noteCulled();
             if (e.isHumanPrompt()) {
                 ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
@@ -1273,4 +1297,133 @@ fn system(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) 
         .@"error" => errorPart(c, a, k, e, p, at),
         else => {},
     };
+}
+
+/// Content-based height estimate for an unmeasured transcript row (mirroring
+/// Zeron's `ROW_ESTIMATE` in #1496) so cold chat opens at the bottom don't
+/// build and discard dozens of offscreen long replies on frame 1.
+pub fn estimateEntryHeight(e: *const tr.Entry, col_w: f32) f32 {
+    const eff_w = @max(180, @min(col_w, column_w));
+    const chars_per_line = @max(20.0, eff_w / 7.8);
+    switch (e.role) {
+        .user => {
+            var h: f32 = 44;
+            const bubble_cpl = @max(18.0, @min(eff_w * 0.78, 520.0) / 7.8);
+            for (e.parts.items) |*p| switch (p.kind) {
+                .text => h += estimateMarkdownHeight(p.text.items, bubble_cpl, 22.5, false),
+                .image => h += 96,
+                else => {},
+            };
+            return @max(56, h);
+        },
+        .assistant => {
+            var h: f32 = 36;
+            var in_tools = false;
+            for (e.parts.items) |*p| switch (p.kind) {
+                .text => {
+                    in_tools = false;
+                    h += 12 + estimateMarkdownHeight(p.text.items, chars_per_line, 22.5, true);
+                },
+                .tool, .delegation => {
+                    if (!in_tools) {
+                        h += 38;
+                        in_tools = true;
+                    }
+                },
+                .reasoning => {
+                    in_tools = false;
+                    h += 34;
+                },
+                .image, .visual => {
+                    in_tools = false;
+                    h += 240;
+                },
+                .input => {
+                    in_tools = false;
+                    h += 120;
+                },
+                .@"error" => {
+                    in_tools = false;
+                    h += 48;
+                },
+                else => {},
+            };
+            return @max(48, h);
+        },
+        .system => return 40,
+    }
+}
+
+fn estimateMarkdownHeight(text: []const u8, chars_per_line: f32, line_h: f32, rich_md: bool) f32 {
+    if (text.len == 0) return line_h;
+    var h: f32 = 0;
+    var in_code = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (rich_md and std.mem.startsWith(u8, line, "```")) {
+            in_code = !in_code;
+            h += if (in_code) 40 else 12;
+            continue;
+        }
+        if (in_code) {
+            h += 18;
+            continue;
+        }
+        if (line.len == 0) {
+            h += 12;
+            continue;
+        }
+        if (rich_md and line[0] == '|') {
+            h += 34;
+            continue;
+        }
+        if (rich_md and line[0] == '#') {
+            h += 30;
+            continue;
+        }
+        const wrapped = @max(1.0, @ceil(@as(f32, @floatFromInt(line.len)) / chars_per_line));
+        h += wrapped * line_h;
+    }
+    return @max(line_h, h);
+}
+
+test "estimateEntryHeight scales with user text, markdown code/tables, and folded tool groups" {
+    const testing = std.testing;
+    var short_user: tr.Entry = .{ .id = @constCast("u1"), .role = .user, .status = .complete };
+    var p1: tr.Part = .{ .id = @constCast("p1"), .kind = .text };
+    try p1.text.appendSlice(testing.allocator, "Hi");
+    defer p1.text.deinit(testing.allocator);
+    try short_user.parts.append(testing.allocator, p1);
+    defer short_user.parts.deinit(testing.allocator);
+
+    var long_assistant: tr.Entry = .{ .id = @constCast("a1"), .role = .assistant, .status = .complete };
+    var p2: tr.Part = .{ .id = @constCast("p2"), .kind = .text };
+    try p2.text.appendSlice(testing.allocator,
+        \\## Summary
+        \\
+        \\Here is a detailed reply with a fenced code block and a markdown table:
+        \\
+        \\```zig
+        \\pub fn example() void {
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    _ = a + b;
+        \\}
+        \\```
+        \\
+        \\| Col A | Col B |
+        \\| --- | --- |
+        \\| Row 1 | Value 1 |
+        \\| Row 2 | Value 2 |
+    );
+    defer p2.text.deinit(testing.allocator);
+    try long_assistant.parts.append(testing.allocator, p2);
+    for (0..4) |_| try long_assistant.parts.append(testing.allocator, .{ .id = @constCast("t"), .kind = .tool });
+    defer long_assistant.parts.deinit(testing.allocator);
+
+    const h_short = estimateEntryHeight(&short_user, 680);
+    const h_long = estimateEntryHeight(&long_assistant, 680);
+    try testing.expect(h_short >= 56 and h_short < 120);
+    try testing.expect(h_long > 320);
 }

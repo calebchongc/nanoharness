@@ -200,7 +200,7 @@ test "github child vertical layout bounds the child to its parent row and hides 
         try testing.expect(title.x > h.a.view.chrome.x + h.a.view.chrome.chat_width);
         var bounded = false;
         for (h.t.ctx.nodes.items) |node| {
-            if (node.style.radius == 10 and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width and node.rect.y < 50) {
+            if (node.style.radius == @import("panel_chrome.zig").zen_radius and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width and node.rect.y < 50) {
                 bounded = node.rect.h < h.a.view.chrome.height * 0.6;
                 if (bounded) break;
             }
