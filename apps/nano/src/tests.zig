@@ -175,6 +175,7 @@ test {
     _ = @import("tests_ui_desktop_sidebar_composer.zig");
     _ = @import("tests_ui_tool_tree.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
+    _ = @import("tests_ui_command_terminal.zig");
     _ = @import("tests_ui_sessions.zig");
     _ = @import("tests_desktop_regressions.zig");
     _ = @import("tests_restore_navigation.zig");
