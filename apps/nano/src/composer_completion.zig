@@ -262,7 +262,7 @@ const native = [_]Native{
     .{ .action = .help, .name = "help", .description = "Show keyboard shortcuts" },
     .{ .action = .custom_theme, .name = "custom-theme", .description = "Create or pick a custom theme and animated backdrop" },
     .{ .action = .zen_mode, .name = "zen", .description = "Toggle Zen / Developer workspace mode" },
-    .{ .action = .design_mode, .name = "design", .description = "Switch to Design mode (Paper canvas)" },
+    .{ .action = .design_mode, .name = "design", .description = "Toggle Design mode (Paper canvas)" },
     .{ .action = .diff, .name = "diff", .description = "Open changes", .chat = true },
     .{ .action = .files, .name = "files", .description = "Open files", .chat = true },
     .{ .action = .terminal, .name = "terminal", .description = "Open terminal", .chat = true },
@@ -403,7 +403,7 @@ pub fn accept(a: *App, c: *ui.Context, tok: rules.Token, entry: Entry) void {
     a.redraw();
 }
 
-fn activate(a: *App, action: Action) void {
+pub fn activate(a: *App, action: Action) void {
     switch (action) {
         .model => a.togglePicker(),
         .new => a.newTab(),
@@ -419,12 +419,20 @@ fn activate(a: *App, action: Action) void {
         .stop => a.interrupt(),
         .custom_theme => @import("view_custom_theme_studio.zig").open(a),
         .zen_mode => {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();
+            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
             a.redraw();
         },
         .design_mode => {
-            a.settings.applyUiMode(.design);
-            @import("app_panels.zig").openDesignCanvas(a);
+            const panels = @import("app_panels.zig");
+            if (a.settings.uiMode() == .design) {
+                a.settings.applyUiMode(.zen);
+                panels.closeDesignCanvas(a);
+            } else {
+                a.settings.applyUiMode(.design);
+                panels.openDesignCanvas(a);
+            }
             a.redraw();
         },
         .rename => if (a.selected) |id| {

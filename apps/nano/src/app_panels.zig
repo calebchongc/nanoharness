@@ -343,6 +343,16 @@ pub fn openDesignCanvas(a: *App) void {
     a.redraw();
 }
 
+/// Closes any open Design Canvas tab in the right panel.
+pub fn closeDesignCanvas(a: *App) void {
+    const p = &a.panels;
+    var i = p.tabs.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (p.tabs.items[i].kind == .design_canvas) closeTab(a, i);
+    }
+}
+
 fn openDiffs(a: *App) void {
     const p = &a.panels;
     if (p.scope == .workingTree and p.w_diffs == null) {

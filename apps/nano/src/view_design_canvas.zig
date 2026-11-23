@@ -88,6 +88,11 @@ fn toolbar(c: *ui.Context, a: *App, k: theme.Colors, s: *design.State, audit: de
         s.show_inspector = !s.show_inspector;
         a.redraw();
     }
+    if (pillBtn(c, k, "Exit", false)) {
+        a.settings.applyUiMode(.zen);
+        @import("app_panels.zig").closeDesignCanvas(a);
+        a.redraw();
+    }
 }
 
 fn pillBtn(c: *ui.Context, k: theme.Colors, label: []const u8, on: bool) bool {

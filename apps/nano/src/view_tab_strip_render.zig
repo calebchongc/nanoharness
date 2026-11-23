@@ -21,6 +21,46 @@ pub const Layout = struct {
     pane_row: bool = false,
 };
 
+pub fn showSidePanelToggle(a: *const App) bool {
+    return !a.view.settings_open and (strip.hasHost(a) or a.panels.tabs.items.len > 0);
+}
+
+pub fn trailingModeButtonsWidth(a: *const App) f32 {
+    if (a.view.settings_open) return 0;
+    const vu = @import("view_updates.zig");
+    const ux_m = @import("ux_rules.zig").UiMode3;
+    const mode: ux_m.UiMode = switch (a.settings.uiMode()) {
+        .zen => .zen,
+        .developer => .developer,
+        .design => .design,
+    };
+    const policy = ux_m.profileOf(mode);
+    const tm = vu.trailingMetrics(a);
+    const eff_cnt = ux_m.effectiveTrailingCount(mode, false, tm.avail, tm.last_slot);
+    if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) return 28 + 6 + 28;
+    if (policy.shows_design_canvas_toggle and eff_cnt >= 2) return 28;
+    return 0;
+}
+
+pub fn utilityWidth(a: *const App) f32 {
+    const widths = [_]f32{
+        if (@import("view_sandbox_strip.zig").toolbarVisible(a)) @import("view_sandbox_strip.zig").toolbar_width else 0,
+        @import("view_updates.zig").topbarUpdatesWidth(a),
+        trailingModeButtonsWidth(a),
+        if (showSidePanelToggle(a)) 28 else 0,
+    };
+    var total: f32 = 0;
+    for (widths) |w| if (w > 0) {
+        total += w + (if (total > 0) @as(f32, 6) else 0);
+    };
+    return total;
+}
+
+fn trailingReserve(a: *const App) f32 {
+    const width = utilityWidth(a);
+    return if (width > 0) width + 10 else 0;
+}
+
 pub fn layout(c: *ui.Context, a: *const App) Layout {
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     if (a.view.settings_open or strip.count(a) <= 1) return .{ .left = left };
@@ -54,7 +94,7 @@ pub fn layout(c: *ui.Context, a: *const App) Layout {
         widths[n] = a.view.chrome.files_width;
         n += 1;
     }
-    const right = caption.trailing + @import("view_updates.zig").topbarTrailingReserve(a);
+    const right = caption.trailing + trailingReserve(a);
     const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and strip.layoutExpanded(a) == null;
     var aligned: [tabs.max_panes + 2]f32 = undefined;
     const columns = in_row and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5 and
@@ -66,9 +106,9 @@ pub fn layout(c: *ui.Context, a: *const App) Layout {
         .left = left,
         .right = right,
         .columns = columns,
-        // If the titlebar buttons would squeeze the edge tabs, give the
-        // split its own row instead of detaching tabs from their columns.
-        .pane_row = in_row and !columns and (if (split) |s| s.panes.items.len > 1 else false),
+        // Horizontal splits always have a pane row, even on wide windows.
+        // Opening a utility must not move the pane headers between rows.
+        .pane_row = in_row and (if (split) |s| s.panes.items.len > 1 else false),
     };
 }
 
@@ -80,7 +120,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
     if (!strip.hasHost(a)) a.view.strip.host_tab_rect = null;
     if (lane.count == 0) return single(c, a, k, lane.left);
     const n = lane.count;
-    const columns = lane.columns;
+    const columns = lane.columns and !lane.pane_row;
     const left = lane.left;
     const ws_gutter = chrome.zen_gutter;
     var widths = lane.widths;
@@ -93,6 +133,8 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
     const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8 - 32);
     const max_other_budget = if (columns)
         @max(0, @min(aligned[0] * 0.55, aligned[0] - 180))
+    else if (lane.pane_row)
+        @max(0, avail_bar - 164)
     else
         avail_bar * 0.38;
     const other_shown: usize = if (other_tabs > 0 and max_other_budget >= 76) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
@@ -111,7 +153,22 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths:
             .size(@max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8), chrome.titlebar_height)
             .pt(chrome.top_pad).row().gap(4).itemsCenter().layer(2);
         defer actions.end();
+        if (avail_bar >= 118) {
+            const current = ui.div(c).row().h(27).px(8).gap(6).itemsCenter().rounded(6).bg(k.accent_wash);
+            icons.icon(c, .widget, 14, k.muted, 0);
+            ui.text(c, c.print("Split · {d} panes", .{strip.chatCount(a)}), .{ .size = 11.5, .weight = .medium, .color = k.text });
+            current.end();
+        }
         otherWorkspaces(c, a, k, other_shown, other_pill_w);
+        if (other_shown < other_tabs and avail_bar >= chrome.slot_min) {
+            ui.key(c, "split-workspace-overflow");
+            const trigger = ui.div(c).size(24, 24).center().rounded(6).hover(k.hover).control();
+            icons.icon(c, .@"more-horizontal", 15, k.muted, 0);
+            if (@import("control_behavior.zig").activate(c, trigger, k, "More workspaces", true, false)) {
+                strip.open(a, .history, strip.active(a), c.rects.get(trigger.id()));
+            }
+            trigger.end();
+        }
         ui.div(c).w(0).grow().end();
         newTab(c, a, k);
         return;
@@ -148,7 +205,7 @@ fn otherWorkspaces(c: *ui.Context, a: *App, k: theme.Colors, count: usize, width
 
 fn newTab(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "instrument-new-tab");
-    if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
+    if (kit.iconButton(c, k, .plus, .{ .icon = 14, .label = "New tab" })) a.newTab();
 }
 
 fn chatNeedsInput(a: *const App, id: ?[]const u8) bool {
@@ -501,14 +558,6 @@ pub fn singleWindow(available: f32, n: usize, selected: usize, add_room: f32) Ta
     };
 }
 
-fn singleRightExtra(a: *const App, settings_open: bool) f32 {
-    const vu = @import("view_updates.zig");
-    return if (settings_open)
-        (if (vu.topbarUpdatesWidth(a) > 0) vu.topbarUpdatesWidth(a) + 10 else 0)
-    else
-        vu.topbarTrailingReserve(a);
-}
-
 pub const SingleItem = union(enum) {
     global: usize,
     panel: struct { pane: usize, tab: usize },
@@ -575,7 +624,7 @@ pub fn selectedBounds(a: *const App) ?Selected {
     const selected = spec.selected;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     const dev_room: f32 = if (showDevicePicker(a)) chrome.device_room else 0;
-    const right_extra = singleRightExtra(a, false);
+    const right_extra = trailingReserve(a);
     const available = @max(0, a.view.chrome.width - left - dev_room - caption.trailing - right_extra - 4);
     const win = singleWindow(available, n, selected, 27);
     const lane_offset = left - a.view.chrome.leading;
@@ -597,7 +646,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const settings_open = a.view.settings_open;
     const show_dev = !settings_open and showDevicePicker(a);
     const dev_room: f32 = if (show_dev) chrome.device_room else 0;
-    const right_extra = singleRightExtra(a, settings_open);
+    const right_extra = trailingReserve(a);
     const spec = singleSpec(a);
     const n = spec.n;
     const selected = spec.selected;
@@ -726,7 +775,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     }
     if (show_add) {
         ui.key(c, "panel-add-tab");
-        if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
+        if (kit.iconButton(c, k, .plus, .{ .icon = 14, .label = "New tab" })) a.newTab();
     }
     // Device is its own fixed trailing lane, never a tab's suffix.
     if (show_dev) devicePicker(c, a, k);
@@ -735,7 +784,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
 fn devicePicker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const target = strip.active(a);
     const editable = target == .chat;
-    const right_extra = @import("view_updates.zig").topbarTrailingReserve(a);
+    const right_extra = trailingReserve(a);
     const lane = ui.div(c).fixed().offset(c.size.w - caption.trailing - right_extra - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).row().itemsCenter().justifyEnd().layer(3);
     defer lane.end();
     ui.key(c, "panel-device-trigger");

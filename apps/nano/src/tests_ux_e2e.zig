@@ -173,3 +173,40 @@ test "ux e2e: design canvas DOM style overlay and Send critique stages annotated
     try testing.expect(std.mem.indexOf(u8, h.a.composer.text(), "Pin #1 (25%, 30%): Tighten radius") != null or
         std.mem.indexOf(u8, h.a.composer.text(), "Pin #1 at (25%, 30%): Tighten radius") != null);
 }
+
+test "ux e2e: Design Canvas Exit button, /design toggle, and Cmd+Shift+M cleanly exit Design mode" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+
+    // 1. Entering Design mode opens Design Canvas; clicking toolbar `Exit` returns to Zen and closes canvas.
+    @import("composer_completion.zig").activate(&h.a, .design_mode);
+    h.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.design, h.a.settings.uiMode());
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.t.hasText("Exit"));
+
+    try h.t.clickText("Exit");
+    h.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+    try testing.expect(!h.a.panels.host_open);
+
+    // 2. `/design` toggles Design mode both on and off.
+    @import("composer_completion.zig").activate(&h.a, .design_mode);
+    h.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.design, h.a.settings.uiMode());
+    try testing.expect(h.a.panels.host_open);
+
+    @import("composer_completion.zig").activate(&h.a, .design_mode);
+    h.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+    try testing.expect(!h.a.panels.host_open);
+
+    // 3. `Cmd+Shift+M` from Design mode exits back to Zen and closes the canvas.
+    @import("composer_completion.zig").activate(&h.a, .design_mode);
+    h.t.settle(0.2);
+    _ = h.t.shortcut(.{ .key = 'm', .cmd = true, .shift = true });
+    h.t.settle(0.2);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+    try testing.expect(!h.a.panels.host_open);
+}

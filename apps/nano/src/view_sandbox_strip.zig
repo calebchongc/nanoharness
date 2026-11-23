@@ -8,9 +8,8 @@
 //! keeps (app_sandboxes.zig), so it is hidden when signed out, where the
 //! feature is off, and when nothing runs.
 //!
-//! With the sidebar closed the strip is out of sight, so a chip takes its
-//! place under the sidebar toggle: the live dot and a cloud (a click opens
-//! the card) beside the same Turn off.
+//! With the sidebar closed, the window toolbar reserves a slot for the
+//! cloud status and Turn off without covering tabs or pane headers.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -161,40 +160,33 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
     if (sum.running_ids.len > 0) turnOff(c, a, k, sum.running_ids);
 }
 
-/// Where the chip sits: 12 in, 4 under the title bar (`SPACE_MD`,
-/// `TITLEBAR_HEIGHT + 4`).
-pub const chip_at: ui.Point = .{ .x = 12, .y = sidebar.titlebar_h + 4 };
+pub const toolbar_width: f32 = 140;
 
-/// The closed sidebar's stand-in (`render_cloud_sandbox_chip`): a card
-/// under the sidebar toggle with the live dot and a cloud, then Turn off.
-pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn toolbarVisible(a: *const App) bool {
+    if (a.view.sidebar_open or a.view.settings_open) return false;
+    const list = state.shown(a) orelse return false;
+    for (list.sandboxes) |sb| if (sandboxes.live(sb)) return true;
+    return false;
+}
+
+/// Inline window action, not a floating card. A stable width keeps adjacent
+/// controls put while the button changes to “Turning off…”.
+pub fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const sum = summary(c, a) orelse return;
     const tone = if (sum.warning) k.warning else k.accent;
     ui.key(c, "cloud-sandbox-chip");
-    // GPUI's p 3 inside a 1-point border; the popover's surface.
-    const card = shadowMd(ui.div(c).fixed().offset(chip_at.x, chip_at.y).layer(3).row().p(4).gap(4).itemsCenter()
-        .rounded(6 + 3).border(tone.alpha(0.35)).borderW(1).bg(k.composer));
-    defer card.end();
+    const lane = ui.div(c).row().size(toolbar_width, 28).gap(4).itemsCenter().justifyEnd();
+    defer lane.end();
     {
         // `compact_tooltip`: what runs and what it costs.
-        const open = tip.on(ui.div(c).row().px(7).py(4).gap(5).itemsCenter().rounded(6).hover(k.ink(0.06)), k, .{
+        const open = tip.on(ui.div(c).row().px(6).h(26).gap(4).itemsCenter().rounded(6).hover(k.hover).control(), k, .{
             .text = sandboxes.compactTooltip(c.alloc(), sum) catch "",
             .delay = tip.quick,
         });
         defer open.end();
         kit.dot(c, 6, tone);
         icons.icon(c, .cloud, 13, k.muted, 0);
-        if (open.clicked()) openCard(a);
+        if (@import("control_behavior.zig").activate(c, open, k, "Manage cloud sandboxes", true, false)) openCard(a);
     }
     if (sum.running_ids.len > 0) turnOff(c, a, k, sum.running_ids);
-}
-
-/// GPUI's `shadow_md` (Tailwind's), with a nanoui that has layered
-/// shadows; its own medium one before.
-fn shadowMd(d: ui.Div) ui.Div {
-    if (comptime @hasDecl(ui.Shadow, "lg")) return d.shadows(&.{
-        .{ .color = .{ .a = 0.1 }, .blur = 6, .y = 4, .spread = -1 },
-        .{ .color = .{ .a = 0.1 }, .blur = 4, .y = 2, .spread = -2 },
-    });
-    return d.shadowMd();
 }

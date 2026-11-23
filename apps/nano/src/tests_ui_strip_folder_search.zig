@@ -10,7 +10,7 @@ pub fn openFolderMenu(h: *Harness) !void {
     const name = strip.folder(&h.a, .{ .chat = pane }).?.name;
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |text| if (std.mem.eql(u8, text.str, name) and node.rect.y < 42 and node.rect.x >= right_pane_x) {
+        .text => |text| if (std.mem.eql(u8, text.str, name) and node.rect.y < h.a.view.chrome.y and node.rect.x >= right_pane_x) {
             h.t.click(node.rect.x + node.rect.w / 2, node.rect.y + node.rect.h / 2);
             h.t.settle(1);
             return;
@@ -33,7 +33,7 @@ test "release folder menu: clicking the folder chip opens a focused searchable m
     try testing.expect(search_field.x >= right_pane_x);
     try testing.expectEqual(@as(usize, 1), h.a.view.strip.target.chat);
     const anchor = h.a.view.strip.anchor orelse return error.MissingFolderAnchor;
-    try testing.expect(anchor.y >= 5 and anchor.y + anchor.h <= 42);
+    try testing.expect(anchor.y >= @import("panel_chrome.zig").header_height and anchor.y + anchor.h <= h.a.view.chrome.y);
     try testing.expect(h.t.hasText("Search folders…"));
     h.t.typeText("field notes");
     h.t.settle(1);

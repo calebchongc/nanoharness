@@ -204,8 +204,13 @@ pub fn activate(a: *App, e: Entry) void {
             @import("view_custom_theme_studio.zig").applyPreset(a, preset.*);
         },
         .ui_mode => |m| {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.applyUiMode(m);
-            if (m == .design) @import("app_panels.zig").openDesignCanvas(a);
+            if (m == .design) {
+                @import("app_panels.zig").openDesignCanvas(a);
+            } else if (was_design) {
+                @import("app_panels.zig").closeDesignCanvas(a);
+            }
             a.redraw();
         },
         .toggle_part => |part| {

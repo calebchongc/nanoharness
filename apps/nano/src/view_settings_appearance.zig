@@ -180,8 +180,13 @@ fn workspaceModeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
                 icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
                 ui.text(c, item[3], .{ .size = 12, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
                 if (pill.clicked()) {
+                    const was_design = a.settings.uiMode() == .design;
                     a.settings.applyUiMode(item[0]);
-                    if (item[0] == .design) @import("app_panels.zig").openDesignCanvas(a);
+                    if (item[0] == .design) {
+                        @import("app_panels.zig").openDesignCanvas(a);
+                    } else if (was_design) {
+                        @import("app_panels.zig").closeDesignCanvas(a);
+                    }
                     a.redraw();
                 }
             }

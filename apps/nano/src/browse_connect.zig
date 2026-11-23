@@ -680,6 +680,7 @@ pub fn parseConnectJson(gpa: Allocator, data: []const u8) !Discovery {
 }
 
 pub fn readConnectJson(gpa: Allocator, io: std.Io) !Discovery {
+    if (comptime builtin.os.tag != .macos) return error.UnsupportedPlatform;
     const home = std.c.getenv("HOME") orelse return error.NoHome;
     const path = try std.fmt.allocPrint(gpa, "{s}/Library/Application Support/browse/Agent/connect.json", .{std.mem.span(home)});
     defer gpa.free(path);

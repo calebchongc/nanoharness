@@ -824,7 +824,9 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
     if (c.shortcut(.{ .key = 'm', .cmd = true, .shift = true })) {
+        const was_design = a.settings.uiMode() == .design;
         a.settings.toggleUiMode();
+        if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
         a.redraw();
     }
     for (0..@min(strip.count(a), 6)) |ix| {
@@ -863,6 +865,7 @@ fn keys(c: *ui.Context, a: *App) void {
     if (c.shortcut(.{ .key = 'd', .cmd = true, .alt = true })) {
         if (a.settings.uiMode() == .design) {
             a.settings.applyUiMode(.zen);
+            @import("app_panels.zig").closeDesignCanvas(a);
         } else {
             a.settings.applyUiMode(.design);
             @import("app_panels.zig").openDesignCanvas(a);
@@ -1077,10 +1080,6 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // In Settings the navigation column sits in a non-collapsible card under
     // traffic lights, so avoid floating an orphaned sidebar toggle above it.
     if (a.view.settings_open) return;
-    // With no sidebar in view, a running cloud sandbox (billed until turned
-    // off) still shows under the sidebar toggle. The GPUI app hides its
-    // settings sidebar with the sidebar; this one keeps it, with the strip.
-    if (!a.view.sidebar_open and !a.view.settings_open) @import("view_sandbox_strip.zig").chip(c, a, k);
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     ui.key(c, "workspace-sidebar-toggle");
@@ -1101,18 +1100,16 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
             .on = dev,
             .tip = .{ .text = "Toggle Zen / Developer mode (⇧⌘M)" },
         })) {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.toggleUiMode();
+            if (was_design and a.settings.uiMode() != .design) @import("app_panels.zig").closeDesignCanvas(a);
             a.redraw();
         }
     }
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
-/// The title bar's right end, over the panels (`Nano.UiMode3.trailingReservePx`):
-/// - Settings open: 0 buttons (hidden cleanly)
-/// - Zen: 1 button (`Panel`)
-/// - Design: 2 buttons (`Design Canvas`, `Panel`)
-/// - Developer: 3 buttons (`Actions`, `Files`, `Panel`)
+/// The reserved right end of the title bar: live utilities and mode toggles (`Nano.UiMode3`).
 fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     const vu = @import("view_updates.zig");
     const ux_m = @import("ux_rules.zig").UiMode3;
@@ -1129,56 +1126,65 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.view.updates_anchor = null;
         a.view.updates_popover = false;
     }
-    const show_controls = !a.view.settings_open;
-    if (uw == 0 and !show_controls) return;
-    const controls_w: f32 = if (show_controls) @floatFromInt(ux_m.effectiveTrailingReservePx(mode, false, tm.avail, tm.last_slot) - 8) else 0;
-    const w = uw + (if (uw > 0 and controls_w > 0) @as(f32, 6) else 0) + controls_w;
+    const w = strip.rendering.utilityWidth(a);
+    if (w == 0) return;
     const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
     defer bar.end();
+    const sandbox = @import("view_sandbox_strip.zig");
+    if (sandbox.toolbarVisible(a)) sandbox.toolbar(c, a, k);
     if (uw > 0) vu.topbarUpdatesButton(c, a, k);
-    if (!show_controls) return;
-
     const sc = @import("shortcuts.zig");
-    var tip_buf: [32]u8 = undefined;
-    if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) {
-        ui.key(c, "topbar-actions-dock-toggle");
-        const act_k = sc.platformBadge(&tip_buf, a.settings.keymap.get("toggleTerminal") orelse "mod-j");
-        if (kit.iconButton(c, k, .terminal, .{
-            .size = 28,
-            .on = a.actions.dock_open,
-            .tip = .{ .text = c.print("Toggle terminal & action runs ({s})", .{act_k}) },
-        })) {
-            a.actions.dock_open = !a.actions.dock_open;
-            a.redraw();
+
+    if (!a.view.settings_open) {
+        var tip_buf: [32]u8 = undefined;
+        if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) {
+            ui.key(c, "topbar-actions-dock-toggle");
+            const act_k = sc.platformBadge(&tip_buf, a.settings.keymap.get("toggleTerminal") orelse "mod-j");
+            if (kit.iconButton(c, k, .terminal, .{
+                .size = 28,
+                .on = a.actions.dock_open,
+                .tip = .{ .text = c.print("Toggle terminal & action runs ({s})", .{act_k}) },
+            })) {
+                a.actions.dock_open = !a.actions.dock_open;
+                a.redraw();
+            }
+            ui.key(c, "topbar-files-toggle");
+            var files_buf: [32]u8 = undefined;
+            const files_k = sc.platformBadge(&files_buf, a.settings.keymap.get("toggleFiles") orelse "mod-e");
+            if (kit.iconButton(c, k, .folder, .{
+                .size = 28,
+                .on = a.panels.files_open,
+                .tip = .{ .text = c.print("Toggle file explorer ({s})", .{files_k}) },
+            })) @import("app_panels.zig").toggleFiles(a);
+        } else if (policy.shows_design_canvas_toggle and eff_cnt >= 2) {
+            ui.key(c, "topbar-design-canvas-toggle");
+            const canvas_on = strip.hasHost(a) and if (a.panels.activeTab()) |t| t.kind == .design_canvas else false;
+            const des_k = sc.platformBadge(&tip_buf, "mod-alt-d");
+            if (kit.iconButton(c, k, .@"palette-search", .{
+                .size = 28,
+                .on = canvas_on,
+                .tip = .{ .text = c.print("Open Design Canvas ({s})", .{des_k}) },
+            })) {
+                if (canvas_on) {
+                    @import("app_panels.zig").closeDesignCanvas(a);
+                } else {
+                    @import("app_panels.zig").openDesignCanvas(a);
+                }
+            }
         }
-        ui.key(c, "topbar-files-toggle");
-        var files_buf: [32]u8 = undefined;
-        const files_k = sc.platformBadge(&files_buf, a.settings.keymap.get("toggleFiles") orelse "mod-e");
-        if (kit.iconButton(c, k, .folder, .{
-            .size = 28,
-            .on = a.panels.files_open,
-            .tip = .{ .text = c.print("Toggle file explorer ({s})", .{files_k}) },
-        })) @import("app_panels.zig").toggleFiles(a);
-    } else if (policy.shows_design_canvas_toggle and eff_cnt >= 2) {
-        ui.key(c, "topbar-design-canvas-toggle");
-        const canvas_on = strip.hasHost(a) and if (a.panels.activeTab()) |t| t.kind == .design_canvas else false;
-        const des_k = sc.platformBadge(&tip_buf, "mod-alt-d");
-        if (kit.iconButton(c, k, .@"palette-search", .{
-            .size = 28,
-            .on = canvas_on,
-            .tip = .{ .text = c.print("Open Design Canvas ({s})", .{des_k}) },
-        })) @import("app_panels.zig").openDesignCanvas(a);
     }
 
-    ui.key(c, "topbar-right-panel-toggle");
-    var pan_buf: [32]u8 = undefined;
-    const pan_k = sc.platformBadge(&pan_buf, a.settings.keymap.get("toggleChanges") orelse "mod-r");
-    if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
-        .size = 28,
-        .on = strip.hasHost(a),
-        .label = "Toggle side panel",
-        .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
-    })) @import("app_panels.zig").toggleHost(a);
+    if (strip.rendering.showSidePanelToggle(a)) {
+        ui.key(c, "topbar-right-panel-toggle");
+        var pan_buf: [32]u8 = undefined;
+        const pan_k = sc.platformBadge(&pan_buf, a.settings.keymap.get("toggleChanges") orelse "mod-r");
+        if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
+            .size = 28,
+            .on = strip.hasHost(a),
+            .label = "Toggle side panel",
+            .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
+        })) @import("app_panels.zig").toggleHost(a);
+    }
 }
 
 /// The chat's identity in the title bar's row: its agent's mark, its title,

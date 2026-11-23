@@ -698,8 +698,13 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
                 ui.text(c, item[3], .{ .size = 11.5, .line_height = 14, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
                 if (pill.clicked()) {
                     m.open = null;
+                    const was_design = a.settings.uiMode() == .design;
                     a.settings.applyUiMode(item[0]);
-                    if (item[0] == .design) @import("app_panels.zig").openDesignCanvas(a);
+                    if (item[0] == .design) {
+                        @import("app_panels.zig").openDesignCanvas(a);
+                    } else if (was_design) {
+                        @import("app_panels.zig").closeDesignCanvas(a);
+                    }
                     a.redraw();
                 }
             }

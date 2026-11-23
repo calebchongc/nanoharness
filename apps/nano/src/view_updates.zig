@@ -1245,20 +1245,6 @@ pub fn trailingMetrics(a: *const App) struct { avail: u32, last_slot: u32 } {
     };
 }
 
-pub fn topbarTrailingReserve(a: *const App) f32 {
-    if (a.view.settings_open) return 0;
-    const ux = @import("ux_rules.zig").UiMode3;
-    const mode: ux.UiMode = switch (a.settings.uiMode()) {
-        .zen => .zen,
-        .developer => .developer,
-        .design => .design,
-    };
-    const m = trailingMetrics(a);
-    const uw = topbarUpdatesWidth(a);
-    const mode_px: f32 = @floatFromInt(ux.effectiveTrailingReservePx(mode, false, m.avail, m.last_slot));
-    return uw + (if (uw > 0) @as(f32, 6) else 0) + mode_px;
-}
-
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.updates.acquire();
     const was_dirty = a.updates.dirty;
