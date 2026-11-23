@@ -423,27 +423,29 @@ test "strip slot close button closes a tab and then its panel" {
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
-    const slot_title = h.topText("New tab") orelse return error.MissingRightSlot;
-    h.t.moveTo(slot_title.x + 8, slot_title.y + 4);
-    h.t.settle(1);
-    // Click the slot's ✕ button on the right edge of the second slot.
-    var close_rect: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        if (node.rect.y < chrome.header_height and node.rect.x > slot_title.x and @abs(node.rect.w - 18) < 0.5 and @abs(node.rect.h - 18) < 0.5) {
-            if (close_rect == null or node.rect.x > close_rect.?.x) close_rect = node.rect;
+    for (0..2) |closed| {
+        const slot = h.a.view.strip.active_tab_anchor orelse return error.MissingRightSlot;
+        try testing.expect(slot.y >= chrome.header_height and slot.y + slot.h <= h.a.view.chrome.y);
+        h.t.moveTo(slot.x + slot.w / 2, slot.y + slot.h / 2);
+        h.t.settle(1);
+        var close_rect: ?ui.Rect = null;
+        for (h.t.ctx.a11y_items.items) |item| {
+            if (!std.mem.eql(u8, item.label, "Close tab")) continue;
+            const r = h.t.ctx.rects.get(item.id) orelse continue;
+            if (slot.contains(.{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 })) {
+                close_rect = r;
+                break;
+            }
+        }
+        const r = close_rect orelse return error.MissingSlotCloseButton;
+        h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+        h.t.settle(1);
+        // First click closes the active tab; the second removes its pane.
+        if (closed == 0) {
+            try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+            try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
         }
     }
-    const r = close_rect orelse return error.MissingSlotCloseButton;
-    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
-    // First click closes the active tab in pane 1, leaving 1 tab in pane 1.
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
-    // Second click on the same slot's ✕ closes the last tab and removes pane 1.
-    h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
-    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
-    h.t.settle(1);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("a", h.a.selected.?);
 }
