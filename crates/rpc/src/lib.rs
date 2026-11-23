@@ -173,6 +173,8 @@ pub mod methods {
     pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
     pub const CODEGRAFF_USAGE: &str = "CodegraffUsage";
     pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
+    /// `{}` → aggregate local token usage by runtime/model for the current month.
+    pub const LOCAL_TOKEN_USAGE: &str = "LocalTokenUsage";
     /// `{cwd?, limit?}` → conversations from Claude Code, Codex and graff found on this
     /// device that Harness doesn't have yet, newest first.
     pub const EXTERNAL_HISTORY_LIST: &str = "ExternalHistoryList";

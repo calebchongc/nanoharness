@@ -23,6 +23,7 @@ pub const Section = enum {
     github_ci,
     devices,
     appshots,
+    usage,
     archived,
 
     /// The sidebar's order (`SettingsSection::ALL`).
@@ -40,6 +41,7 @@ pub const Section = enum {
             .notifications => "Notifications",
             .shortcuts => "Shortcuts",
             .appshots => "Appshots",
+            .usage => "Usage",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
             .extensions => "Extensions",
@@ -53,7 +55,7 @@ pub const Section = enum {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
-            .devices, .appshots, .archived => "Devices and data",
+            .devices, .appshots, .usage, .archived => "Devices and data",
         };
     }
 
@@ -61,6 +63,7 @@ pub const Section = enum {
         return switch (s) {
             .account => .@"user-rounded",
             .devices, .appshots => .monitor,
+            .usage => .widget,
             .harnesses => .widget,
             .agents => .@"key-minimalistic",
             .appearance => .tuning,

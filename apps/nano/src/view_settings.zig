@@ -259,6 +259,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
             .harnesses => @import("view_settings_agents.zig").page(c, a, k),
             .agents => @import("view_settings_accounts.zig").page(c, a, k),
+            .usage => @import("view_settings_usage.zig").pageView(c, a, k),
         }
     }
     switch (a.settings.section) {

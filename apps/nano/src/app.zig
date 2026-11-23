@@ -146,6 +146,8 @@ pub const View = struct {
     subagent_steer: nanoui.ui.TextBuffer = .{},
     /// The composer footer's account-usage ring and switcher popover (view_account_usage.zig).
     account_usage: @import("view_account_usage.zig").State = .{},
+    /// Settings › Usage: local input/output records, grouped by runtime.
+    usage: @import("view_settings_usage.zig").Page = .{},
     composer_anchor: ?nanoui.ui.Rect = null,
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,
@@ -268,6 +270,7 @@ pub const View = struct {
         v.agents.deinit(gpa);
         v.accounts.deinit(gpa);
         v.account_usage.deinit(gpa);
+        v.usage.deinit(gpa);
         v.profile_card.deinit(gpa);
         if (v.last_opened_url) |u| gpa.free(u);
         v.archived.deinit(gpa);

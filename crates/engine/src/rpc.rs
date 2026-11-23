@@ -801,6 +801,7 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     external_history: Option<crate::external_history::ExternalHistory>,
+    local_usage_scan: std::sync::Arc<tokio::sync::Semaphore>,
     flint: Option<std::sync::Arc<crate::flint::FlintManager>>,
     engine_info: EngineInfo,
 }
@@ -851,6 +852,7 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             external_history: None,
+            local_usage_scan: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             flint: None,
             engine_info,
         }
@@ -2944,6 +2946,65 @@ impl RpcService for EngineRpc {
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
+            }
+            methods::LOCAL_TOKEN_USAGE => {
+                if !params.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return Err(RpcError::Failed(
+                        "LocalTokenUsage accepts no parameters".into(),
+                    ));
+                }
+                let permit = self
+                    .local_usage_scan
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        RpcError::Failed("Local token usage scan already in progress".into())
+                    })?;
+                let config = self.agent_accounts.config().clone();
+                let graff_home = config.graff_home.clone();
+                let device_id = self.doc_host.device_id().to_owned();
+                let workspace = self.workspace.clone();
+                let usage = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let mut projects = vec![graff_home];
+                    if let Ok(spaces) = workspace.read_spaces() {
+                        projects.extend(
+                            spaces
+                                .into_iter()
+                                .filter(|space| space.device_id == device_id)
+                                .map(|space| std::path::PathBuf::from(space.path)),
+                        );
+                    }
+                    if let Ok(chats) = workspace.read_chats() {
+                        projects.extend(
+                            chats
+                                .into_iter()
+                                .filter(|chat| chat.device_id == device_id)
+                                .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from)),
+                        );
+                    }
+                    projects.sort();
+                    projects.dedup();
+                    let journals = config.data_dir.join("journals");
+                    let codex_home = config.codex_home;
+                    let claude_dir = config.claude_config_dir;
+                    let antigravity_home = std::env::var_os("GEMINI_HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| config.graff_home.join(".gemini"));
+                    let as_of = chrono::Local::now();
+                    crate::local_token_usage::collect(
+                        &projects,
+                        &codex_home,
+                        &claude_dir,
+                        &journals,
+                        &antigravity_home,
+                        as_of,
+                    )
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&usage)
             }
             methods::EXTERNAL_HISTORY_LIST => {
                 let history = self.external_history()?;
