@@ -173,6 +173,8 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (!a.view.space_menu) a.view.space_anchor = null;
     a.view.strip.active_folder_anchor = null;
     a.view.strip.active_tab_anchor = null;
+    var strip_layout: strip.rendering.Layout = undefined;
+    var pane_widths: [tabs.max_panes]?f32 = @splat(null);
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
         defer root.end();
@@ -241,6 +243,12 @@ pub fn view(a: *App, c: *ui.Context) void {
         const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
         a.view.chrome = chrome.zenFrameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
         a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
+        strip_layout = strip.rendering.layout(c, a);
+        if (strip_layout.pane_row) {
+            const extra = chrome.tab_height + ws_gutter;
+            a.view.chrome.y += extra;
+            a.view.chrome.height = @max(0, a.view.chrome.height - extra);
+        }
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
@@ -252,7 +260,7 @@ pub fn view(a: *App, c: *ui.Context) void {
             defer card.end();
             settings_view.page(c, a, k);
         } else {
-            const workspace = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
+            const workspace = ui.div(c).row().pt(a.view.chrome.y).pl(a.view.chrome.leading).pr(ws_gutter).pb(ws_gutter).hFull().wFull();
             defer workspace.end();
             const expanded = strip.layoutExpanded(a);
             if (expanded == null or expanded.? == .chat) {
@@ -262,7 +270,7 @@ pub fn view(a: *App, c: *ui.Context) void {
                 const chat = ui.div(c).column().w(a.view.chrome.chat_width + (if (nested_github) a.view.chrome.host_width + ws_gutter else 0)).hFull();
                 defer chat.end();
                 if (a.tabs.layout()) |s| {
-                    if (!s.zoomed and !only and s.panes.items.len > 1) panes(c, a, k, s) else chatPanel(c, a, k);
+                    if (!s.zoomed and !only and s.panes.items.len > 1) panes(c, a, k, s, &pane_widths) else chatPanel(c, a, k);
                 } else chatPanel(c, a, k);
             }
             if (strip.hasHost(a) and !githubChildInSplit(a) and (expanded == null or expanded.? == .host)) {
@@ -280,7 +288,7 @@ pub fn view(a: *App, c: *ui.Context) void {
             }
         }
     }
-    strip.draw(c, a, k);
+    strip.draw(c, a, k, strip_layout, &pane_widths);
     titlebar(c, a, k);
     @import("window_chrome.zig").draw(c, a, k);
     if (c.input.released) a.view.sidebar_press_focus = false;
@@ -436,7 +444,7 @@ fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// A split's panes along its axis, each its share of the column; the
 /// focused one is the tab's chat, the others its neighbors, read only
 /// (`render_chat_split`, shell/chat_split.rs).
-fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
+fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tabs.max_panes]?f32) void {
     const across = s.axis == .horizontal;
     var box = ui.div(c).grow().wFull().h(0);
     box = if (across) box.row() else box.column();
@@ -481,6 +489,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         if (ix > 0) divider(c, a, k, ix, across, total, ws_gutter);
         const target = chrome.paneSpanIn(total, share, s.panes.items.len, across, ws_gutter);
         const size = if (reveal) |r| revealSpan(total, across, r, ix, target, reveal_t) else target;
+        if (across) widths[ix] = size;
         const owns_child = child_parent != null and child_parent.? == ix;
         const extra = if (owns_child) a.view.chrome.host_width + ws_gutter else 0;
         var group = ui.div(c).row();

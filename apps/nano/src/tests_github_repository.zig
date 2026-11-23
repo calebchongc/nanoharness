@@ -76,7 +76,7 @@ fn textRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
 
 fn topTextRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < 42 and node.rect.x >= h.a.view.sidebar_width) return node.rect,
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < h.a.view.chrome.y and node.rect.x >= h.a.view.sidebar_width) return node.rect,
         else => {},
     };
     return null;

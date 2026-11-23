@@ -79,7 +79,7 @@ test "question tab attention remains visible with hidden sidebar without selecti
         h.t.settle(1);
         var markers: usize = 0;
         for (h.t.ctx.nodes.items) |node| switch (node.content) {
-            .text => |tx| if (std.mem.eql(u8, tx.str, "?") and node.rect.y < 42) {
+            .text => |tx| if (std.mem.eql(u8, tx.str, "?") and node.rect.y < h.a.view.chrome.y) {
                 markers += 1;
             },
             else => {},
@@ -937,7 +937,7 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
         \\ {"id":"c","deviceId":"local","title":"Birch Plan","spaceId":"p3","archived":false},
         \\ {"id":"d","deviceId":"local","title":"Alder Audit","spaceId":"p4","archived":false}]
     );
-    // Open 6 horizontal split panes with collapsed sidebar so slots narrow to ~105pt.
+    // Open 6 horizontal split panes with a collapsed sidebar.
     h.a.openChat("a", "p1");
     h.a.splitPane(.horizontal);
     h.a.select(null, "p1");
@@ -953,7 +953,7 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
     h.a.view.sidebar_open = false;
     h.a.view.sidebar_width = 0;
 
-    // Check across narrow window widths: ~85pt, ~105pt (reported), and ~114pt per slot.
+    // Check across narrow panes, with the tab row below the window controls.
     const caption_trailing = @import("window_chrome.zig").trailing;
     for ([_]f32{ 720, 840, 900 }) |win_w| {
         h.t.resize(win_w + caption_trailing, 620);
@@ -961,7 +961,7 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
 
         // Hover the first slot (reproducing hovered + unhovered narrow slots side by side).
         const first_title = for (h.t.ctx.nodes.items) |node| {
-            if (node.content == .text and node.rect.y < chrome.header_height and std.mem.startsWith(u8, node.content.text.str, "Cedar")) break node.rect;
+            if (node.content == .text and node.rect.y < h.a.view.chrome.y and std.mem.startsWith(u8, node.content.text.str, "Cedar")) break node.rect;
         } else null;
         if (first_title) |r| {
             h.t.moveTo(r.x + 8, r.y + 4);
@@ -972,14 +972,14 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
 
         // 1. No top-strip chip may render a bare "…" placeholder label.
         for (h.t.ctx.nodes.items) |node| {
-            if (node.content == .text and node.rect.y < chrome.header_height and node.rect.y >= 18) {
+            if (node.content == .text and node.rect.y < h.a.view.chrome.y and node.rect.y >= 18) {
                 try testing.expect(!std.mem.eql(u8, node.content.text.str, "…"));
             }
         }
 
         // 2. Every child inside a clipped 14px chip row (icon, text, chevron) must fit inside its chip box.
         for (h.t.ctx.nodes.items) |node| {
-            if (node.rect.y >= chrome.header_height) continue;
+            if (node.rect.y >= h.a.view.chrome.y) continue;
             if (node.parent >= h.t.ctx.nodes.items.len) continue;
             const parent = h.t.ctx.node(node.parent);
             if (!parent.style.clip or @abs(parent.rect.h - 14) > 0.5) continue;
@@ -1001,14 +1001,14 @@ test "narrow split-pane slot chips never render bare ellipses or clip chevrons" 
     const hovered_folder = h.a.view.strip.active_folder_anchor orelse return error.MissingHoveredFolderAnchor;
     h.t.click(hovered_folder.x + hovered_folder.w / 2, hovered_folder.y + hovered_folder.h / 2);
     h.t.settle(1);
-    try testing.expectEqual(strip.Menu.folder, h.a.view.strip.menu.?);
+    try testing.expectEqual(@as(?strip.Menu, .folder), h.a.view.strip.menu);
     h.snap("narrow-slot-chips-folder-open");
 
-    // Computer glyph sits 6px to the left of the folder chip (`16px` wide).
+    // The computer chip ends 6pt to the left of the folder chip.
     const dev_x = hovered_folder.x - 6 - 8;
     h.t.click(dev_x, hovered_folder.y + hovered_folder.h / 2);
     h.t.settle(1);
-    try testing.expectEqual(strip.Menu.device, h.a.view.strip.menu.?);
+    try testing.expectEqual(@as(?strip.Menu, .device), h.a.view.strip.menu);
 }
 
 test "zen top tab bar avoids false overflow, keeps single-line split badges, and never hard-clips titles" {
@@ -1183,7 +1183,7 @@ test "narrow side panel picker cards stay unclipped and topbar plus never overla
     try testing.expect(plus.x + plus.w <= toggle.x - 2);
 }
 
-test "collapsed-sidebar 4-pane split keeps top tabs even instead of lopsided" {
+test "collapsed-sidebar horizontal split keeps tabs aligned to panes" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -1212,24 +1212,39 @@ test "collapsed-sidebar 4-pane split keeps top tabs even instead of lopsided" {
     const caption_trailing = @import("window_chrome.zig").trailing;
     h.t.resize(780 + caption_trailing, 420);
     h.t.settle(2);
-    if (std.c.getenv("NANO_NARROW_SNAP_DIR")) |dir| {
-        var buf: [1024]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/split-tabs-even.png", .{std.mem.span(dir)});
-        try h.t.screenshot(path);
-    }
+    try expectSplitTabsAligned(&h);
 
-    var min_w: f32 = std.math.floatMax(f32);
-    var max_w: f32 = 0;
-    var count: usize = 0;
+    // Uneven shares must not make the strip fall back to equal-width tabs.
+    const split = h.a.tabs.layout().?;
+    @memcpy(split.shares.items, &[_]f32{ 0.17, 0.28, 0.23, 0.32 });
+    h.t.settle(2);
+    try expectSplitTabsAligned(&h);
+}
+
+fn expectSplitTabsAligned(h: *Harness) !void {
+    var tabs_found: usize = 0;
+    var panes_found: usize = 0;
+    var tab_rects: [4]ui.Rect = undefined;
+    var pane_rects: [4]ui.Rect = undefined;
     for (h.t.ctx.nodes.items) |node| {
-        if (node.rect.y < chrome.header_height and @abs(node.rect.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and node.rect.w >= 40) {
-            min_w = @min(min_w, node.rect.w);
-            max_w = @max(max_w, node.rect.w);
-            count += 1;
+        const r = node.rect;
+        if (r.y < h.a.view.chrome.y and @abs(r.h - chrome.tab_height) < 0.5 and @abs(node.style.radius - 6) < 0.5 and node.style.control and r.w >= 40) {
+            try testing.expect(tabs_found < tab_rects.len);
+            tab_rects[tabs_found] = r;
+            tabs_found += 1;
+        }
+        if (@abs(r.y - h.a.view.chrome.y) < 0.5 and @abs(r.h - h.a.view.chrome.height) < 0.5 and node.style.radius == chrome.zen_radius) {
+            try testing.expect(panes_found < pane_rects.len);
+            pane_rects[panes_found] = r;
+            panes_found += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 4), count);
-    try testing.expect(max_w - min_w <= 2.0);
+    try testing.expectEqual(tab_rects.len, tabs_found);
+    try testing.expectEqual(pane_rects.len, panes_found);
+    for (tab_rects, pane_rects) |tab, pane| {
+        try testing.expectApproxEqAbs(pane.x, tab.x, 0.5);
+        try testing.expectApproxEqAbs(pane.w, tab.w, 0.5);
+    }
 }
 
 test "developer mode uses the same inset rounded-12 card chrome as zen while keeping developer hierarchy" {

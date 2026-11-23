@@ -11,15 +11,20 @@ const strip = @import("view_tab_strip.zig");
 const tip = @import("view_tooltip.zig");
 const caption = @import("window_chrome.zig");
 
-pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
-    if (a.view.settings_open) {
-        if (a.settings.uiMode() == .zen) single(c, a, k, @max(strip.leftInset(a), a.view.chrome.leading));
-        return;
-    }
-    if (!strip.hasHost(a)) a.view.strip.host_tab_rect = null;
+pub const Layout = struct {
+    targets: [tabs.max_panes + 2]strip.Panel = undefined,
+    widths: [tabs.max_panes + 2]f32 = undefined,
+    count: usize = 0,
+    left: f32,
+    right: f32 = 0,
+    columns: bool = false,
+    pane_row: bool = false,
+};
+
+pub fn layout(c: *ui.Context, a: *const App) Layout {
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
-    const ws_gutter: f32 = chrome.zen_gutter;
-    if (strip.count(a) <= 1) return single(c, a, k, left);
+    if (a.view.settings_open or strip.count(a) <= 1) return .{ .left = left };
+    const ws_gutter = chrome.zen_gutter;
     var targets: [tabs.max_panes + 2]strip.Panel = undefined;
     var widths: [tabs.max_panes + 2]f32 = undefined;
     var n: usize = 0;
@@ -49,12 +54,43 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         widths[n] = a.view.chrome.files_width;
         n += 1;
     }
+    const right = caption.trailing + @import("view_updates.zig").topbarTrailingReserve(a);
+    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and strip.layoutExpanded(a) == null;
     var aligned: [tabs.max_panes + 2]f32 = undefined;
-    const right_extra = @import("view_updates.zig").topbarTrailingReserve(a);
-    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and strip.layoutExpanded(a) == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
-    const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8 + caption.trailing + right_extra, &aligned);
+    const columns = in_row and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5 and
+        chrome.columns(widths[0..n], a.view.chrome.leading, left, 8 + right, &aligned);
+    return .{
+        .targets = targets,
+        .widths = widths,
+        .count = n,
+        .left = left,
+        .right = right,
+        .columns = columns,
+        // If the titlebar buttons would squeeze the edge tabs, give the
+        // split its own row instead of detaching tabs from their columns.
+        .pane_row = in_row and !columns and (if (split) |s| s.panes.items.len > 1 else false),
+    };
+}
+
+pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, lane: Layout, pane_widths: *const [tabs.max_panes]?f32) void {
+    if (a.view.settings_open) {
+        if (a.settings.uiMode() == .zen) single(c, a, k, lane.left);
+        return;
+    }
+    if (!strip.hasHost(a)) a.view.strip.host_tab_rect = null;
+    if (lane.count == 0) return single(c, a, k, lane.left);
+    const n = lane.count;
+    const columns = lane.columns;
+    const left = lane.left;
+    const ws_gutter = chrome.zen_gutter;
+    var widths = lane.widths;
+    for (lane.targets[0..n], 0..) |target, ix| {
+        if (target == .chat) widths[ix] = pane_widths[target.chat] orelse widths[ix];
+    }
+    var aligned: [tabs.max_panes + 2]f32 = undefined;
+    if (columns) _ = chrome.columns(widths[0..n], a.view.chrome.leading, left, 8 + lane.right, &aligned);
     const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
-    const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - caption.trailing - right_extra - 8 - 32);
+    const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8 - 32);
     const max_other_budget = if (columns)
         @max(0, @min(aligned[0] * 0.55, aligned[0] - 180))
     else
@@ -62,36 +98,55 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const other_shown: usize = if (other_tabs > 0 and max_other_budget >= 76) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
-    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(0, c.size.w - a.view.sidebar_width - other_reserve - caption.trailing - right_extra), left, 8, n));
+    if (lane.pane_row) {
+        {
+            ui.key(c, "instrument-strip");
+            const row = ui.div(c).fixed().offset(a.view.chrome.x, chrome.header_height)
+                .size(a.view.chrome.width, chrome.tab_height).row().gap(ws_gutter).itemsCenter().layer(2);
+            defer row.end();
+            for (lane.targets[0..n], widths[0..n], 0..) |target, width, ix| slot(c, a, k, target, ix, width);
+        }
+        ui.key(c, "instrument-workspaces");
+        const actions = ui.div(c).fixed().offset(a.view.sidebar_width + left, 0)
+            .size(@max(0, c.size.w - a.view.sidebar_width - left - lane.right - 8), chrome.titlebar_height)
+            .pt(chrome.top_pad).row().gap(4).itemsCenter().layer(2);
+        defer actions.end();
+        otherWorkspaces(c, a, k, other_shown, other_pill_w);
+        ui.div(c).w(0).grow().end();
+        newTab(c, a, k);
+        return;
+    }
+    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(0, c.size.w - a.view.sidebar_width - other_reserve - lane.right), left, 8, n));
     ui.key(c, "instrument-strip");
-    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width - caption.trailing - right_extra).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) ws_gutter else 4).itemsCenter().layer(2);
+    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width - lane.right).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) ws_gutter else 4).itemsCenter().layer(2);
     defer row.end();
-    for (targets[0..n], 0..) |target, ix| {
+    for (lane.targets[0..n], 0..) |target, ix| {
         if (columns and ix == 0 and other_shown > 0) {
             ui.key(c, "instrument-col-0");
             const col0 = ui.div(c).row().size(aligned[0], chrome.tab_height).gap(4).itemsCenter();
             defer col0.end();
             slot(c, a, k, target, ix, @max(0, aligned[0] - other_reserve));
-            var rendered: usize = 0;
-            for (0..a.tabs.items.items.len) |ws| {
-                if (ws != a.tabs.active and rendered < other_shown) {
-                    topWorkspacePill(c, a, k, ws, other_pill_w);
-                    rendered += 1;
-                }
-            }
+            otherWorkspaces(c, a, k, other_shown, other_pill_w);
         } else {
             slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
         }
     }
-    if (!columns and other_shown > 0) {
-        var rendered: usize = 0;
-        for (0..a.tabs.items.items.len) |ws| {
-            if (ws != a.tabs.active and rendered < other_shown) {
-                topWorkspacePill(c, a, k, ws, other_pill_w);
-                rendered += 1;
-            }
-        }
+    if (!columns) otherWorkspaces(c, a, k, other_shown, other_pill_w);
+    newTab(c, a, k);
+}
+
+fn otherWorkspaces(c: *ui.Context, a: *App, k: theme.Colors, count: usize, width: f32) void {
+    if (count == 0) return;
+    var rendered: usize = 0;
+    for (0..a.tabs.items.items.len) |ws| {
+        if (ws == a.tabs.active) continue;
+        topWorkspacePill(c, a, k, ws, width);
+        rendered += 1;
+        if (rendered == count) break;
     }
+}
+
+fn newTab(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "instrument-new-tab");
     if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
 }
