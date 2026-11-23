@@ -9,10 +9,16 @@ const catalog = @import("settings_catalog.zig");
 
 fn fixture(h: *Harness) !void {
     h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-        \\{"LocalTokenUsage":{"periodStart":"Nov 1, 2026","asOf":"Nov 22, 2026","partial":false,"rows":[
+        \\{"LocalTokenUsage":{"periodStart":"2026-11-01","asOf":"2026-11-23T01:02:03.456789+08:00","partial":false,"rows":[
         \\ {"runtime":"Harness","model":"sample-model-a","inputTokens":1200000,"outputTokens":320000},
+        \\ {"runtime":"Harness","model":"sample-model-b","inputTokens":620000,"outputTokens":80000},
+        \\ {"runtime":"Harness","model":"sample-model-c","inputTokens":450000,"outputTokens":50000},
+        \\ {"runtime":"Harness","model":"sample-model-d","inputTokens":260000,"outputTokens":40000},
+        \\ {"runtime":"AGY","model":"sample-model-e","inputTokens":180000,"outputTokens":20000},
+        \\ {"runtime":"Harness","model":"sample-model-f","inputTokens":120000,"outputTokens":30000},
         \\ {"runtime":"Codex","model":"sample-model-a","inputTokens":50000,"outputTokens":20000},
-        \\ {"runtime":"AGY","model":"sample-model-b","inputTokens":90000,"outputTokens":10000}]}}
+        \\ {"runtime":"Codex","model":"sample-model-g","inputTokens":34,"outputTokens":1},
+        \\ {"runtime":"AGY","model":"sample-model-h","inputTokens":50000,"outputTokens":10000}]}}
     , .{});
     h.a.engine.state = .connected;
 }
@@ -32,7 +38,6 @@ test "settings usage discovers and renders local tokens by runtime in both theme
         view.open(&h.a);
         h.a.settings.setSection(.appearance);
         h.t.settle(0.2);
-        if (dark) try screenshot(&h, "usage-before-dark");
         h.t.typeText("token counts");
         h.t.settle(0.1);
         try testing.expect(h.t.hasText("Usage"));
@@ -41,27 +46,40 @@ test "settings usage discovers and renders local tokens by runtime in both theme
         try testing.expectEqual(Section.usage, h.a.settings.section);
         var row_visible = false;
         for (h.t.ctx.nodes.items) |node| switch (node.content) {
-            .text => |tx| if (std.mem.indexOf(u8, tx.str, "Harness (sample-model-a)") != null) {
+            .text => |tx| if (std.mem.indexOf(u8, tx.str, "sample-model-a (Harness)") != null) {
                 row_visible = node.rect.x >= 0 and node.rect.y >= 0 and
                     node.rect.x + node.rect.w <= 1200 and node.rect.y + node.rect.h <= 780 and node.rect.w > 0;
             },
             else => {},
         };
         try testing.expect(row_visible);
-        try testing.expect(h.t.containsText("Harness (sample-model-a)"));
-        try testing.expect(h.t.containsText("Codex (sample-model-a)"));
-        try testing.expect(h.t.containsText("AGY (sample-model-b)"));
-        try testing.expect(h.t.containsText("Input 1.2M"));
-        try testing.expect(h.t.containsText("Output 320.0K"));
+        try testing.expect(h.t.containsText("sample-model-a (Harness)"));
+        try testing.expect(h.t.containsText("sample-model-a (Codex)"));
+        try testing.expect(h.t.containsText("sample-model-b (Harness)"));
+        try testing.expect(h.t.containsText("sample-model-e (AGY)"));
+        try testing.expect(h.t.hasText("Nov 1, 2026 – Nov 23, 2026"));
+        try testing.expect(!h.t.containsText("T01:02:03"));
+        try testing.expect(h.t.containsText("Other models · 150.0K"));
+        try testing.expect(h.t.containsText("Other Codex models · 35 · <0.1%"));
+        try testing.expect(h.t.containsText("Other AGY models · 60.0K"));
+        try testing.expect(!h.t.containsText("Input 1.2M"));
         try testing.expect(h.t.containsText("This device · Recorded input + output · Not billing."));
         try testing.expect(!h.a.view.usage.partial);
         if (dark) try screenshot(&h, "usage-after-dark") else try screenshot(&h, "usage-after-light");
+        try h.t.clickText("Show input and output by model");
+        h.t.settle(0.1);
+        try testing.expect(h.t.containsText("Input 1.2M"));
+        try testing.expect(h.t.containsText("Output 320.0K"));
+        try testing.expect(h.t.containsText("sample-model-g (Codex)"));
+        try h.t.clickText("Hide input and output by model");
+        h.t.settle(0.1);
+        try testing.expect(!h.t.containsText("sample-model-g (Codex)"));
         try h.t.clickText("Refresh");
         h.t.settle(0.2);
-        try testing.expect(h.t.containsText("Codex (sample-model-a)"));
-        h.t.resize(900, 520);
+        try testing.expect(h.t.containsText("sample-model-a (Codex)"));
+        h.t.resize(760, 660);
         h.t.settle(0.1);
-        try testing.expect(h.t.containsText("Codex (sample-model-a)"));
+        try testing.expect(h.t.containsText("sample-model-a (Codex)"));
     }
 }
 
