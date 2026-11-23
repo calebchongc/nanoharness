@@ -61,7 +61,7 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Center the hero and starter chips optically in spacious canvases while
     // keeping bottom-aligned flow in short or expanded panes so chips never
     // overlap the composer dock.
-    const center_hero = pane_h >= 520 and !a.view.composer_expanded and a.composer.text().len == 0;
+    const center_hero = pane_h >= 520 and !a.view.composer_expanded;
     {
         ui.scroll(c, .{
             .width = .fill,
@@ -86,7 +86,7 @@ pub fn suggestions(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const enter = ui.motion.frame(c, .{
         .initial = .{ .opacity = 0 },
         .target = .{ .opacity = 1 },
-        .transition = .{ .tween = .{ .duration = 0.16, .ease = .linear } },
+        .transition = .{ .tween = .{ .duration = 0.16, .ease = ui.motion.Easing.css_ease_out } },
     });
     const box = ui.div(c).column().w(w).itemsCenter().gap(suggestion_gap).motion(enter);
     defer box.end();
@@ -297,7 +297,7 @@ fn starterChips(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             const chip_enter = ui.motion.frame(c, .{
                 .initial = .{ .opacity = 0 },
                 .target = .{ .opacity = 1 },
-                .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+                .transition = .{ .tween = .{ .duration = 0.14, .ease = ui.motion.Easing.css_ease_out } },
                 .delay = ui.motion.stagger(start + chip_ix, 0.025),
             });
             const b = ui.div(c).row().h(chip_h).w(cw).px(11).gap(6).itemsCenter().rounded(14).bg(k.ink(if (k.dark) 0.04 else 0.022)).border(k.border).borderW(1).hover(k.hover).motion(chip_enter);

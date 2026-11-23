@@ -440,10 +440,6 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8, feedback: *kit.C
                 c.changed = true;
             }
         }
-        if (show_source) {
-            // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
-            _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
-        }
         if (transcript_commands) if (link_owner) |owner| {
             const actions = @import("app_actions.zig");
             if (actions.commandShell(lang, src)) |shell| {

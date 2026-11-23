@@ -17,7 +17,7 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         at += 1;
     };
     const per_row: usize = @intFromFloat(@max(1, @floor((w - 32 + 8) / 64)));
-    const area = ui.div(c).column().wFull().px(16).pt(12).gap(8);
+    const area = ui.div(c).column().wFull().maxH(148).px(16).pt(12).gap(8).scrollY().scrollbar(.{ .overlay = k.muted.alpha(0.45) });
     defer area.end();
     var row: usize = 0;
     while (row < items.len) : (row += per_row) {
@@ -39,7 +39,7 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
                 if (item.status == .failed and thumb.clicked()) item.start();
             }
             kit.ellipsisText(c, item.name, .{ .size = 10, .line_height = 12, .color = k.muted }, 56);
-            const remove = ui.div(c).row().absolute().offset(40, 0).size(16, 16).center().roundedFull().bg(k.composer).hover(k.hover);
+            const remove = ui.div(c).row().absolute().offset(36, 0).size(20, 20).center().roundedFull().bg(k.composer).hover(k.hover);
             defer remove.end();
             icons.icon(c, .close, 10, k.muted, 0);
             if (remove.clicked()) {

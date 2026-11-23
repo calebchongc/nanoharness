@@ -548,3 +548,41 @@ test "narrow split composer keeps Stop/Send unclipped and footer model + context
         }
     }
 }
+
+test "composer dock compact queue editing keeps message text visible and recovers from missing or conflict finish" {
+    theme.registerFonts();
+    var a: App = .init(t.allocator, t.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = false;
+    a.selected = try a.gpa.dupe(u8, "synthetic");
+    a.new_harness = try a.gpa.dupe(u8, "graff");
+    a.view.strip.focused = .{ .chat = 0 };
+    a.caps.actions = true;
+    a.caps.edit_lease = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, a.gpa,
+        \\{"BeginQueuedMessageEdit":{"outcome":"acquired","leaseId":"synthetic-lease","baseTextHash":"synthetic-hash","text":"Updated queued edit"},"FinishQueuedMessageEdit":{"outcome":"missing"}}
+    , .{});
+    a.engine.state = .connected;
+    try queue(&a, 1);
+
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&a, view), .{ .width = 360, .height = 480, .theme = theme.ui(false) });
+    defer tester.deinit();
+    tester.settle(0.5);
+
+    a.queueBeginEdit("q0");
+    _ = a.engine.pump();
+    tester.settle(0.5);
+    try t.expect(a.queue_edit != null);
+    try t.expect(tester.containsText("Editing · Synthetic queued message 0"));
+
+    // Terminal server finish states (`missing` / `conflict`) release `queue_edit` while preserving user text.
+    a.composer.set("Locally preserved edit text");
+    a.queueFinishEdit(.commit);
+    _ = a.engine.pump();
+    tester.settle(0.5);
+    try t.expect(a.queue_edit == null);
+    try t.expectEqualStrings("Locally preserved edit text", a.composer.text());
+    try t.expectEqualStrings("The queued message was removed; your edit was kept locally", a.notice[0..a.notice_len]);
+}

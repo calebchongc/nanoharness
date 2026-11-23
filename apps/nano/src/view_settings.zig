@@ -218,7 +218,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const enter = ui.motion.frame(c, .{
             .initial = .{ .opacity = 0 },
             .target = .{ .opacity = 1 },
-            .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+            .transition = .{ .tween = .{ .duration = 0.14, .ease = ui.motion.Easing.css_ease_out } },
         });
         const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64).motion(enter);
         defer col.end();

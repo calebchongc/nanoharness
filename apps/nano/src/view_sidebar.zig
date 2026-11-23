@@ -214,7 +214,7 @@ pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
             const row_mot = ui.motion.frame(c, .{
                 .initial = .{ .opacity = 0 },
                 .target = .{ .opacity = 1 },
-                .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+                .transition = .{ .tween = .{ .duration = 0.14, .ease = ui.motion.Easing.css_ease_out } },
             });
             var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).control().motion(row_mot);
             if (sess.active and !multi_tabs) {
@@ -264,7 +264,7 @@ pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
                 const tab_mot = ui.motion.frame(c, .{
                     .initial = .{ .opacity = 0 },
                     .target = .{ .opacity = 1 },
-                    .transition = .{ .tween = .{ .duration = 0.12, .ease = .linear } },
+                    .transition = .{ .tween = .{ .duration = 0.12, .ease = ui.motion.Easing.css_ease_out } },
                     .delay = ui.motion.stagger(t_ix, 0.02),
                 });
                 const trow_wrap = ui.div(c).row().wFull().h(28).itemsCenter().motion(tab_mot);
@@ -349,7 +349,7 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.spacer(c);
             ui.text(c, if (mac) "⌘N" else "Ctrl+N", .{ .size = 11, .line_height = 14, .color = k.faint });
         }
-        if (clicked) a.newWorkspaceSession();
+        if (clicked) a.newTab();
     }
 
     {
@@ -365,7 +365,7 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .magnifer, 15, if (searching or hot) k.text else k.muted, 0);
             ui.text(c, "Search", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (searching or hot) 0.98 else 0.88) });
             ui.spacer(c);
-            ui.text(c, if (mac) "⌘K" else "Ctrl+K", .{ .size = 11, .line_height = 14, .color = k.faint });
+            ui.text(c, if (mac) "⌘F" else "Ctrl+F", .{ .size = 11, .line_height = 14, .color = k.faint });
         }
         if (clicked) @import("view_sidebar_search.zig").toggle(a);
     }
