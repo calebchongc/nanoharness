@@ -2045,15 +2045,13 @@ pub const App = struct {
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
-            // Enter falls back to the queue when a steer can't go now; a
-            // shortcut asking for one says why instead.
             const blocker = queue_mod.steerBlocker(a, text.len > 0, attachments.count(a) > 0);
-            if (explicit == .steer) if (blocker) |why| {
-                a.setNotice(why);
-                return a.redraw();
-            };
-            const action = explicit orelse queue_mod.followUpAction(queue_mod.followUpBehavior(a), blocker);
+            const action = explicit orelse queue_mod.followUpBehavior(a);
             if (action == .steer) {
+                if (blocker) |why| {
+                    a.setNotice(why);
+                    return a.redraw();
+                }
                 queue_mod.steer(a, prompt);
                 // It lands in the transcript, as a prompt does: show it.
                 a.view.stick_end = true;
