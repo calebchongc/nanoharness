@@ -1008,10 +1008,6 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // In Settings the navigation column sits in a non-collapsible card under
     // traffic lights, so avoid floating an orphaned sidebar toggle above it.
     if (a.view.settings_open) return;
-    // With no sidebar in view, a running cloud sandbox (billed until turned
-    // off) still shows under the sidebar toggle. The GPUI app hides its
-    // settings sidebar with the sidebar; this one keeps it, with the strip.
-    if (!a.view.sidebar_open and !a.view.settings_open) @import("view_sandbox_strip.zig").chip(c, a, k);
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     ui.key(c, "workspace-sidebar-toggle");
@@ -1039,8 +1035,7 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
-/// The title bar's right end, over the panels: the files panel and the
-/// surface pane's toggles (`shell/tabs.rs`); a new chat has none.
+/// The reserved right end of the title bar: live utilities, not pane tabs.
 fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     const vu = @import("view_updates.zig");
     const uw = vu.topbarUpdatesWidth(a);
@@ -1048,13 +1043,14 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.view.updates_anchor = null;
         a.view.updates_popover = false;
     }
-    const show_panel_toggle = !a.view.settings_open;
-    if (uw == 0 and !show_panel_toggle) return;
-    const w = uw + (if (uw > 0 and show_panel_toggle) @as(f32, 6) else 0) + (if (show_panel_toggle) @as(f32, 28) else 0);
+    const w = strip.rendering.utilityWidth(a);
+    if (w == 0) return;
     const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
     defer bar.end();
+    const sandbox = @import("view_sandbox_strip.zig");
+    if (sandbox.toolbarVisible(a)) sandbox.toolbar(c, a, k);
     if (uw > 0) vu.topbarUpdatesButton(c, a, k);
-    if (show_panel_toggle) {
+    if (strip.rendering.showSidePanelToggle(a)) {
         ui.key(c, "topbar-right-panel-toggle");
         if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
             .size = 28,
