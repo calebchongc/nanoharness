@@ -204,17 +204,8 @@ pub fn steerUnavailable(live: bool, has_text: bool, has_attachments: bool, queue
     return null;
 }
 
-/// What a send during a run does (`main_action`): a steer only when it can
-/// be one, else the queue.
-pub fn followUpAction(behavior: FollowUp, unavailable: ?[]const u8) FollowUp {
-    return if (behavior == .steer and unavailable == null) .steer else .queue;
-}
-
-test "follow-ups steer only when they can, as follow_up.rs decides" {
+test "follow-ups check opposite behavior and steer blockers" {
     const t = std.testing;
-    try t.expectEqual(FollowUp.queue, followUpAction(.queue, null));
-    try t.expectEqual(FollowUp.steer, followUpAction(.steer, null));
-    try t.expectEqual(FollowUp.queue, followUpAction(.steer, "x"));
     try t.expectEqual(FollowUp.steer, opposite(.queue));
     try t.expectEqualStrings("Steer only supports text; remove attachments or screenshots", steerUnavailable(true, true, true, true, true).?);
     try t.expectEqualStrings("Update Harness on this device and the chat host to use this action", steerUnavailable(true, true, false, false, true).?);

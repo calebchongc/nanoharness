@@ -350,3 +350,51 @@ test "sibling display equations have distinct selection ids and copy independent
     const p2 = std.mem.indexOf(u8, t.ctx.selection.text.items, "m c^2") orelse return error.MissingThirdEquation;
     try testing.expect(p0 < p1 and p1 < p2);
 }
+
+test "native math UI inline \\displaystyle renders at display sizing and copies original source (#91)" {
+    theme.registerFonts();
+    const source = "Value: $\\displaystyle \\frac{p+q}{r}$";
+    var a: @import("app.zig").App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.openChat("math", null);
+    a.settings.set(.transcript_compact_mode, false);
+    const data = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"m","role":"assistant","status":"complete","parts":[{"kind":"text","id":"p","text":"Value: $\\displaystyle \\frac{p+q}{r}$"}]}]}
+    , .{});
+    defer data.deinit();
+    try a.transcript.apply(data.value);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 700 });
+    defer t.deinit();
+    t.settle(3);
+    if (std.c.getenv("NANO_MATH_STYLE_SNAP")) |raw| {
+        try t.screenshot(std.mem.span(raw));
+    }
+
+    const math = @import("native_math.zig");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const styled_eq = math.layout(arena.allocator(), "\\displaystyle \\frac{p+q}{r}", false, 15, .black) orelse return error.MissingStyledEquation;
+    const display_eq = math.layout(arena.allocator(), "\\frac{p+q}{r}", true, 15, .black) orelse return error.MissingDisplayEquation;
+    try testing.expectApproxEqAbs(display_eq.height, styled_eq.height, 0.01);
+
+    const styled = try geometry("Value: $\\displaystyle \\frac{p+q}{r}$", null);
+    const plain = try geometry("Value: $\\frac{p+q}{r}$", null);
+    try testing.expect(styled.h > plain.h * 1.15);
+    try testing.expectApproxEqAbs(styled_eq.height, styled.h, 0.25);
+
+    var copy_id: u64 = 0;
+    for (t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.eql(u8, node.content.text.str, source)) {
+            copy_id = node.id;
+            break;
+        }
+    }
+    try testing.expect(copy_id != 0);
+    t.ctx.selection.anchor = .{ .id = copy_id, .at = 0 };
+    t.ctx.selection.focus = .{ .id = copy_id, .at = source.len };
+    t.ctx.selection.moved = true;
+    t.frame();
+    try testing.expectEqualStrings(source, t.ctx.selection.text.items);
+}
