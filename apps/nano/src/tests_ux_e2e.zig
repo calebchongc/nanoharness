@@ -210,3 +210,25 @@ test "ux e2e: Design Canvas Exit button, /design toggle, and Cmd+Shift+M cleanly
     try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
     try testing.expect(!h.a.panels.host_open);
 }
+
+test "ux e2e: Windows caption lane collapses extra Developer trailing toggles on narrow windows" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+
+    h.a.settings.applyUiMode(.developer);
+    const win_caption = @import("window_chrome.zig").trailingFor(.windows);
+    const ux_m = @import("ux_rules.zig").UiMode3;
+    const vu = @import("view_updates.zig");
+
+    h.t.resize(600 + win_caption, 600);
+    h.t.settle(0.2);
+    const narrow = vu.trailingMetricsFor(&h.a, win_caption);
+    try testing.expect(narrow.avail < 420);
+    try testing.expectEqual(@as(u32, 1), ux_m.effectiveTrailingCount(.developer, false, narrow.avail, narrow.last_slot));
+
+    h.t.resize(1200, 780);
+    h.t.settle(0.2);
+    const wide = vu.trailingMetricsFor(&h.a, win_caption);
+    try testing.expectEqual(@as(u32, 3), ux_m.effectiveTrailingCount(.developer, false, wide.avail, wide.last_slot));
+}
