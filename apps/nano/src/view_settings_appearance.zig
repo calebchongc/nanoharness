@@ -163,9 +163,12 @@ fn workspaceModeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             kit.kbdHint(c, k, "⇧⌘M");
             const seg = ui.div(c).row().p(3).gap(3).rounded(8).bg(k.ink(if (k.dark) 0.08 else 0.055));
             defer seg.end();
+            const is_dev = ui_mode == .developer;
+            const is_des = ui_mode == .design;
             inline for (.{
-                .{ motion.UiMode.zen, "settings-mode-zen", icons.Name.@"magic-stick-3", "Zen", !dev },
-                .{ motion.UiMode.developer, "settings-mode-developer", icons.Name.terminal, "Developer", dev },
+                .{ motion.UiMode.zen, "settings-mode-zen", icons.Name.@"magic-stick-3", "Zen", !is_dev and !is_des },
+                .{ motion.UiMode.developer, "settings-mode-developer", icons.Name.terminal, "Developer", is_dev },
+                .{ motion.UiMode.design, "settings-mode-design", icons.Name.@"palette-search", "Design", is_des },
             }) |item| {
                 ui.key(c, item[1]);
                 var pill = ui.div(c).row().h(28).px(10).gap(5).center().rounded(6).control();
@@ -177,7 +180,13 @@ fn workspaceModeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
                 icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
                 ui.text(c, item[3], .{ .size = 12, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
                 if (pill.clicked()) {
+                    const was_design = a.settings.uiMode() == .design;
                     a.settings.applyUiMode(item[0]);
+                    if (item[0] == .design) {
+                        @import("app_panels.zig").openDesignCanvas(a);
+                    } else if (was_design) {
+                        @import("app_panels.zig").closeDesignCanvas(a);
+                    }
                     a.redraw();
                 }
             }

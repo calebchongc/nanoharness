@@ -355,12 +355,10 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         a.stepPane(true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = '[', .cmd = true, .shift = true })) {
-        const n = a.tabs.items.items.len;
-        if (n > 1) a.showTab((a.tabs.active + n - 1) % n);
+        cycleFlatTab(a, false);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = ']', .cmd = true, .shift = true })) {
-        const n = a.tabs.items.items.len;
-        if (n > 1) a.showTab((a.tabs.active + 1) % n);
+        cycleFlatTab(a, true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = 'l', .cmd = true })) {
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
@@ -392,6 +390,30 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
     if (!handled) return false;
     finishNavigation(c, a);
     return true;
+}
+
+/// Unified flat tab cycling (`Nano.TabNavModel.stepFlatTab`): steps across
+/// all visible flat tabs when unsplit, or workspace tabs in a split view.
+fn cycleFlatTab(a: *App, forward: bool) void {
+    const ux_tab = @import("ux_rules.zig").TabNavModel;
+    const render = @import("view_tab_strip_render.zig");
+    const is_split = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
+    if (!is_split) {
+        const spec = render.singleSpec(a);
+        if (spec.n > 1) {
+            const next = ux_tab.stepFlatTab(@intCast(spec.n), @intCast(spec.selected), forward);
+            switch (spec.itemAt(next)) {
+                .global => |ws| queue(a, .{ .global_tab = ws }),
+                .panel => |pt| queue(a, .{ .panel_tab = .{ .pane = pt.pane, .tab = pt.tab } }),
+            }
+            return;
+        }
+    }
+    const n = a.tabs.items.items.len;
+    if (n > 1) {
+        const next = ux_tab.stepFlatTab(@intCast(n), @intCast(a.tabs.active), forward);
+        a.showTab(next);
+    }
 }
 
 /// A menu's field must release keyboard ownership before another workspace
@@ -519,7 +541,7 @@ pub fn title(a: *const App, panel: Panel) []const u8 {
     };
 }
 pub fn hostTitle(a: *const App, tab: panels.Tab) []const u8 {
-    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
+    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .design_canvas) "Design Canvas" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
 }
 pub fn glyph(a: *const App, panel: Panel) icons.Name {
     return switch (panel) {
@@ -532,6 +554,7 @@ pub fn glyph(a: *const App, panel: Panel) icons.Name {
             .git => .@"git-branch",
             .github => .@"pull-request",
             .subagent => .bot,
+            .design_canvas => .@"palette-search",
             .tool_access => .widget,
         } else .plus,
     };

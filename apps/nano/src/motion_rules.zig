@@ -948,11 +948,13 @@ test "lean FooterChips kernel: the footer row ends inside the composer in every 
 pub const UiMode = enum {
     zen,
     developer,
+    design,
 
     pub fn key(m: UiMode) []const u8 {
         return switch (m) {
             .zen => "zen",
             .developer => "developer",
+            .design => "design",
         };
     }
 
@@ -960,13 +962,25 @@ pub const UiMode = enum {
         return switch (m) {
             .zen => "Zen",
             .developer => "Developer",
+            .design => "Design",
         };
     }
 
+    /// Involutive quick toggle between Zen and Developer (leaving Design returns to Zen).
     pub fn flip(m: UiMode) UiMode {
         return switch (m) {
             .zen => .developer,
             .developer => .zen,
+            .design => .zen,
+        };
+    }
+
+    /// 3-mode cycle (`Nano.UiMode3.nextMode`): Zen -> Developer -> Design -> Zen.
+    pub fn cycle(m: UiMode) UiMode {
+        return switch (m) {
+            .zen => .developer,
+            .developer => .design,
+            .design => .zen,
         };
     }
 };
@@ -1035,6 +1049,7 @@ pub const HierarchyProfile = struct {
     shows_prompt_rail: bool,
     shows_action_toolbar: bool,
     flat_session_list: bool,
+    shows_design_canvas_toggle: bool = false,
 
     pub fn ofMode(m: UiMode) HierarchyProfile {
         return switch (m) {
@@ -1046,6 +1061,7 @@ pub const HierarchyProfile = struct {
                 .shows_prompt_rail = false,
                 .shows_action_toolbar = false,
                 .flat_session_list = true,
+                .shows_design_canvas_toggle = false,
             },
             .developer => .{
                 .shows_open_workspaces_tree = true,
@@ -1055,6 +1071,17 @@ pub const HierarchyProfile = struct {
                 .shows_prompt_rail = true,
                 .shows_action_toolbar = true,
                 .flat_session_list = false,
+                .shows_design_canvas_toggle = false,
+            },
+            .design => .{
+                .shows_open_workspaces_tree = false,
+                .shows_multi_axis_filters = false,
+                .shows_row_tech_badges = false,
+                .shows_git_checkout_chrome = false,
+                .shows_prompt_rail = false,
+                .shows_action_toolbar = false,
+                .flat_session_list = true,
+                .shows_design_canvas_toggle = true,
             },
         };
     }
@@ -1090,7 +1117,9 @@ pub const HierarchyProfile = struct {
     }
 
     pub fn effectiveMode(p: HierarchyProfile) UiMode {
-        return if (std.meta.eql(p, ofMode(.zen))) .zen else .developer;
+        if (std.meta.eql(p, ofMode(.zen))) return .zen;
+        if (std.meta.eql(p, ofMode(.design))) return .design;
+        return .developer;
     }
 };
 
@@ -1140,6 +1169,18 @@ test "lean UiMode state machine: default is zen, toggle is involutive, and zen f
             try std.testing.expectEqual(dev.partEnabled(other), dev.togglePart(part).partEnabled(other));
         };
     }
+
+    // 3-mode cycle has period 3 and Design mode enables the Design Canvas while hiding dev chrome.
+    for ([_]UiMode{ .zen, .developer, .design }) |m| {
+        try std.testing.expectEqual(m, m.cycle().cycle().cycle());
+    }
+    const des = HierarchyProfile.ofMode(.design);
+    try std.testing.expect(des.shows_design_canvas_toggle);
+    try std.testing.expect(des.flat_session_list);
+    try std.testing.expect(!des.shows_action_toolbar);
+    try std.testing.expect(!des.shows_multi_axis_filters);
+    try std.testing.expect(!zen.shows_design_canvas_toggle);
+    try std.testing.expect(!dev.shows_design_canvas_toggle);
 }
 
 test "lean QuestionPanel kernel: the question and its options share the budget, the question yielding first" {

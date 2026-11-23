@@ -196,11 +196,21 @@ pub fn activate(a: *App, e: Entry) void {
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
         .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
+        .open_design_canvas => {
+            a.settings.applyUiMode(.design);
+            @import("app_panels.zig").openDesignCanvas(a);
+        },
         .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |preset| {
             @import("view_custom_theme_studio.zig").applyPreset(a, preset.*);
         },
         .ui_mode => |m| {
+            const was_design = a.settings.uiMode() == .design;
             a.settings.applyUiMode(m);
+            if (m == .design) {
+                @import("app_panels.zig").openDesignCanvas(a);
+            } else if (was_design) {
+                @import("app_panels.zig").closeDesignCanvas(a);
+            }
             a.redraw();
         },
         .toggle_part => |part| {
@@ -563,9 +573,11 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                     .dark => .moon,
                 },
                 .custom_theme_studio, .custom_theme => .@"magic-stick-3",
+                .open_design_canvas => .@"palette-search",
                 .ui_mode => |m| switch (m) {
                     .zen => .@"magic-stick-3",
                     .developer => .terminal,
+                    .design => .@"palette-search",
                 },
                 .toggle_part => .tuning,
                 else => unreachable,
@@ -576,7 +588,8 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                 .new_chat => shortcuts.badge(&buf, comboFor(a, "newSession")),
                 .new_project => shortcuts.badge(&buf, comboFor(a, "newProject")),
                 .settings => shortcuts.badge(&buf, "mod-,"),
-                .ui_mode => shortcuts.badge(&buf, "mod-shift-m"),
+                .open_design_canvas => shortcuts.badge(&buf, "mod-alt-d"),
+                .ui_mode => |m| shortcuts.badge(&buf, if (m == .design) "mod-alt-d" else "mod-shift-m"),
                 else => null,
             };
             {

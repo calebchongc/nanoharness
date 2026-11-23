@@ -25,7 +25,7 @@ pub const Scope = enum {
     }
 };
 
-pub const TabKind = enum { diffs, file, subagent, browser, tool_access, git, github };
+pub const TabKind = enum { diffs, file, subagent, browser, design_canvas, tool_access, git, github };
 
 pub const Tab = struct {
     kind: TabKind,
@@ -319,9 +319,38 @@ pub fn showTab(a: *App, i: usize) void {
             e.focus = true;
             if (!e.belongsTo(a.selected)) @import("app_file_editor.zig").reveal(a, e) else readFile(a, t.path);
         } else readFile(a, t.path),
-        .subagent, .browser, .tool_access => {},
+        .subagent, .browser, .design_canvas, .tool_access => {},
     }
     a.redraw();
+}
+
+/// Opens or focuses the Paper-inspired Design Canvas tab in the right panel.
+pub fn openDesignCanvas(a: *App) void {
+    const p = &a.panels;
+    for (p.tabs.items, 0..) |*t, i| if (t.kind == .design_canvas) {
+        t.shown = p.bumpShown();
+        p.active = i;
+        p.host_open = true;
+        a.view.strip.focused = .host;
+        a.redraw();
+        return;
+    };
+    p.tabs.append(p.gpa, .{ .kind = .design_canvas, .shown = p.bumpShown() }) catch return;
+    p.active = p.tabs.items.len - 1;
+    p.host_open = true;
+    a.view.strip.focused = .host;
+    if (a.view.strip.expanded != null) a.view.strip.expanded = .host;
+    a.redraw();
+}
+
+/// Closes any open Design Canvas tab in the right panel.
+pub fn closeDesignCanvas(a: *App) void {
+    const p = &a.panels;
+    var i = p.tabs.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (p.tabs.items[i].kind == .design_canvas) closeTab(a, i);
+    }
 }
 
 fn openDiffs(a: *App) void {

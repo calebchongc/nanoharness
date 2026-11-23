@@ -88,6 +88,46 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     switch (target) {
         .chat => |pane| {
+            if (a.settings.hierarchyProfile().shows_git_checkout_chrome) {
+                const pane_chat_id = strip.chatId(a, pane);
+                const pane_chat = if (pane_chat_id) |cid| a.findChat(cid) else null;
+                const branch = if (pane_chat) |ch| ch.branch else null;
+                const matches_diff = if (pane_chat_id) |cid|
+                    (if (a.panels.chat) |pc| std.mem.eql(u8, pc, cid) else false)
+                else
+                    false;
+                const diff_ptr = if (matches_diff) a.panels.diff else null;
+                const diff_files: usize = if (diff_ptr) |d| d.files.len else 0;
+                if (branch != null or diff_files > 0) {
+                    const hdr = ui.div(c).row().wFull().px(8).py(5).gap(6).itemsCenter().clip();
+                    if (branch) |br| {
+                        icons.icon(c, .@"git-branch", 12, k.muted, 0);
+                        kit.ellipsisText(c, br, .{ .size = 11.5, .weight = .medium, .color = k.text }, 118);
+                    }
+                    if (diff_files > 0) {
+                        const d = diff_ptr.?;
+                        ui.spacer(c);
+                        ui.key(c, "panel-menu-diff-badge");
+                        const badge = ui.div(c).row().h(20).px(6).center().rounded(5).bg(k.accent.alpha(0.14)).hover(k.accent.alpha(0.22)).control();
+                        ui.text(c, c.print("{d}f +{d}/-{d}", .{ diff_files, d.additions, d.deletions }), .{ .size = 10.5, .weight = .medium, .color = k.accent });
+                        if (badge.clicked()) {
+                            const panels_mod = @import("app_panels.zig");
+                            var found_diff = false;
+                            for (a.panels.tabs.items, 0..) |tb, tix| if (tb.kind == .diffs) {
+                                a.panels.host_open = true;
+                                panels_mod.showTab(a, tix);
+                                found_diff = true;
+                                break;
+                            };
+                            if (!found_diff) panels_mod.addDiffsTab(a);
+                            a.view.strip.menu = null;
+                        }
+                        badge.end();
+                    }
+                    hdr.end();
+                    separator(c, k);
+                }
+            }
             if (a.tabs.layout()) |s| {
                 if (pane >= s.panes.items.len) {
                     a.view.strip.menu = null;
@@ -114,7 +154,12 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
             for (a.panels.tabs.items, 0..) |tab, ix| {
                 if (tab.agent) |agent| if (!agent.belongsTo(a.selected)) continue;
                 if (tab.browser) |browser| if (!browser.belongsTo(a.selected)) continue;
-                if (row(c, a, k, if (tab.kind == .browser) .globe else .document, strip.hostTitle(a, tab), ix == a.panels.active)) strip.queue(a, .{ .host_tab = ix });
+                const g_icon: icons.Name = switch (tab.kind) {
+                    .browser => .globe,
+                    .design_canvas => .@"palette-search",
+                    else => .document,
+                };
+                if (row(c, a, k, g_icon, strip.hostTitle(a, tab), ix == a.panels.active)) strip.queue(a, .{ .host_tab = ix });
             }
             if (a.panels.active < a.panels.tabs.items.len) {
                 if (row(c, a, k, .close, "Close tab", false)) strip.queue(a, .{ .close_host_tab = a.panels.active });

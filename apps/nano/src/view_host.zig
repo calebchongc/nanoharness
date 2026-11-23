@@ -35,6 +35,7 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
         .github => @import("view_git.zig").github(c, a, k),
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
+        .design_canvas => @import("view_design_canvas.zig").draw(c, a, k),
         .tool_access => @import("view_tool_access.zig").draw(c, a, k),
         .subagent => if (t.agent) |s| subagentSurface(c, a, k, s),
     }

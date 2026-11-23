@@ -114,13 +114,24 @@ pub const Browser = struct {
         b.address.set(url);
         b.notice.clear();
         b.focus_address = false;
-        if (comptime builtin.os.tag == .macos) if (b.native) |n| n.navigate(b.url);
+        const route = @import("ux_rules.zig").BrowseConnect.routeUrl(b.url);
+        if (route == .local_saved_view) {
+            if (comptime builtin.os.tag == .macos) if (b.native) |n| n.navigate(b.url);
+        } else {
+            if (comptime builtin.os.tag == .macos) if (b.native) |n| n.show(false);
+            if (b.app.window != null and !b.app.offscreen) {
+                const bc = b.app.ensureBrowseClient();
+                bc.setSession(b.parent);
+                bc.spawnOp(.open_url, b.url, 0, 0);
+            }
+        }
         b.app.redraw();
     }
 
     pub fn ensureNative(b: *Browser) void {
         if (comptime builtin.os.tag != .macos) return;
         if (b.native != null or b.url.len == 0 or b.app.window == null) return;
+        if (@import("ux_rules.zig").BrowseConnect.routeUrl(b.url) != .local_saved_view) return;
         const home = if (b.app.env) |env| env.get("HOME") orelse "" else "";
         const n = Native.create(b.app.gpa, b.app.io, home, .{ .ctx = b, .changed = nativeChanged }) catch {
             b.notice.set("The integrated browser could not start.");
@@ -300,7 +311,10 @@ pub fn syncNative(a: *App, c: *nanoui.ui.Context) void {
     const modal = a.view.setup != null or a.view.project_setup.open or a.view.settings_open or a.picker != .none or a.view.palette.open or a.view.theme_import != null or
         a.view.strip.menu != null or a.view.account_menu or a.view.more_menu or a.view.filter_menu or a.view.space_menu or a.view.checkout_menu or a.view.ref_menu;
     for (a.panels.tabs.items) |t| if (t.browser) |b| {
-        const visible = active == b and a.panels.host_open and b.belongsTo(a.selected) and !modal;
+        // Public http/https links route to `justrach/browse` Connected Apps; only
+        // sandboxed internal `graff-view://` artifacts mount local WKWebView.
+        const is_local = @import("ux_rules.zig").BrowseConnect.routeUrl(b.url) == .local_saved_view;
+        const visible = is_local and active == b and a.panels.host_open and b.belongsTo(a.selected) and !modal;
         if (visible) b.ensureNative();
         const n = b.native orelse continue;
         if (visible) {

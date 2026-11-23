@@ -412,6 +412,7 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
         switchRow(c, a, k, .notifications_enabled, .bell, "Desktop notifications", "Show a system banner on the same events, so pings reach you while Harness is in the background.", false, true);
         switchRow(c, a, k, .notifications_background_only, .monitor, "Only when in the background", "Skip the banner while a Harness window is focused.", false, desktop);
     }
+    space(c, 24);
     fieldLabel(c, k, "Privacy");
     const cd = card(c, k);
     defer cd.end();
@@ -440,7 +441,7 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
     bareSwitchRow(c, a, k, .files_autosave_enabled, .folder, "Autosave", "Save edited workspace files to disk automatically.", true);
-    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in every workspace file.", true);
+    bareSwitchRow(c, a, k, .files_word_wrap, .list, "Word wrap", "Wrap long lines in every workspace file.", false);
     bareSwitchRow(c, a, k, .files_show_all, .eye, "Show all files", "Include hidden and ignored files in every file tree.", false);
     const r = row(c, k, false, false);
     defer r.end();

@@ -25,10 +25,28 @@ pub fn showSidePanelToggle(a: *const App) bool {
     return !a.view.settings_open and (strip.hasHost(a) or a.panels.tabs.items.len > 0);
 }
 
+pub fn trailingModeButtonsWidth(a: *const App) f32 {
+    if (a.view.settings_open) return 0;
+    const vu = @import("view_updates.zig");
+    const ux_m = @import("ux_rules.zig").UiMode3;
+    const mode: ux_m.UiMode = switch (a.settings.uiMode()) {
+        .zen => .zen,
+        .developer => .developer,
+        .design => .design,
+    };
+    const policy = ux_m.profileOf(mode);
+    const tm = vu.trailingMetrics(a);
+    const eff_cnt = ux_m.effectiveTrailingCount(mode, false, tm.avail, tm.last_slot);
+    if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) return 28 + 6 + 28;
+    if (policy.shows_design_canvas_toggle and eff_cnt >= 2) return 28;
+    return 0;
+}
+
 pub fn utilityWidth(a: *const App) f32 {
     const widths = [_]f32{
         if (@import("view_sandbox_strip.zig").toolbarVisible(a)) @import("view_sandbox_strip.zig").toolbar_width else 0,
         @import("view_updates.zig").topbarUpdatesWidth(a),
+        trailingModeButtonsWidth(a),
         if (showSidePanelToggle(a)) 28 else 0,
     };
     var total: f32 = 0;
@@ -236,13 +254,20 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
+    const hover_rules = @import("ux_rules.zig").HoverStability;
+    const pill_wu: u32 = @intFromFloat(@round(@max(0, pill_w)));
+    const reserve_close = hover_rules.tabControlsReserve(pill_wu, false, true);
+    const label_budget: f32 = @floatFromInt(hover_rules.tabLabelWidth(pill_wu, false, pill_hot, true) -| 16);
     if (!questionMark(c, k, workspaceNeedsInput(a, ws))) icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
-    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 46) else 28)));
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, label_budget);
     var closed = false;
-    if (pill_hot) {
+    if (reserve_close > 0) {
         const spacer = ui.div(c).row().grow();
         spacer.end();
-        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = .{ .text = "Close tab" } })) {
+        const op: f32 = @as(f32, @floatFromInt(hover_rules.tabCloseGlyphOpacityPct(false, pill_hot, true))) / 100.0;
+        const close_wrap = ui.div(c).row().size(16, 16).center().opacity(op);
+        defer close_wrap.end();
+        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = if (pill_hot) .{ .text = "Close tab" } else null }) and pill_hot) {
             closed = true;
             strip.queue(a, .{ .close_global_tab = ws });
         }
@@ -298,13 +323,20 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
+    const hover_rules = @import("ux_rules.zig").HoverStability;
+    const pill_wu: u32 = @intFromFloat(@round(@max(0, pill_w)));
+    const reserve_close = hover_rules.tabControlsReserve(pill_wu, false, true);
+    const label_budget: f32 = @floatFromInt(hover_rules.tabLabelWidth(pill_wu, false, pill_hot, true) -| 16);
     if (!questionMark(c, k, chatNeedsInput(a, chat_id))) icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
-    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 44) else 26)));
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, label_budget);
     var pill_closed = false;
-    if (pill_hot) {
+    if (reserve_close > 0) {
         const spacer = ui.div(c).row().grow();
         spacer.end();
-        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = .{ .text = "Close tab" } })) {
+        const op: f32 = @as(f32, @floatFromInt(hover_rules.tabCloseGlyphOpacityPct(false, pill_hot, true))) / 100.0;
+        const close_wrap = ui.div(c).row().size(16, 16).center().opacity(op);
+        defer close_wrap.end();
+        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = if (pill_hot) .{ .text = "Close tab" } else null }) and pill_hot) {
             pill_closed = true;
             strip.queue(a, .{ .close_panel_tab = .{ .pane = pane, .tab = tab_ix } });
         }

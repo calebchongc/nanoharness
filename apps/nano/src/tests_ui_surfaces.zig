@@ -288,7 +288,7 @@ test "command w closes the page beside the chat before the chat" {
     try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
 }
 
-test "in-app browser shows passkey handoff banner on OpenAI auth pages and hands off to the system browser" {
+test "in-app browser routes http/https URLs to justrach/browse Connected Apps and supports external handoff" {
     const browser = @import("app_browser.zig");
     const Capture = struct {
         var last_url: [256]u8 = undefined;
@@ -309,18 +309,19 @@ test "in-app browser shows passkey handoff banner on OpenAI auth pages and hands
     defer h.deinit();
     browser.openInternalLink(&h.a, "synthetic-parent", "http://localhost:31997/preview");
     h.t.settle(0.2);
-    try testing.expect(!h.t.hasText("Open in browser"));
-
     const b = h.a.panels.tabs.items[0].browser.?;
+    try testing.expect(b.native == null);
+    try testing.expect(h.t.hasText("browse.app is installed — launch it to pair"));
+
+    h.a.ensureBrowseClient().state = .needs_browse_install;
+    h.t.settle(0.1);
+    try testing.expect(h.t.hasText("Keep your logins & passkeys with browse.app"));
+
     b.navigate("https://auth.openai.com/log-in?synthetic=1");
     h.t.settle(0.2);
-    if (std.c.getenv("NANO_BROWSER_PASSKEY_SNAP_DIR")) |dir| {
-        var buf: [1024]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/browser-openai-login.png", .{std.mem.span(dir)});
-        try h.t.screenshot(path);
-    }
-    try testing.expect(h.t.hasText("Passkeys aren't supported in the in-app browser."));
-    try h.t.clickText("Open in browser");
+    try testing.expect(b.native == null);
+    try testing.expect(h.t.hasText("Keep your logins & passkeys with browse.app"));
+    try h.t.clickText("Open externally");
     h.t.settle(0.1);
     try testing.expectEqualStrings("https://auth.openai.com/log-in?synthetic=1", Capture.last_url[0..Capture.last_len]);
 }

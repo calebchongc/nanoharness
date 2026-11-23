@@ -391,7 +391,8 @@ fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const menus = @import("view_sidebar_menus.zig");
-    if (a.settings.uiMode() == .zen) {
+    const profile = a.settings.hierarchyProfile();
+    if (a.settings.uiMode() == .zen or !profile.shows_multi_axis_filters) {
         const row = ui.div(c).row().wFull().px(10).pt(4).pb(6).itemsCenter();
         defer row.end();
         const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
@@ -419,38 +420,66 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (clicked) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
         return;
     }
-    const row = ui.div(c).row().wFull().px(10).pt(4).pb(6).itemsCenter();
-    defer row.end();
-    const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
-    const base = ui.div(c).row().grow().w(0).h(26).px(8).gap(6).itemsCenter().rounded(7)
-        .border(k.border.alpha(0.55)).borderW(1).clip().control();
-    const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
-    const t = lh.div;
-    defer t.end();
-    if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
-    if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
-    const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.86);
-    const room = @max(0, cardInnerW(a) - 20 - 16 - 16 - 22);
-    if (a.findSpace(a.view.filter)) |s| {
-        const icon_slot = ui.div(c).row().size(15, 15).center();
-        badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
-        icon_slot.end();
-        const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
-        const off = !menus.online(a, s.device_id, a.nowMs());
-        const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
-        const name_w = @min(c.text.width(s.name, .{ .size = 12.5, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
-        const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
-        defer box.end();
-        kit.fadeText(c, s.name, .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, name_w);
-        kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
-        if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
-    } else {
-        icons.icon(c, .folder, 14, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.88) else k.muted.alpha(0.85), 14);
-        const label = ui.div(c).row().grow().w(0).clip();
-        defer label.end();
-        kit.fadeText(c, "All projects", .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, room);
+    const wrap = ui.div(c).column().wFull().pb(4);
+    defer wrap.end();
+    {
+        const row = ui.div(c).row().wFull().px(10).pt(4).pb(4).itemsCenter();
+        defer row.end();
+        const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
+        const base = ui.div(c).row().grow().w(0).h(26).px(8).gap(6).itemsCenter().rounded(7)
+            .border(k.border.alpha(0.55)).borderW(1).clip().control();
+        const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
+        const t = lh.div;
+        defer t.end();
+        if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
+        if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
+        const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.86);
+        const room = @max(0, cardInnerW(a) - 20 - 16 - 16 - 22);
+        if (a.findSpace(a.view.filter)) |s| {
+            const icon_slot = ui.div(c).row().size(15, 15).center();
+            badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
+            icon_slot.end();
+            const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
+            const off = !menus.online(a, s.device_id, a.nowMs());
+            const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
+            const name_w = @min(c.text.width(s.name, .{ .size = 12.5, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
+            const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
+            defer box.end();
+            kit.fadeText(c, s.name, .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, name_w);
+            kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
+            if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
+        } else {
+            icons.icon(c, .folder, 14, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.88) else k.muted.alpha(0.85), 14);
+            const label = ui.div(c).row().grow().w(0).clip();
+            defer label.end();
+            kit.fadeText(c, "All projects", .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, room);
+        }
+        icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
     }
-    icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
+
+    // Multi-axis quick activity pills in Developer mode (`shows_multi_axis_filters`).
+    const LastAct = @import("settings.zig").LastActivity;
+    const act = a.settings.lastActivity();
+    const act_wrap = ui.div(c).row().wFull().px(10).gap(4).itemsCenter();
+    defer act_wrap.end();
+    ui.text(c, "Window", .{ .size = 10, .color = k.muted.alpha(0.75) });
+    ui.spacer(c);
+    inline for (.{
+        .{ LastAct.d1, "24h" },
+        .{ LastAct.d7, "Wk" },
+        .{ LastAct.all, "Any" },
+    }) |opt| {
+        const selected = act == opt[0];
+        ui.key(c, opt[1]);
+        var pill = ui.div(c).row().h(20).px(7).center().rounded(5).control();
+        pill = if (selected) pill.bg(k.ink(0.11)) else pill.hover(k.hover);
+        defer pill.end();
+        ui.text(c, opt[1], .{ .size = 10, .weight = if (selected) .medium else .regular, .color = if (selected) k.text else k.muted });
+        if (pill.clicked()) {
+            a.settings.setText("sidebarLastActivity", opt[0].key());
+            a.redraw();
+        }
+    }
 }
 
 const RowLookup = struct {
@@ -1486,9 +1515,10 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
     statusSlot(c, k, rowMark(a, ch));
     marks(c, a, k, ch, l, o.lit or hovered);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
-    const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
     const far = remote(a, ch);
-    const title_w = o.inner - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+    // Reserve constant trailing slot width across hover/unhover (`Nano.HoverStability.sidebarTitleMaxW`).
+    const trailing_w: f32 = @max(22, c.text.width(time, .{ .size = 11 }) + 6) + (if (far) @as(f32, 22) else 0);
+    const title_w = o.inner - l.marksW() - 4 - 6 - trailing_w;
     const tc = if (o.lit or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
     {
         const t = ui.div(c).row().grow().w(0).clip();
@@ -1496,20 +1526,22 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
         kit.highlightText(c, k, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), @max(24, title_w), o.query);
     }
     var archive = false;
-    if (hovered) {
-        const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
-        defer b.end();
-        if (b.clicked()) archive = true;
-        icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
-    } else if (far) {
-        const b = ui.div(c).row().size(18, 14).center();
-        defer b.end();
-        icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
-    }
     {
-        const tm = ui.div(c).row().pl(6);
-        defer tm.end();
-        if (!hovered) ui.text(c, time, .{ .size = 11, .color = k.subline });
+        const trail = ui.div(c).row().w(trailing_w).gap(4).itemsCenter().justifyEnd();
+        defer trail.end();
+        if (hovered) {
+            const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+            defer b.end();
+            if (b.clicked()) archive = true;
+            icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
+        } else {
+            if (far) {
+                const b = ui.div(c).row().size(18, 14).center();
+                defer b.end();
+                icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
+            }
+            ui.text(c, time, .{ .size = 11, .color = k.subline });
+        }
     }
     if (archive) {
         a.setArchived(ch.id, !ch.archived);
@@ -1862,29 +1894,35 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
             a.settings.setSection(.account);
             @import("view_settings.zig").open(a);
         } else if (rclick) {
-            a.view.account_menu = !a.view.account_menu;
+            const was_open = a.view.account_menu;
+            if (!was_open) @import("view.zig").closeTransientPopovers(a);
+            a.view.account_menu = !was_open;
             if (a.view.account_menu) account.refresh(a);
             a.redraw();
         }
     }
     sidebarThemeButton(c, a, k);
     {
-        const dev = a.settings.uiMode() == .developer;
+        const mode = a.settings.uiMode();
+        const dev = mode == .developer;
+        const des = mode == .design;
+        const label = if (dev) "Dev" else if (des) "Design" else "Zen";
+        const icon_name: icons.Name = if (dev) .terminal else if (des) .@"palette-search" else .@"magic-stick-3";
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
             ui.div(c).row().h(26).px(6).gap(4).itemsCenter().rounded(6)
-                .bg(if (dev) k.ink(0.08) else .transparent)
-                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+                .bg(if (dev or des) k.ink(0.08) else .transparent)
+                .border(if (dev or des) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
                 .hover(k.hover),
             k,
-            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+            .{ .text = "Click to toggle mode (⇧⌘M cycles Zen/Dev) · Right-click for Zen / Dev / Design", .delay = tip.quick },
         );
         const pill_clicked = pill.clicked();
         const pill_rclick = kit.secondaryClicked(pill);
         {
             defer pill.end();
-            icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 12, if (dev) k.text else k.muted, 0);
-            ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+            icons.icon(c, icon_name, 12, if (dev or des) k.text else k.muted, 0);
+            ui.text(c, label, .{ .size = 11, .line_height = 14, .weight = if (dev or des) .semibold else theme.ui_medium_weight, .color = if (dev or des) k.text else k.muted });
         }
         if (pill_clicked) {
             a.settings.toggleUiMode();
@@ -1983,7 +2021,9 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         b = tip.on(b, k, .{ .text = c.print("Account menu: {s}", .{display}) });
         defer b.end();
         if (b.clicked()) {
-            a.view.account_menu = !a.view.account_menu;
+            const was_open = a.view.account_menu;
+            if (!was_open) @import("view.zig").closeTransientPopovers(a);
+            a.view.account_menu = !was_open;
             if (a.view.account_menu) account.refresh(a);
         }
         if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
@@ -2010,19 +2050,23 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.spacer(c);
     {
-        const dev = a.settings.uiMode() == .developer;
+        const mode = a.settings.uiMode();
+        const dev = mode == .developer;
+        const des = mode == .design;
+        const label = if (dev) "Dev" else if (des) "Design" else "Zen";
+        const icon_name: icons.Name = if (dev) .terminal else if (des) .@"palette-search" else .@"magic-stick-3";
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
             ui.div(c).row().h(26).px(7).gap(4).itemsCenter().rounded(7)
-                .bg(if (dev) k.ink(0.065) else .transparent)
+                .bg(if (dev or des) k.ink(0.065) else .transparent)
                 .border(k.border.alpha(0.55)).borderW(1)
                 .hover(k.hover),
             k,
-            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+            .{ .text = "Click to toggle mode (⇧⌘M) · Right-click for Zen / Dev / Design", .delay = tip.quick },
         );
         defer pill.end();
-        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 12, if (dev) k.text else k.muted, 0);
-        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        icons.icon(c, icon_name, 12, if (dev or des) k.text else k.muted, 0);
+        ui.text(c, label, .{ .size = 11, .line_height = 14, .weight = if (dev or des) .semibold else theme.ui_medium_weight, .color = if (dev or des) k.text else k.muted });
         if (pill.clicked()) {
             a.settings.toggleUiMode();
             a.redraw();

@@ -202,6 +202,11 @@ test {
     _ = @import("member_card.zig");
     _ = @import("view_settings_profile.zig");
     _ = @import("tests_custom_themes.zig");
+    _ = @import("ux_rules.zig");
+    _ = @import("tests_ux_proofs.zig");
+    _ = @import("tests_ux_e2e.zig");
+    _ = @import("design_canvas.zig");
+    _ = @import("browse_connect.zig");
     if (@import("builtin").os.tag != .windows) {
         _ = @import("mcp_server.zig");
         _ = @import("preview/catalog.zig");

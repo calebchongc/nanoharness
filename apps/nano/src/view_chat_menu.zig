@@ -39,6 +39,7 @@ pub const Dialogs = struct {
 };
 
 pub fn open(a: *App, chat_id: []const u8, at: ui.Point) void {
+    @import("view.zig").closeTransientPopovers(a);
     const m = &a.view.chat_menu;
     m.id.clearRetainingCapacity();
     m.id.appendSlice(a.gpa, chat_id) catch return;

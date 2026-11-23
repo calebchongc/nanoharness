@@ -1212,6 +1212,45 @@ pub fn topbarUpdatesWidth(a: *const App) f32 {
     return 5 + stack_w + 6 + 16 + 8;
 }
 
+pub const TrailingMetrics = struct { avail: u32, last_slot: u32 };
+
+pub fn trailingMetrics(a: *const App) TrailingMetrics {
+    return trailingMetricsFor(a, @import("window_chrome.zig").trailing);
+}
+
+pub fn trailingMetricsFor(a: *const App, caption_trailing: f32) TrailingMetrics {
+    const avail_f = @max(0, a.view.chrome.width - caption_trailing);
+    var last_f: f32 = avail_f;
+    const strip = @import("view_tab_strip.zig");
+    const chrome = @import("panel_chrome.zig");
+    const github = @import("app_github_repository.zig");
+    if (a.panels.files_open and a.view.chrome.files_width > 0) {
+        last_f = @max(0, a.view.chrome.files_width - caption_trailing);
+    } else if (a.tabs.layout()) |s| {
+        const in_row = s.axis == .horizontal and !s.zoomed;
+        const hp = if (strip.hasHost(a) and github.surface(a)) github.parentPane(a) else null;
+        if (strip.hasHost(a) and hp == null and a.view.chrome.host_width > 0) {
+            last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+        } else if (in_row and s.panes.items.len > 1) {
+            const last_ix = s.panes.items.len - 1;
+            if (strip.hasHost(a) and hp != null and hp.? == last_ix and a.view.chrome.host_width > 0) {
+                last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+            } else {
+                const span = chrome.paneSpanIn(a.view.chrome.chat_width, s.shares.items[last_ix], s.panes.items.len, true, chrome.zen_gutter);
+                last_f = @max(0, span - caption_trailing);
+            }
+        } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+            last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+        }
+    } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+        last_f = @max(0, a.view.chrome.host_width - caption_trailing);
+    }
+    return .{
+        .avail = @intFromFloat(@round(@max(0, avail_f))),
+        .last_slot = @intFromFloat(@round(@max(0, last_f))),
+    };
+}
+
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.updates.acquire();
     const was_dirty = a.updates.dirty;
@@ -1274,7 +1313,9 @@ pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     if (clicked) {
-        a.view.updates_popover = !a.view.updates_popover;
+        const was_open = a.view.updates_popover;
+        if (!was_open) @import("view.zig").closeTransientPopovers(a);
+        a.view.updates_popover = !was_open;
         a.redraw();
     }
 }

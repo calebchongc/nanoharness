@@ -101,7 +101,8 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         if (show_jump) jumpButton(c, a, k, jump_w, jump_style);
     }
     {
-        const rings_w: f32 = if (show_acct) 128 else if (has_ctx) ctx_w else 0;
+        const agent_w: f32 = if (show_agent_work) (if (a.view.agent_work.anchor) |ar| ar.w + 6 else 26) else 0;
+        const rings_w: f32 = (if (show_acct) @as(f32, 128) else if (has_ctx) ctx_w else 0) + agent_w;
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
         if (w >= 220) {
