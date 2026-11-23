@@ -202,7 +202,10 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     const box = for (t.ctx.nodes.items) |n| {
         if (n.style.scroll and n.rect.h > 200) break n.id;
     } else return error.NoTranscriptScroll;
-    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    const end = t.ctx.scroll_max.get(box) orelse return error.NoTranscriptScroll;
+    try testing.expect(end > 40);
+    // A small scroll away from the end should be enough to show the action.
+    try t.ctx.scroll.put(t.ctx.gpa, box, end - 40);
     try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
     t.frame();
     t.frame();
