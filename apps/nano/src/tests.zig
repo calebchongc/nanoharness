@@ -69,6 +69,7 @@ test {
     _ = @import("shortcuts.zig");
     _ = @import("view_settings.zig");
     _ = @import("tests_settings_navigation.zig");
+    _ = @import("tests_ui_usage.zig");
     _ = @import("view_settings_devices.zig");
     _ = @import("view_settings_devices_updates.zig");
     _ = @import("view_settings_shortcuts.zig");

@@ -17,6 +17,11 @@ pub fn none(method: []const u8) Request(Empty) {
     return .{ .method = method, .params = rpc.empty };
 }
 
+/// Aggregate this device's locally recorded token usage; it accepts no paths or targets.
+pub fn localTokenUsage() Request(Empty) {
+    return none("LocalTokenUsage");
+}
+
 // ── bots ─────────────────────────────────────────────────────────────
 
 /// One change to the user's bots (`BotAction`). Which fields count depends
