@@ -1,5 +1,5 @@
-//! Settings › Usage: locally recorded model tokens, grouped by the runtime that
-//! made each request. This page never calls provider APIs or syncs usage.
+//! Settings › Usage: local tokens by model and runtime. This page never
+//! calls provider APIs or syncs usage.
 const std = @import("std");
 const json = std.json;
 const nanoui = @import("nanoui");
@@ -30,6 +30,7 @@ pub const Page = struct {
     as_of: []const u8 = "",
     rows: []Row = &.{},
     partial: bool = false,
+    show_all: bool = false,
     error_text: []const u8 = "",
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
@@ -84,6 +85,11 @@ fn parse(a: *App, page: *Page, value: json.Value) bool {
         n += 1;
     }
     page.rows = rows[0..n];
+    std.mem.sort(Row, page.rows, {}, struct {
+        fn lessThan(_: void, lhs: Row, rhs: Row) bool {
+            return tokens(lhs) > tokens(rhs);
+        }
+    }.lessThan);
     if (obj.get("periodStart")) |v| {
         if (v == .string) page.period_start = allocator.dupe(u8, v.string) catch "";
     }
@@ -140,50 +146,164 @@ pub fn load(a: *App, refresh: bool) void {
     }
 }
 
-fn total(rows: []const Row, runtime: ?[]const u8) u64 {
-    var sum: u64 = 0;
-    for (rows) |row| {
-        if (runtime) |name| if (!std.mem.eql(u8, row.runtime, name)) continue;
-        sum +|= row.input +| row.output;
-    }
-    return sum;
+fn tokens(row: Row) u64 {
+    return row.input +| row.output;
 }
 
-fn runtimeColor(runtime: []const u8, k: theme.Colors) ui.Color {
-    if (std.mem.eql(u8, runtime, "Harness")) return k.accent;
-    if (std.mem.eql(u8, runtime, "Codex")) return k.success;
-    if (std.mem.eql(u8, runtime, "AGY")) return k.warning;
-    return k.muted;
+fn fraction(part: u64, all: u64) f64 {
+    return @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(all));
 }
 
-const Runtime = struct { name: []const u8, amount: u64 };
+const max_models = 6;
+const rollup_names = [_][]const u8{ "Other models", "Other Codex models", "Other AGY models" };
+const Breakdown = struct {
+    indices: [max_models]usize = undefined,
+    len: usize = 0,
+    rest: [rollup_names.len]u64 = @splat(0),
+    total: u64 = 0,
 
-fn pie(c: *ui.Context, rows: []const Row, k: theme.Colors, all: u64) void {
-    const size: f32 = 112;
-    const center: ui.Point = .{ .x = size / 2, .y = size / 2 };
-    const cv = ui.canvas(c, .{ .width = .{ .px = size }, .height = .{ .px = size } });
-    cv.ring(center, 38, 12, k.border);
-    if (all == 0) return;
-    const names = [_][]const u8{ "Harness", "Codex", "AGY", "Other" };
-    var segments: [4]Runtime = undefined;
-    var count: usize = 0;
-    for (names) |name| {
-        const value = total(rows, name);
-        if (value == 0) continue;
-        segments[count] = .{ .name = name, .amount = value };
-        count += 1;
+    fn add(b: *Breakdown, index: usize) void {
+        b.indices[b.len] = index;
+        b.len += 1;
     }
-    var angle: f32 = -std.math.pi / 2.0;
-    for (segments[0..count]) |segment| {
-        const fraction = @as(f32, @floatFromInt(segment.amount)) / @as(f32, @floatFromInt(all));
-        const steps: usize = @intFromFloat(@max(2, @ceil(72 * fraction)));
-        const points = c.alloc().alloc(ui.Point, steps + 1) catch continue;
-        for (points, 0..) |*point, index| {
-            const theta = angle + std.math.tau * fraction * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(steps));
-            point.* = .{ .x = center.x + 38 * @cos(theta), .y = center.y + 38 * @sin(theta) };
+
+    fn selected(b: *const Breakdown) []const usize {
+        return b.indices[0..b.len];
+    }
+};
+
+fn rollup(runtime: []const u8) usize {
+    if (std.mem.eql(u8, runtime, "Codex")) return 1;
+    if (std.mem.eql(u8, runtime, "AGY")) return 2;
+    return 0;
+}
+
+// Rows are already ranked. Reserve a slot for the top Codex and AGY model
+// when present, so a smaller runtime never disappears into "Other models".
+fn breakdown(rows: []const Row) Breakdown {
+    var out: Breakdown = .{};
+    for ([_]usize{ 1, 2 }) |bucket| {
+        for (rows, 0..) |row, i| {
+            if (tokens(row) > 0 and rollup(row.runtime) == bucket) {
+                out.add(i);
+                break;
+            }
         }
-        cv.polyline(points, .{ .width = 12, .color = runtimeColor(segment.name, k) });
-        angle += std.math.tau * fraction;
+    }
+    for (rows, 0..) |row, i| {
+        if (out.len == max_models or tokens(row) == 0) break;
+        if (std.mem.indexOfScalar(usize, out.selected(), i) == null) out.add(i);
+    }
+    std.mem.sort(usize, out.indices[0..out.len], {}, comptime std.sort.asc(usize));
+    for (rows, 0..) |row, i| {
+        out.total +|= tokens(row);
+        if (std.mem.indexOfScalar(usize, out.selected(), i) == null) out.rest[rollup(row.runtime)] +|= tokens(row);
+    }
+    return out;
+}
+
+fn palette(k: theme.Colors) [max_models + rollup_names.len]ui.Color {
+    const colors = [max_models + rollup_names.len]ui.Color{
+        k.accent, k.ansi[4], k.ansi[5], k.success, k.danger, k.ansi[14], k.muted, k.ansi[3], k.text,
+    };
+    var adjusted = colors;
+    for (&adjusted) |*color| {
+        color.* = k.background.mix(color.*, color.a);
+        for (0..10) |_| {
+            if (theme.contrast(color.*, k.background) >= 3) break;
+            color.* = color.mix(k.text, 0.15);
+        }
+    }
+    return adjusted;
+}
+
+fn pie(c: *ui.Context, size: f32, shares: []const u64, all: u64, colors: []const ui.Color, background: ui.Color) void {
+    const center: ui.Point = .{ .x = size / 2, .y = size / 2 };
+    const radius = size / 2 - 2;
+    const cv = ui.canvas(c, .{ .width = .{ .px = size }, .height = .{ .px = size } });
+    const start: f64 = -std.math.pi / 2.0;
+    var angle = start;
+    for (shares, colors) |amount, color| {
+        if (amount == 0) continue;
+        const arc = std.math.tau * fraction(amount, all);
+        const steps: usize = @intFromFloat(@max(1, @ceil(128 * arc / std.math.tau)));
+        var prev: ui.Point = .{ .x = center.x + radius * @as(f32, @floatCast(@cos(angle))), .y = center.y + radius * @as(f32, @floatCast(@sin(angle))) };
+        for (1..steps + 1) |step| {
+            const theta = angle + arc * @as(f64, @floatFromInt(step)) / @as(f64, @floatFromInt(steps));
+            const next: ui.Point = .{ .x = center.x + radius * @as(f32, @floatCast(@cos(theta))), .y = center.y + radius * @as(f32, @floatCast(@sin(theta))) };
+            cv.triangle(center, prev, next, color, 2);
+            prev = next;
+        }
+        angle += arc;
+    }
+    // Separate substantial neighboring slices even in a monochrome theme.
+    // Don't obscure a small slice with a separator wider than the slice.
+    var previous = shares.len;
+    for (shares, 0..) |amount, i| {
+        if (amount > 0) previous = i;
+    }
+    angle = start;
+    for (shares, 0..) |amount, i| {
+        if (amount == 0) continue;
+        if (previous != i and fraction(amount, all) >= 0.01 and fraction(shares[previous], all) >= 0.01) {
+            const edge: ui.Point = .{ .x = center.x + radius * @as(f32, @floatCast(@cos(angle))), .y = center.y + radius * @as(f32, @floatCast(@sin(angle))) };
+            cv.line(center, edge, .{ .width = 1, .color = background });
+        }
+        previous = i;
+        angle += std.math.tau * fraction(amount, all);
+    }
+}
+
+fn formatDate(c: *ui.Context, date: []const u8) ?[]const u8 {
+    if (date.len < 10 or date[4] != '-' or date[7] != '-') return null;
+    const year = std.fmt.parseInt(u16, date[0..4], 10) catch return null;
+    const month = std.fmt.parseInt(u8, date[5..7], 10) catch return null;
+    const day = std.fmt.parseInt(u8, date[8..10], 10) catch return null;
+    const names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    if (month == 0 or month > names.len or day == 0 or day > 31) return null;
+    return c.print("{s} {d}, {d}", .{ names[month - 1], day, year });
+}
+
+fn dateRange(c: *ui.Context, page: *const Page) []const u8 {
+    const start = formatDate(c, page.period_start) orelse return "This calendar month";
+    const end = formatDate(c, page.as_of) orelse return "This calendar month";
+    return c.print("{s} – {s}", .{ start, end });
+}
+
+fn percent(c: *ui.Context, n: u64, all: u64) []const u8 {
+    const share = fraction(n, all) * 100;
+    return if (n > 0 and share < 0.05) "<0.1%" else c.print("{d:.1}%", .{share});
+}
+
+fn legendRow(c: *ui.Context, k: theme.Colors, label: []const u8, amount: u64, all: u64, color: ui.Color, width: f32) void {
+    const line = ui.div(c).row().w(width).itemsCenter().gap(8);
+    defer line.end();
+    const dot = ui.canvas(c, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 } });
+    dot.circle(.{ .x = 6, .y = 6 }, 4, color);
+    var buf: [24]u8 = undefined;
+    ui.text(c, c.print("{s} · {s} · {s}", .{ label, abbreviated(amount, &buf), percent(c, amount, all) }), set.st(c, 12, .{ .color = k.text, .wrap = true }));
+}
+
+fn chartView(c: *ui.Context, k: theme.Colors, page: *Page, chart: Breakdown) void {
+    const side_by_side = set.inner_w >= 520;
+    const size = @min(194, set.inner_w);
+    const legend_width = if (side_by_side) set.inner_w - size - 24 else set.inner_w;
+    const layout = if (side_by_side) ui.div(c).row().w(set.inner_w).gap(24).itemsCenter() else ui.div(c).column().w(set.inner_w).gap(16);
+    defer layout.end();
+    var shares: [max_models + rollup_names.len]u64 = @splat(0);
+    for (chart.selected(), 0..) |i, slot| shares[slot] = tokens(page.rows[i]);
+    for (chart.rest, 0..) |amount, i| shares[max_models + i] = amount;
+    const colors = palette(k);
+    pie(c, size, &shares, chart.total, &colors, k.background);
+    const legend = ui.div(c).column().w(legend_width).gap(6);
+    defer legend.end();
+    ui.text(c, "Model (runtime) · Tokens · Share", set.st(c, 12, .{ .weight = .semibold, .color = k.muted }));
+    for (chart.selected(), 0..) |i, slot| {
+        const row = page.rows[i];
+        legendRow(c, k, c.print("{s} ({s})", .{ row.model, row.runtime }), tokens(row), chart.total, colors[slot], legend_width);
+    }
+    for (chart.rest, rollup_names, 0..) |amount, label, i| {
+        if (amount > 0) legendRow(c, k, label, amount, chart.total, colors[max_models + i], legend_width);
     }
 }
 
@@ -203,7 +323,7 @@ pub fn pageView(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const toolbar = ui.div(c).row().wFull().itemsCenter().gap(8);
         defer toolbar.end();
-        ui.text(c, if (page.period_start.len > 0) c.print("{s} through {s}", .{ page.period_start, page.as_of }) else "This calendar month", set.st(c, 12, .{ .color = k.muted }));
+        ui.text(c, dateRange(c, page), set.st(c, 12, .{ .color = k.muted, .wrap = true }));
         ui.spacer(c);
         ui.key(c, "settings-usage-refresh");
         const refresh = kit.pressFeedback(ui.div(c).row().px(11).py(7).gap(6).rounded(8).border(k.border).borderW(1).hover(k.hover).control());
@@ -228,32 +348,36 @@ pub fn pageView(c: *ui.Context, a: *App, k: theme.Colors) void {
                 defer warning.end();
                 ui.text(c, "Some local sources were unavailable or had unsupported records; totals may be partial.", set.st(c, 12, .{ .color = k.warning, .wrap = true }));
             }
-            const sum = total(page.rows, null);
-            if (sum == 0) {
+            const chart = breakdown(page.rows);
+            if (chart.total == 0) {
                 ui.text(c, "No recorded model usage for this month yet.", set.st(c, 13, .{ .color = k.muted }));
                 return;
             }
-            {
-                const chart = ui.div(c).column().w(set.inner_w).h(128).itemsCenter();
-                defer chart.end();
-                pie(c, page.rows, k, sum);
-            }
+            if (page.partial) set.space(c, 12);
+            var total_buf: [24]u8 = undefined;
+            ui.text(c, "Recorded tokens by model", set.st(c, 16, .{ .weight = .semibold, .color = k.text }));
+            ui.text(c, c.print("{s} tokens recorded", .{abbreviated(chart.total, &total_buf)}), set.st(c, 12, .{ .color = k.muted }));
+            set.space(c, 12);
+            chartView(c, k, page, chart);
+            set.space(c, 16);
+            ui.key(c, "settings-usage-details");
+            const details = kit.pressFeedback(ui.div(c).row().px(11).py(7).rounded(8).border(k.border).borderW(1).hover(k.hover).control());
+            _ = kit.focusRing(c, details, k.accent, 2);
+            ui.text(c, if (page.show_all) "Hide input and output by model" else "Show input and output by model", set.st(c, 12, .{ .color = k.text }));
+            if (details.clicked()) page.show_all = !page.show_all;
+            details.end();
+            if (!page.show_all) return;
             const list = ui.div(c).column().w(set.inner_w).gap(6);
             defer list.end();
-            var total_buf: [24]u8 = undefined;
-            ui.text(c, c.print("Total · {s} tokens", .{abbreviated(sum, &total_buf)}), set.st(c, 12, .{ .weight = .semibold, .color = k.text }));
-            ui.text(c, "Model / runtime · input · output · share", set.st(c, 12, .{ .weight = .semibold, .color = k.text }));
             for (page.rows) |row| {
                 var input_buf: [24]u8 = undefined;
                 var output_buf: [24]u8 = undefined;
-                const amount = row.input +| row.output;
-                const share: f32 = @as(f32, @floatFromInt(amount)) / @as(f32, @floatFromInt(sum)) * 100;
-                ui.text(c, c.print("{s} ({s}) · Input {s} · Output {s} · {d:.1}%", .{
-                    row.runtime,
+                ui.text(c, c.print("{s} ({s}) · Input {s} · Output {s} · {s}", .{
                     row.model,
+                    row.runtime,
                     abbreviated(row.input, &input_buf),
                     abbreviated(row.output, &output_buf),
-                    share,
+                    percent(c, tokens(row), chart.total),
                 }), set.st(c, 12, .{ .color = k.text, .wrap = true }));
             }
         },
