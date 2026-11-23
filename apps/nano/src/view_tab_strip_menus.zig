@@ -30,7 +30,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     else
         @min(anchor.y + anchor.h + 4, @max(8, c.size.h - est_h));
     {
-        const scrim_top = @import("motion_rules.zig").scrimTop(false, @import("panel_chrome.zig").header_height);
+        const scrim_top = @import("motion_rules.zig").scrimTop(false, a.view.chrome.y);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         if (scrim.clicked()) {
@@ -197,7 +197,7 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
     const x = rules.snapToWindow(anchor.x, width, c.size.w, 8);
     const y = rules.snapToWindow(if (footer and !flip) anchor.y - height - 4 else anchor.y + anchor.h + (if (footer) @as(f32, 4) else 0), height, c.size.h, 8);
     {
-        const scrim_top = @import("motion_rules.zig").scrimTop(footer, @import("panel_chrome.zig").header_height);
+        const scrim_top = @import("motion_rules.zig").scrimTop(footer, a.view.chrome.y);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         const scrim_hit = scrim.interaction();
