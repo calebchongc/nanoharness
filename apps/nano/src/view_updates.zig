@@ -151,7 +151,20 @@ pub const State = struct {
             whatsNew(&s.graff_highlights, &s.graff_highlight_lens, out, from, to)
         else
             0;
-        s.graff_card_open = kind != .updating;
+        s.graff_card_open = kind == .updated or kind == .available;
+        s.graff_updating_manual = false;
+        s.dirty = true;
+    }
+
+    pub fn clearGraff(s: *State) void {
+        s.acquire();
+        defer s.release();
+        s.graff_kind = .none;
+        s.graff_from_len = 0;
+        s.graff_to_len = 0;
+        s.graff_highlight_lens = @splat(0);
+        s.graff_highlights_total = 0;
+        s.graff_card_open = false;
         s.graff_updating_manual = false;
         s.dirty = true;
     }
