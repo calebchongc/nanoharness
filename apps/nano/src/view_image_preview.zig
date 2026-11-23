@@ -57,12 +57,17 @@ pub fn keys(c: *ui.Context, a: *App) bool {
     return true;
 }
 
-pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, bounds: ?ui.Rect) void {
+pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!visible(a)) return;
-    const r = bounds orelse return;
+    // The transcript owns the preview, but the preview uses the whole
+    // workspace. Neither fitting nor zooming should resize its split.
+    const top = a.view.chrome.y;
+    const r: ui.Rect = .{ .x = 0, .y = top, .w = c.size.w, .h = @max(0, c.size.h - top) };
     const cache = &a.attachments.images;
     const image = cache.preview orelse return;
     cache.focus_scope.begin(c);
+    ui.key(c, "chat-image-preview-backdrop");
+    ui.div(c).fixed().offset(r.x, r.y).size(r.w, r.h).bg(k.ink(0.2)).control().layer(6).end();
     ui.key(c, "chat-image-preview");
     const card = ui.div(c).fixed().offset(r.x + 8, r.y + 8).size(@max(1, r.w - 16), @max(1, r.h - 16)).column().p(12).gap(10).rounded(8).bg(k.background).border(k.accent.alpha(0.4)).borderW(1).clip().control().layer(6);
     defer card.end();

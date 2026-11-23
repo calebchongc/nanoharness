@@ -481,7 +481,12 @@ pub const Context = struct {
     }
 
     pub fn leafImpl(c: *Context, style: types.Style, content: Content, key: ?[]const u8) u32 {
-        return c.add(.{ .id = c.childId(key), .style = style, .content = content });
+        var owned = content;
+        // The laid-out nodes can be read between frames (for example by
+        // accessibility) after the app has changed or freed its model text.
+        // Keep the bytes with the nodes, until begin() rebuilds the frame.
+        if (owned == .text) owned.text.str = c.alloc().dupe(u8, owned.text.str) catch @panic("OOM");
+        return c.add(.{ .id = c.childId(key), .style = style, .content = owned });
     }
 
     pub fn node(c: *Context, index: u32) *Node {

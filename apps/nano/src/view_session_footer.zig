@@ -80,10 +80,15 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const follow_w: f32 = if (!show_follow) 0 else if (follow_glyph_only) 20 else 68;
     const acct_w: f32 = if (show_acct) 64 else 0;
     const follow_space: f32 = if (show_follow) follow_w + item_gap else 0;
-    const jump_space: f32 = if (show_jump) jump_size + item_gap else 0;
     const trailing_total: f32 = ctx_w + acct_w + (if (show_acct and has_ctx) item_gap else 0);
     const mid_gap: f32 = if (trailing_total > 0) item_gap else 0;
-    const chip_budget: f32 = @max(28, @min(248, w - pad_x * 2 - follow_space - jump_space - trailing_total - mid_gap));
+    const leading_budget = w - pad_x * 2 - follow_space - trailing_total - mid_gap;
+    const jump_style = kit.style(c, 12, 16, .{ .weight = .medium, .color = k.text });
+    const labeled_jump_w = if (show_jump) @ceil(c.text.width(jump_label, jump_style)) + 13 + 4 + 12 else jump_size;
+    // Keep room for the model name before adding a second text label.
+    const jump_w: f32 = if (leading_budget >= labeled_jump_w + item_gap + 88) labeled_jump_w else jump_size;
+    const jump_space: f32 = if (show_jump) jump_w + item_gap else 0;
+    const chip_budget: f32 = @max(28, @min(248, leading_budget - jump_space));
 
     const row = ui.div(c).row().w(w).h(height).px(pad_x).itemsCenter().clip();
     defer row.end();
@@ -93,7 +98,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         defer leading.end();
         model_w = composer_view.chipWithMax(c, a, k, chip_budget);
         if (show_follow) composer_view.followUpChip(c, a, k, follow_glyph_only);
-        if (show_jump) jumpButton(c, a, k);
+        if (show_jump) jumpButton(c, a, k, jump_w, jump_style);
     }
     {
         const rings_w: f32 = if (show_acct) 128 else if (has_ctx) ctx_w else 0;
@@ -115,14 +120,24 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
 
 /// Keep the jump available when reading older messages without overlaying them.
 fn jumpShown(a: *App) bool {
-    const threshold: f32 = if (a.view.jump_shown) 70 else 320;
+    // Only ignore normal end-of-scroll rounding and bounce, not a whole
+    // screenful of history in a short pane.
+    const threshold: f32 = if (a.view.jump_shown) 4 else 16;
     a.view.jump_shown = a.view.jump_box != 0 and a.view.jump_distance > threshold;
     return a.view.jump_shown;
 }
 
-fn jumpButton(c: *ui.Context, a: *App, k: theme.Colors) void {
+fn jumpButton(c: *ui.Context, a: *App, k: theme.Colors, w: f32, style: ui.TextStyle) void {
     ui.key(c, "jump-to-bottom");
-    if (!kit.iconButton(c, k, .@"alt-arrow-down", .{ .size = jump_size, .icon = 13, .tip = .{ .text = jump_label } })) return;
+    const labeled = w > jump_size;
+    var chip = ui.div(c).row().size(w, jump_size).center().gap(4).rounded(6).bg(k.ink(0.08)).hover(k.hover).control();
+    if (!labeled) chip = @import("view_tooltip.zig").on(chip, k, .{ .text = jump_label });
+    chip = kit.pressFeedback(chip);
+    defer chip.end();
+    const clicked = @import("control_behavior.zig").activate(c, chip, k, jump_label, true, false);
+    icons.icon(c, .@"alt-arrow-down", 13, k.text, 0);
+    if (labeled) ui.text(c, jump_label, style);
+    if (!clicked) return;
     const box = a.view.jump_box;
     c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
     c.scroll_follow.put(c.gpa, box, true) catch {};

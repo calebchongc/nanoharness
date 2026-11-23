@@ -315,6 +315,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
+    @import("view_image_preview.zig").draw(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
     settleSelectionPostTree(a, c);
     // After the overlays: a click that opens a menu has opened it.
@@ -404,8 +405,6 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     // The catch-up, a bot's details or the new-bot form take it the same way.
     if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
-    const parent = c.stack.items[c.stack.items.len - 1];
-    defer @import("view_image_preview.zig").draw(c, a, k, c.rects.get(c.node(parent).id));
     @import("view_backdrop.zig").draw(c, a, k);
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);

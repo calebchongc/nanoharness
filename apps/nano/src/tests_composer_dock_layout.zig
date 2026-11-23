@@ -239,8 +239,15 @@ test "composer dock puts the jump action below the input at every pane width" {
         a.view.jump_distance = 800;
         tester.ctx.scroll_follow.put(t.allocator, 777, false) catch unreachable;
         tester.settle(0.5);
-        try t.expect(!tester.hasText("Scroll to bottom"));
         const chip = try jumpRect(&tester);
+        switch (width) {
+            140 => try t.expect(tester.findText("Scroll to bottom") == null),
+            520 => {
+                const label = tester.findText("Scroll to bottom") orelse return error.MissingJumpLabel;
+                try t.expect(label.x >= chip.x and label.x + label.w <= chip.x + chip.w + 0.5);
+            },
+            else => {},
+        }
         const pill = a.view.composer_anchor orelse return error.MissingComposer;
         try t.expect(chip.x >= pill.x and chip.x + chip.w <= pill.x + pill.w + 0.5);
         try t.expect(chip.y >= pill.y + pill.h and chip.y + chip.h <= tester.size.h);
