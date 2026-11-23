@@ -52,7 +52,7 @@ pub const methods = [_]objc.Method{
 } ++ keys.methods ++ textinput.methods ++ a11y.methods;
 
 /// What drags from other apps may bring.
-pub const drag_types = [_][]const u8{ "public.url", "public.file-url", "public.utf8-plain-text" };
+pub const drag_types = [_][]const u8{ "public.url", "public.file-url", "public.png", "public.tiff", "public.utf8-plain-text" };
 
 fn surfaceOf(obj: objc.Object) ?*Surface {
     return objc.getZig(Surface, obj);

@@ -828,8 +828,11 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
         .bg(k.accent_wash).hover(k.accent.alpha(0.18)).border(k.accent.alpha(0.3)).borderW(1);
     defer row.end();
     {
+        const failed = !ready and !a.updates.app_downloading and a.updates.appFailed() != null;
         const hint = if (ready)
             c.print("Harness v{s} is ready. Click to restart into it.", .{ver})
+        else if (failed)
+            c.print("Updating to v{s} failed: {s}. Click to retry.", .{ ver, a.updates.appFailed().? })
         else
             c.print("Harness v{s} is available. {s}", .{ ver, if (a.updates.app_install_checked and !a.updates.app_can_install) "Click to view the release; install manually." else "Click to update." });
         const label = if (ready)
@@ -838,6 +841,8 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
             c.print("Downloading v{s}…", .{ver})
         else if (a.updates.app_install_checked and !a.updates.app_can_install)
             "View release"
+        else if (failed)
+            "Retry update"
         else
             c.print("Update to v{s}", .{ver});
         ui.key(c, "sidebar-update-restart");
@@ -1854,4 +1859,63 @@ test "classifyUpdateOutput distinguishes an installed bundle from a no-op (ADR 0
     // Verify build_info.version tracks Cargo.toml and is never a stale 0.2.175 cache.
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.2.175"));
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.0.0"));
+}
+
+test "multi-surface updater never offers Restart before installed target matches feed (#85)" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+
+    const ver_b = "99.0.1";
+    const ver_c = "99.0.2";
+    @memcpy(a.release.latest[0..ver_b.len], ver_b);
+    a.release.latest_len = ver_b.len;
+    a.release.succeeded = true;
+
+    // 1. Update available but not downloaded: every surface must offer Update, not Restart.
+    var sum_buf: [256]u8 = undefined;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_b, updateSummary(&sum_buf, &a, a.nowMs()).action.update);
+    {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const rows = collectUnifiedRows(&a, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 1), rows.len);
+        try std.testing.expectEqualStrings("Update", rows[0].action_label.?);
+        try std.testing.expect(!rows[0].updated);
+    }
+
+    // 2. Downloading shows progress and never Restart.
+    a.updates.app_downloading = true;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expect(updateSummary(&sum_buf, &a, a.nowMs()).action == .downloading);
+
+    // 3. vB finished installing, then vC became latest: stale vB must NOT show Restart as vC.
+    a.updates.app_downloading = false;
+    a.updates.setAppInstalled(ver_b);
+    try std.testing.expectEqualStrings(ver_b, appRestartVersion(&a).?);
+    @memcpy(a.release.latest[0..ver_c.len], ver_c);
+    a.release.latest_len = ver_c.len;
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.update);
+
+    // 4. Download of vC fails: Retry is offered on unified rows & Settings, not Restart.
+    a.updates.setAppFailed("checksum mismatch");
+    try std.testing.expect(appRestartVersion(&a) == null);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.retry);
+    {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const rows = collectUnifiedRows(&a, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 1), rows.len);
+        try std.testing.expectEqualStrings("Retry", rows[0].action_label.?);
+        try std.testing.expect(rows[0].failed);
+    }
+
+    // 5. vC succeeds: Restart is offered once with exact verified target vC.
+    a.updates.setAppFailed("");
+    a.updates.setAppInstalled(ver_c);
+    try std.testing.expectEqualStrings(ver_c, appRestartVersion(&a).?);
+    try std.testing.expectEqualStrings(ver_c, updateSummary(&sum_buf, &a, a.nowMs()).action.restart);
 }

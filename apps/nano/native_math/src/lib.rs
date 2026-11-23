@@ -194,21 +194,10 @@ fn preflight(source: &str) -> Result<(), String> {
                     // missing rule/style intent cannot be recovered reliably.
                     return Err(format!("Unsupported equation command: {name}"));
                 }
-                // parse_command consumes style declarations without retaining
-                // them; parse_atom retains limit modifiers only on named text
-                // operators, not Sum/Product/Integral. No downstream geometry
-                // correction can recover this lost scope/intent. Until the AST
-                // can represent it, report the limitation rather than silently
-                // rendering a different equation (including inside groups).
-                if matches!(
-                    name.as_str(),
-                    "displaystyle"
-                        | "textstyle"
-                        | "scriptstyle"
-                        | "scriptscriptstyle"
-                        | "limits"
-                        | "nolimits"
-                ) {
+                // parse_atom retains limit modifiers only on named text operators,
+                // not Sum/Product/Integral. Scoped style declarations are
+                // split at top-level/braced scope in `layout_source`.
+                if matches!(name.as_str(), "limits" | "nolimits") {
                     return Err(format!("Unsupported equation command: {name}"));
                 }
             }
@@ -447,63 +436,66 @@ fn validate_ast(root: &MathNode) -> Result<bool, String> {
     Ok(restore_relation_glue)
 }
 
+fn trivia(bytes: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'%') {
+            return i;
+        }
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+    }
+}
+
+fn command_end(bytes: &[u8], mut i: usize) -> usize {
+    if bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+        while bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+            i += 1;
+        }
+    } else if i < bytes.len() {
+        // Control symbols may be non-ASCII; advance to a UTF-8 boundary.
+        i += 1;
+        while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
+            i += 1;
+        }
+    }
+    i
+}
+
+fn group_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let (mut i, mut depth) = (start + 1, 1usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                i = trivia(bytes, i);
+                continue;
+            }
+            b'\\' => {
+                i = command_end(bytes, i + 1);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 // Rewrite only real math commands, never substrings in literal text, comments,
 // or escaped control sequences. The caller parses the original first, so this
 // cannot repair malformed input into an accepted equation. Keep the original
 // source for copying and cache keys; this temporary string is layout-only.
 fn normalize_absolute_hspace(source: &str, size: f32) -> Result<(String, Vec<Dim>), String> {
-    fn trivia(bytes: &[u8], mut i: usize) -> usize {
-        loop {
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if bytes.get(i) != Some(&b'%') {
-                return i;
-            }
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        }
-    }
-    fn command_end(bytes: &[u8], mut i: usize) -> usize {
-        if bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-            while bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
-                i += 1;
-            }
-        } else if i < bytes.len() {
-            // Control symbols may be non-ASCII; advance to a UTF-8 boundary.
-            i += 1;
-            while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
-                i += 1;
-            }
-        }
-        i
-    }
-    fn group_end(bytes: &[u8], start: usize) -> Option<usize> {
-        let (mut i, mut depth) = (start + 1, 1usize);
-        while i < bytes.len() {
-            match bytes[i] {
-                b'%' => {
-                    i = trivia(bytes, i);
-                    continue;
-                }
-                b'\\' => {
-                    i = command_end(bytes, i + 1);
-                    continue;
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
     let bytes = source.as_bytes();
     let (mut i, mut copied) = (0, 0);
     let mut out = String::new();
@@ -729,37 +721,626 @@ fn resolve_layout_spacing(
     }
 }
 
-fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, String> {
-    validate_size(size)?;
-    preflight(source)?;
+struct StyleSegment {
+    style: MathStyle,
+    source: String,
+    is_braced_group: bool,
+}
+
+fn style_for_command(name: &str) -> Option<MathStyle> {
+    match name {
+        "displaystyle" => Some(MathStyle::Display),
+        "textstyle" => Some(MathStyle::Text),
+        "scriptstyle" => Some(MathStyle::Script),
+        "scriptscriptstyle" => Some(MathStyle::ScriptScript),
+        _ => None,
+    }
+}
+
+fn is_literal_text_command(name: &str) -> bool {
+    matches!(
+        name,
+        "text"
+            | "textrm"
+            | "textit"
+            | "textbf"
+            | "textsf"
+            | "texttt"
+            | "mbox"
+            | "operatorname"
+            | "intertext"
+            | "label"
+            | "ref"
+    )
+}
+
+fn command_arg_counts(name: &str) -> (bool, u8) {
+    match name {
+        "sqrt" => (true, 1),
+        "fcolorbox" | "definecolor" => (false, 3),
+        "frac" | "dfrac" | "tfrac" | "cfrac" | "binom" | "dbinom" | "tbinom" | "cancelto"
+        | "overset" | "underset" | "stackrel" | "textcolor" | "colorbox" | "rule" => (false, 2),
+        "hat"
+        | "check"
+        | "breve"
+        | "acute"
+        | "grave"
+        | "tilde"
+        | "bar"
+        | "vec"
+        | "dot"
+        | "ddot"
+        | "dddot"
+        | "ddddot"
+        | "widehat"
+        | "widetilde"
+        | "overline"
+        | "underline"
+        | "overbrace"
+        | "underbrace"
+        | "overleftarrow"
+        | "overrightarrow"
+        | "overleftrightarrow"
+        | "underleftarrow"
+        | "underrightarrow"
+        | "underleftrightarrow"
+        | "cancel"
+        | "bcancel"
+        | "xcancel"
+        | "boxed"
+        | "fbox"
+        | "mathring"
+        | "mathrm"
+        | "mathbf"
+        | "mathit"
+        | "mathsf"
+        | "mathtt"
+        | "mathbb"
+        | "mathcal"
+        | "mathfrak"
+        | "mathscr"
+        | "hspace"
+        | "phantom"
+        | "vphantom"
+        | "hphantom"
+        | "substack"
+        | "tag"
+        | "text"
+        | "textrm"
+        | "textit"
+        | "textbf"
+        | "textsf"
+        | "texttt"
+        | "mbox"
+        | "operatorname"
+        | "label"
+        | "ref"
+        | "intertext" => (false, 1),
+        _ => (false, 0),
+    }
+}
+
+fn has_non_trivia(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    trivia(bytes, 0) < bytes.len()
+}
+
+fn skip_bracket_arg(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                i = trivia(bytes, i);
+                continue;
+            }
+            b'\\' => {
+                i = command_end(bytes, i + 1);
+                continue;
+            }
+            b'{' => {
+                i = group_end(bytes, i)? + 1;
+                continue;
+            }
+            b']' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn contains_style_declaration(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            i = trivia(bytes, i);
+            continue;
+        }
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let end = command_end(bytes, i + 1);
+        let name = &source[i + 1..end];
+        if style_for_command(name).is_some() {
+            return true;
+        }
+        if is_literal_text_command(name) {
+            let mut after = trivia(bytes, end);
+            if matches!(name, "operatorname" | "tag") && bytes.get(after) == Some(&b'*') {
+                after = trivia(bytes, after + 1);
+            }
+            if bytes.get(after) == Some(&b'{')
+                && let Some(close) = group_end(bytes, after)
+            {
+                i = close + 1;
+                continue;
+            }
+        }
+        i = end;
+    }
+    false
+}
+
+// Split depth-0 style switches (`\displaystyle ...`) and standalone braced
+// style groups (`{\displaystyle ...}`) into per-style segments. Commands
+// nested inside fractions, scripts, delimiters, or environments stay inside
+// their enclosing segment and are rejected below rather than silently ignored.
+fn split_style_segments(source: &str, base_style: MathStyle) -> Result<Vec<StyleSegment>, String> {
+    let bytes = source.as_bytes();
+    let mut segments = Vec::new();
+    let mut current_style = base_style;
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    let mut env_depth = 0usize;
+    let mut delim_depth = 0usize;
+    let mut pending_opt_arg = false;
+    let mut pending_brace_args = 0u8;
+    let mut trailing_switch = false;
+    let mut need_tail = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                i = trivia(bytes, i);
+                continue;
+            }
+            b if b.is_ascii_whitespace() => {
+                i += 1;
+                continue;
+            }
+            b'\\' => {
+                let cmd_start = i;
+                let end = command_end(bytes, i + 1);
+                let name = &source[i + 1..end];
+                if name == "begin" {
+                    env_depth += 1;
+                    i = end;
+                    continue;
+                }
+                if name == "end" {
+                    env_depth = env_depth.saturating_sub(1);
+                    i = end;
+                    continue;
+                }
+                if name == "left" {
+                    delim_depth += 1;
+                    i = end;
+                    continue;
+                }
+                if name == "right" {
+                    delim_depth = delim_depth.saturating_sub(1);
+                    i = end;
+                    continue;
+                }
+                if env_depth > 0 || delim_depth > 0 || trailing_switch {
+                    i = end;
+                    continue;
+                }
+                if pending_brace_args > 0 {
+                    let (opt, args) = command_arg_counts(name);
+                    pending_opt_arg = opt;
+                    pending_brace_args = (pending_brace_args - 1).saturating_add(args);
+                    i = end;
+                    continue;
+                }
+                if let Some(new_style) = style_for_command(name) {
+                    let prefix = &source[seg_start..cmd_start];
+                    if has_non_trivia(prefix) {
+                        segments.push(StyleSegment {
+                            style: current_style,
+                            source: prefix.to_string(),
+                            is_braced_group: false,
+                        });
+                    }
+                    current_style = new_style;
+                    need_tail = true;
+                    seg_start = end;
+                    i = end;
+                    continue;
+                }
+                if name == "color" {
+                    trailing_switch = true;
+                    i = end;
+                    continue;
+                }
+                if is_literal_text_command(name) {
+                    let mut after = trivia(bytes, end);
+                    if matches!(name, "operatorname" | "tag") && bytes.get(after) == Some(&b'*') {
+                        after = trivia(bytes, after + 1);
+                    }
+                    if bytes.get(after) == Some(&b'{')
+                        && let Some(close) = group_end(bytes, after)
+                    {
+                        i = close + 1;
+                        pending_opt_arg = false;
+                        pending_brace_args = 0;
+                        continue;
+                    }
+                }
+                let (opt, args) = command_arg_counts(name);
+                pending_opt_arg = opt;
+                pending_brace_args = args;
+                i = end;
+            }
+            b'^' | b'_' if env_depth == 0 && delim_depth == 0 => {
+                pending_brace_args = 1;
+                pending_opt_arg = false;
+                i += 1;
+            }
+            b'[' if env_depth == 0 && delim_depth == 0 && pending_opt_arg => {
+                if let Some(close) = skip_bracket_arg(bytes, i) {
+                    pending_opt_arg = false;
+                    i = close + 1;
+                } else {
+                    pending_opt_arg = false;
+                    i += 1;
+                }
+            }
+            b'{' => {
+                let close =
+                    group_end(bytes, i).ok_or_else(|| "Unmatched brace in equation".to_string())?;
+                if env_depth > 0 || delim_depth > 0 || trailing_switch {
+                    i = close + 1;
+                    continue;
+                }
+                if pending_brace_args > 0 {
+                    pending_brace_args -= 1;
+                    pending_opt_arg = false;
+                    i = close + 1;
+                    continue;
+                }
+                let inner_start = trivia(bytes, i + 1);
+                if inner_start < close && bytes[inner_start] == b'\\' {
+                    let cmd_end = command_end(bytes, inner_start + 1);
+                    let name = &source[inner_start + 1..cmd_end];
+                    if let Some(group_style) = style_for_command(name) {
+                        let body = &source[cmd_end..close];
+                        if !has_non_trivia(body) {
+                            return Err(format!("Unsupported empty math style group: {name}"));
+                        }
+                        if contains_style_declaration(body) {
+                            return Err(format!("Unsupported nested equation command: {name}"));
+                        }
+                        let prefix = &source[seg_start..i];
+                        if has_non_trivia(prefix) {
+                            segments.push(StyleSegment {
+                                style: current_style,
+                                source: prefix.to_string(),
+                                is_braced_group: false,
+                            });
+                        }
+                        segments.push(StyleSegment {
+                            style: group_style,
+                            source: body.to_string(),
+                            is_braced_group: true,
+                        });
+                        need_tail = false;
+                        seg_start = close + 1;
+                        i = close + 1;
+                        continue;
+                    }
+                }
+                i = close + 1;
+            }
+            _ => {
+                if env_depth == 0 && delim_depth == 0 {
+                    pending_opt_arg = false;
+                    if pending_brace_args > 0 {
+                        pending_brace_args -= 1;
+                    }
+                }
+                i += 1;
+                while bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80) {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    let tail = &source[seg_start..];
+    if has_non_trivia(tail) {
+        segments.push(StyleSegment {
+            style: current_style,
+            source: tail.to_string(),
+            is_braced_group: false,
+        });
+    } else if need_tail {
+        return Err("Unsupported trailing math style declaration".into());
+    }
+    Ok(segments)
+}
+
+fn atom_kind_index(kind: AtomKind) -> usize {
+    match kind {
+        AtomKind::Ord => 0,
+        AtomKind::Op => 1,
+        AtomKind::Bin => 2,
+        AtomKind::Rel => 3,
+        AtomKind::Open => 4,
+        AtomKind::Close => 5,
+        AtomKind::Punct => 6,
+        AtomKind::Inner => 7,
+    }
+}
+
+fn tex_convert_bin(prev: Option<AtomKind>, kind: AtomKind, next: Option<AtomKind>) -> AtomKind {
+    if kind != AtomKind::Bin {
+        return kind;
+    }
+    let invalid_prev = matches!(
+        prev,
+        None | Some(
+            AtomKind::Bin | AtomKind::Op | AtomKind::Rel | AtomKind::Open | AtomKind::Punct
+        )
+    );
+    let invalid_next = matches!(
+        next,
+        None | Some(AtomKind::Rel | AtomKind::Close | AtomKind::Punct)
+    );
+    if invalid_prev || invalid_next {
+        AtomKind::Ord
+    } else {
+        AtomKind::Bin
+    }
+}
+
+// Mirror latex-rust's private layout::space::TABLE inter-atom spacing table.
+fn tex_atom_space_mu(left: AtomKind, right: AtomKind, style: MathStyle) -> i64 {
+    const TABLE: [[i8; 8]; 8] = [
+        [0, 3, -4, -5, 0, 0, 0, -3],
+        [3, 3, 0, -5, 0, 0, 0, -3],
+        [-4, -4, 0, 0, -4, 0, 0, -4],
+        [-5, -5, 0, 0, 5, 0, 0, -5],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 3, -4, -5, 0, 0, 0, -3],
+        [-3, -3, 0, -3, -3, -3, -3, -3],
+        [-3, 3, -4, -5, -3, 0, -3, -3],
+    ];
+    let raw = TABLE[atom_kind_index(left)][atom_kind_index(right)];
+    if raw > 0 {
+        i64::from(raw)
+    } else if raw < 0 && style.script_level() == 0 {
+        i64::from(-raw)
+    } else {
+        0
+    }
+}
+
+fn boundary_atom_kind(node: &MathNode) -> Option<AtomKind> {
+    spacing_atom_kind(node).or(match node {
+        MathNode::Space(_) | MathNode::Label(_) | MathNode::NoNumber | MathNode::Hline => None,
+        MathNode::ColorBox(_, _) | MathNode::FColorBox(_, _, _) => Some(AtomKind::Inner),
+        _ => Some(AtomKind::Ord),
+    })
+}
+
+fn is_non_printing_node(node: &MathNode) -> bool {
+    matches!(
+        node,
+        MathNode::Space(_) | MathNode::Label(_) | MathNode::NoNumber | MathNode::Hline
+    )
+}
+
+fn insert_edge_strut(ast: &mut MathNode, at_start: bool, at_end: bool) {
+    if !at_start && !at_end {
+        return;
+    }
+    if !matches!(ast, MathNode::Row(_)) {
+        let single = std::mem::replace(ast, MathNode::Row(Vec::new()));
+        *ast = MathNode::Row(vec![single]);
+    }
+    if let MathNode::Row(nodes) = ast {
+        if at_start && let Some(first_idx) = nodes.iter().position(|n| !is_non_printing_node(n)) {
+            nodes.insert(first_idx, MathNode::Strut(Dim::zero(), Dim::zero()));
+        }
+        if at_end && let Some(last_idx) = nodes.iter().rposition(|n| !is_non_printing_node(n)) {
+            nodes.insert(last_idx + 1, MathNode::Strut(Dim::zero(), Dim::zero()));
+        }
+    }
+}
+
+fn parse_normalized_ast(source: &str, size: f32) -> Result<(MathNode, Vec<Dim>, bool), String> {
     let (ast, _) =
         latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
             .map_err(|e| e.to_string())?;
     // Reject user-provided marker values and bound traversal before rewriting.
     let restore_relation_glue = validate_ast(&ast)?;
     let (normalized, spaces) = normalize_absolute_hspace(source, size)?;
-    let mut ast = if normalized == source {
+    let ast = if normalized == source {
         ast
     } else {
         latex_rust::parse_with_options(&normalized, &ParseOptions::new().with_max_depth(MAX_DEPTH))
             .map_err(|e| e.to_string())?
             .0
     };
-    let style = if display {
+    Ok((ast, spaces, restore_relation_glue))
+}
+
+fn layout_source(source: &str, display: bool, size: f32) -> Result<MathBox, String> {
+    validate_size(size)?;
+    preflight(source)?;
+    // Parse the full source first so segmentation never hides syntax or depth errors.
+    let _ = latex_rust::parse_with_options(source, &ParseOptions::new().with_max_depth(MAX_DEPTH))
+        .map_err(|e| e.to_string())?;
+    let base_style = if display {
         MathStyle::Display
     } else {
         MathStyle::Text
     };
-    if restore_relation_glue || !spaces.is_empty() {
-        let params = MathParams::from_font(font()?).map_err(|e| e.to_string())?;
-        resolve_layout_spacing(&mut ast, style, &spaces, &params);
+    let segments = split_style_segments(source, base_style)?;
+    if segments.is_empty() {
+        return Err("Equation is empty or exceeds source size limit".into());
     }
-    validate_ast(&ast)?;
-    // Layout's own recursion guard is 32. The AST is restricted further above.
+    for segment in &segments {
+        if contains_style_declaration(&segment.source) {
+            return Err("Unsupported nested equation math style declaration".into());
+        }
+    }
     // 1 logical CSS pixel = 3/4 point; this matters for AMS absolute spacing.
     let em_pt = Dim::from_ieee32_bits((size * 0.75).to_bits());
-    let tree = latex_rust::layout_with_em_size_pt(&ast, font()?, style, &em_pt)
-        .map_err(|e| e.to_string())?;
+    let params = MathParams::from_font(font()?).map_err(|e| e.to_string())?;
+
+    let tree = if segments.len() == 1 {
+        let seg = &segments[0];
+        let (mut ast, spaces, restore_relation_glue) = parse_normalized_ast(&seg.source, size)?;
+        if restore_relation_glue || !spaces.is_empty() {
+            resolve_layout_spacing(&mut ast, seg.style, &spaces, &params);
+        }
+        validate_ast(&ast)?;
+        // Layout's own recursion guard is 32. The AST is restricted further above.
+        latex_rust::layout_with_em_size_pt(&ast, font()?, seg.style, &em_pt)
+            .map_err(|e| e.to_string())?
+    } else {
+        struct ParsedSegment {
+            style: MathStyle,
+            is_braced_group: bool,
+            ast: MathNode,
+            raw_kinds: Vec<AtomKind>,
+            outer_first: Option<AtomKind>,
+            outer_last: Option<AtomKind>,
+            left_has_strut: bool,
+            right_has_strut: bool,
+        }
+
+        let mut parsed = Vec::with_capacity(segments.len());
+        for seg in &segments {
+            let (mut ast, spaces, restore_relation_glue) = parse_normalized_ast(&seg.source, size)?;
+            if restore_relation_glue || !spaces.is_empty() {
+                resolve_layout_spacing(&mut ast, seg.style, &spaces, &params);
+            }
+            validate_ast(&ast)?;
+            let raw_kinds: Vec<AtomKind> = match &ast {
+                MathNode::Row(nodes) => nodes.iter().filter_map(boundary_atom_kind).collect(),
+                node => boundary_atom_kind(node).into_iter().collect(),
+            };
+            parsed.push(ParsedSegment {
+                style: seg.style,
+                is_braced_group: seg.is_braced_group,
+                ast,
+                raw_kinds,
+                outer_first: None,
+                outer_last: None,
+                left_has_strut: false,
+                right_has_strut: false,
+            });
+        }
+
+        // Resolve TeX atom classes left-to-right across segment boundaries so
+        // binary operators split by style scopes retain binary status/glue.
+        for idx in 0..parsed.len() {
+            let prev_outer = idx.checked_sub(1).and_then(|p| parsed[p].outer_last);
+            let next_raw_first = parsed.get(idx + 1).and_then(|n| {
+                if n.is_braced_group {
+                    Some(AtomKind::Ord)
+                } else {
+                    n.raw_kinds.first().copied()
+                }
+            });
+            if parsed[idx].is_braced_group {
+                parsed[idx].outer_first = Some(AtomKind::Ord);
+                parsed[idx].outer_last = Some(AtomKind::Ord);
+                continue;
+            }
+            let kinds = &parsed[idx].raw_kinds;
+            if kinds.is_empty() {
+                parsed[idx].outer_last = prev_outer;
+                continue;
+            }
+            let mut left = prev_outer;
+            let mut first_eff = None;
+            let mut prev_before_last = prev_outer;
+            for pos in 0..kinds.len() {
+                let raw = kinds[pos];
+                let right = kinds.get(pos + 1).copied().or(next_raw_first);
+                let conv = tex_convert_bin(left, raw, right);
+                if pos == 0 {
+                    first_eff = Some(conv);
+                }
+                if pos + 1 == kinds.len() {
+                    prev_before_last = left;
+                }
+                left = Some(conv);
+            }
+            parsed[idx].outer_first = first_eff;
+            parsed[idx].outer_last = left;
+
+            let lead_bin_valid = parsed[idx].raw_kinds.first() == Some(&AtomKind::Bin)
+                && first_eff == Some(AtomKind::Bin)
+                && matches!(
+                    prev_outer,
+                    Some(AtomKind::Ord | AtomKind::Close | AtomKind::Inner)
+                );
+            let trail_bin_valid = parsed[idx].raw_kinds.last() == Some(&AtomKind::Bin)
+                && left == Some(AtomKind::Bin)
+                && matches!(
+                    prev_before_last,
+                    Some(AtomKind::Ord | AtomKind::Close | AtomKind::Inner)
+                )
+                && matches!(
+                    next_raw_first,
+                    Some(
+                        AtomKind::Ord
+                            | AtomKind::Op
+                            | AtomKind::Bin
+                            | AtomKind::Open
+                            | AtomKind::Inner
+                    )
+                );
+            parsed[idx].left_has_strut = lead_bin_valid;
+            parsed[idx].right_has_strut = trail_bin_valid;
+            insert_edge_strut(&mut parsed[idx].ast, lead_bin_valid, trail_bin_valid);
+        }
+
+        let mut boxes = Vec::with_capacity(parsed.len() * 2);
+        let mut last_non_empty: Option<usize> = None;
+        for (idx, seg) in parsed.iter().enumerate() {
+            if let Some(prev_idx) = last_non_empty
+                && let (Some(left_kind), Some(right_kind)) =
+                    (parsed[prev_idx].outer_last, seg.outer_first)
+                && !parsed[prev_idx].right_has_strut
+                && !seg.left_has_strut
+            {
+                let boundary_style = if parsed[prev_idx].is_braced_group {
+                    base_style
+                } else {
+                    seg.style
+                };
+                let mu = tex_atom_space_mu(left_kind, right_kind, boundary_style);
+                if mu != 0 {
+                    boxes.push(MathBox::kern(params.mu(boundary_style) * Dim::from_i64(mu)));
+                }
+            }
+            let bx = latex_rust::layout_with_em_size_pt(&seg.ast, font()?, seg.style, &em_pt)
+                .map_err(|e| e.to_string())?;
+            boxes.push(bx);
+            if !seg.raw_kinds.is_empty() || seg.is_braced_group {
+                last_non_empty = Some(idx);
+            }
+        }
+        MathBox::hpack(boxes)
+    };
+
     let mut pending = vec![(&tree, 0usize)];
     let mut count = 0;
     while let Some((node, depth)) = pending.pop() {
@@ -1073,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_math_style_declarations_are_not_silently_ignored() {
+    fn explicit_math_style_declarations_apply_scoped_styles_and_reject_nested() {
         for command in [
             "displaystyle",
             "textstyle",
@@ -1087,12 +1668,56 @@ mod tests {
                         format!(r"x+{{\{command} {body}}}"),
                     ] {
                         assert!(
-                            render_svg(&source, display, 20.0, [0; 4]).is_err(),
-                            "silently ignored: {source}"
+                            render_svg(&source, display, 20.0, [0; 4]).is_ok(),
+                            "failed valid style declaration: {source}"
                         );
                     }
                 }
             }
+        }
+
+        let disp_inline = render_svg(r"\displaystyle \frac{p+q}{r}", false, 20.0, [0; 4]).unwrap();
+        let disp_block = render_svg(r"\frac{p+q}{r}", true, 20.0, [0; 4]).unwrap();
+        assert!((disp_inline.height - disp_block.height).abs() < 0.01);
+        assert!((disp_inline.width - disp_block.width).abs() < 0.01);
+        assert_eq!(disp_inline.svg, disp_block.svg);
+
+        let text_in_block = render_svg(r"\textstyle \frac{a}{b}", true, 20.0, [0; 4]).unwrap();
+        let text_inline = render_svg(r"\frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!((text_in_block.height - text_inline.height).abs() < 0.01);
+        assert!((text_in_block.width - text_inline.width).abs() < 0.01);
+
+        let script = render_svg(r"\scriptstyle \frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        let scriptscript =
+            render_svg(r"\scriptscriptstyle \frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!(script.height < text_inline.height);
+        assert!(scriptscript.height < script.height);
+
+        let braced = render_svg(r"x+{\displaystyle \frac{a}{b}}", false, 20.0, [0; 4]).unwrap();
+        let plain = render_svg(r"x+\frac{a}{b}", false, 20.0, [0; 4]).unwrap();
+        assert!(braced.height > plain.height);
+
+        let spaced_eq =
+            render_svg(r"{\displaystyle \frac{a}{b}} = 1", false, 20.0, [0; 4]).unwrap();
+        let unspaced_eq = render_svg(r"{\displaystyle \frac{a}{b}}1", false, 20.0, [0; 4]).unwrap();
+        assert!(spaced_eq.width > unspaced_eq.width);
+
+        for unsupported in [
+            r"\frac{\displaystyle a}{b}",
+            r"\frac{a}{\displaystyle b}",
+            r"x^{\displaystyle 2}",
+            r"x_{\displaystyle i}",
+            r"\left(\displaystyle x\right)",
+            r"\begin{matrix}\displaystyle a\end{matrix}",
+            r"{\displaystyle}",
+            r"x+\displaystyle",
+            r"{\displaystyle {\scriptscriptstyle x}}",
+            r"\color{red}\displaystyle \frac{a}{b}",
+        ] {
+            assert!(
+                render_svg(unsupported, false, 20.0, [0; 4]).is_err(),
+                "unexpectedly accepted nested/empty style command: {unsupported}"
+            );
         }
     }
 
