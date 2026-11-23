@@ -112,6 +112,36 @@ test "workspace tab labels do not cover the conversation with hover tooltips" {
     }
 }
 
+test "workspace chrome hides the unused side panel control and keeps New tab accessible without a bubble" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.view.sidebar_open = false;
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+
+    var plus: ?ui.Rect = null;
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.rects.get(item.id) orelse continue;
+        if (r.y >= chrome.header_height) continue;
+        try testing.expect(!std.mem.eql(u8, item.label, "Toggle side panel"));
+        if (std.mem.eql(u8, item.label, "New tab")) plus = r;
+    }
+    const rect = plus orelse return error.MissingNewTabButton;
+    h.t.moveTo(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    h.t.advance(0.8);
+    try testing.expect(h.t.tooltipText() == null);
+
+    h.a.focusPane(0);
+    h.t.settle(1);
+    h.press(.{ .key = 'r', .cmd = true });
+    try testing.expect(h.a.panels.host_open);
+    for (h.t.ctx.a11y_items.items) |item| {
+        if (std.mem.eql(u8, item.label, "Toggle side panel")) return;
+    }
+    return error.MissingSidePanelToggle;
+}
+
 test "saved GPUI tabs reopen in order with their active chat" {
     var h: Harness = undefined;
     try h.init(true);
@@ -179,16 +209,22 @@ test "unified strip: split slots own both titles without a second peer header" {
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.t.settle(1);
-    const alpha = h.topText("Alpha") orelse return error.MissingFirstSlot;
-    const draft = h.topText("New tab") orelse return error.MissingSecondSlot;
-    try testing.expect(draft.x > alpha.x);
-    try testing.expect(h.a.view.chrome.strip);
-    const expected = chrome.paneSpan(h.a.view.chrome.chat_width, 0.5, 2, true);
-    try testing.expect(expected > 220);
+    var alpha: ?ui.Rect = null;
+    var draft: ?ui.Rect = null;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |tx| if (std.mem.eql(u8, tx.str, "Alpha") and node.rect.x >= h.a.view.sidebar_width and node.rect.y >= 42) return error.DuplicatePeerHeader,
+        .text => |tx| {
+            if (node.rect.x < h.a.view.sidebar_width) continue;
+            if (std.mem.eql(u8, tx.str, "Alpha")) {
+                try testing.expect(alpha == null);
+                try testing.expect(node.rect.y >= chrome.header_height and node.rect.y < h.a.view.chrome.y);
+                alpha = node.rect;
+            }
+            if (std.mem.eql(u8, tx.str, "New tab") and node.rect.y >= chrome.header_height and node.rect.y < h.a.view.chrome.y) draft = node.rect;
+        },
         else => {},
     };
+    try testing.expect((draft orelse return error.MissingSecondSlot).x > (alpha orelse return error.MissingFirstSlot).x);
+    try testing.expect(h.a.view.chrome.strip);
 }
 
 test "unified strip: Cmd T opens a new top-level tab and restores the split draft on close" {

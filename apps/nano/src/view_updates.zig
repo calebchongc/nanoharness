@@ -1212,13 +1212,6 @@ pub fn topbarUpdatesWidth(a: *const App) f32 {
     return 5 + stack_w + 6 + 16 + 8;
 }
 
-pub fn topbarTrailingReserve(a: *const App) f32 {
-    if (a.view.settings_open) return 0;
-    const uw = topbarUpdatesWidth(a);
-    const total = uw + (if (uw > 0) @as(f32, 6) else 0) + 28;
-    return total + 10;
-}
-
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.updates.acquire();
     const was_dirty = a.updates.dirty;
