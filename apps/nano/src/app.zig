@@ -198,6 +198,7 @@ pub const View = struct {
     /// Top-right unified updates popover state & anchor (`view_updates.zig`).
     before_after: @import("view_before_after.zig").State = .{},
     gallery: @import("view_image_gallery.zig").State = .{},
+    design: @import("design_canvas.zig").State = .{},
     updates_popover: bool = false,
     updates_anchor: ?nanoui.ui.Rect = null,
     /// Sidebar `#star-banner` context menu state & last opened external URL.
@@ -257,6 +258,7 @@ pub const View = struct {
         @import("text_buffer.zig").deinit(&v.subagent_steer);
         v.project_setup.deinit();
         v.open_chooser.deinit();
+        v.design.deinit();
         @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
         if (v.custom_theme_req_id) |id| gpa.free(id);
         v.custom_theme_error.deinit(gpa);
@@ -540,6 +542,8 @@ pub const App = struct {
     nav_index: usize = 0,
     nav_initialized: bool = false,
     nav_restoring: bool = false,
+    /// `justrach/browse` Connected Apps (`v1-p256-sig`) client, lazily created.
+    browse_conn: ?*@import("browse_connect.zig").Client = null,
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -630,6 +634,11 @@ pub const App = struct {
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();
+        if (a.browse_conn) |bc| {
+            bc.deinit();
+            a.gpa.destroy(bc);
+            a.browse_conn = null;
+        }
         a.actions.deinit();
         a.transcript.deinit();
         for (a.retired.items) |*t| t.deinit();
@@ -676,6 +685,15 @@ pub const App = struct {
     pub const applyLiveServiceTier = agent.applyLiveServiceTier;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
+    pub fn ensureBrowseClient(a: *App) *@import("browse_connect.zig").Client {
+        if (a.browse_conn) |bc| return bc;
+        const bc = a.gpa.create(@import("browse_connect.zig").Client) catch @panic("OOM");
+        bc.* = @import("browse_connect.zig").Client.init(a.gpa, a.io);
+        bc.setSession(a.selected);
+        a.browse_conn = bc;
+        return bc;
+    }
+
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
         // Explicit archival is not an undoable side effect of closing a tab.
         if (archived) a.tabs.clearAutoArchived(id);
@@ -831,6 +849,24 @@ pub const App = struct {
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (a.window != null and !a.offscreen) if (a.browse_conn) |bc| {
+            const ux_bc = @import("ux_rules.zig").BrowseConnect;
+            const browser_vis = a.panels.host_open and if (a.panels.activeTab()) |tb|
+                (tb.kind == .browser and if (tb.browser) |br| ux_bc.routeUrl(br.url) == .external_browse and br.belongsTo(a.selected) else false) or
+                    (tb.kind == .design_canvas and a.view.design.source == .browse_snapshot)
+            else
+                false;
+            const now_ms = std.Io.Clock.Timestamp.now(a.io, .real).raw.toMilliseconds();
+            const last_ms = bc.lastFrameMs();
+            const elapsed_u: u32 = if (now_ms > last_ms) @intCast(@min(now_ms - last_ms, 60_000)) else 0;
+            if (ux_bc.shouldPollFrame(bc.status(), browser_vis, elapsed_u, bc.inFlight())) {
+                bc.spawnOp(.refresh, "", 0, 0);
+            }
+            if (browser_vis and bc.status() == .connected) {
+                const deadline = now + 0.8;
+                next = if (next) |n| @min(n, deadline) else deadline;
+            }
+        };
         if (a.w_queue.retry_at) |t| if (now >= t) {
             a.w_queue = .{};
             queue_mod.watch(a);
@@ -1422,20 +1458,20 @@ pub const App = struct {
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {
         const strip = @import("view_tab_strip.zig");
-        const rules = @import("motion_rules.zig");
-        const active_surface: rules.CloseSurface = switch (strip.active(a)) {
+        const focus_close = @import("ux_rules.zig").FocusAndClose;
+        const active_surface: focus_close.SurfaceFocus = switch (strip.active(a)) {
             .chat => .chat,
-            .host => .host,
+            .host => if (a.panels.activeTab()) |t| (if (t.kind == .design_canvas) .design_canvas else .host) else .host,
             .files => .files,
         };
-        const split_panes = strip.chatCount(a);
-        const group_tabs = if (a.tabs.layout()) |s| s.groups[s.focus].count() else 1;
+        const split_panes: u32 = @intCast(strip.chatCount(a));
+        const group_tabs: u32 = @intCast(if (a.tabs.layout()) |s| s.groups[s.focus].count() else 1);
         const zoomed = if (a.tabs.layout()) |s| s.zoomed else false;
         const host_bg_open = strip.hasHost(a) and a.panels.activeTab() != null;
         const expanded = a.view.strip.expanded != null or zoomed;
         const ac = @import("archive_close.zig");
         const needs_ask = ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null);
-        switch (rules.decideCloseTarget(
+        switch (focus_close.decideClose(
             active_surface,
             a.view.close_choice,
             group_tabs,
@@ -1445,8 +1481,8 @@ pub const App = struct {
             a.isOnlyNewChat(),
             needs_ask,
         )) {
-            .confirm_choice => return a.chooseCloseArchiving(false),
-            .close_host => {
+            .confirm_archive_choice => return a.chooseCloseArchiving(false),
+            .close_host_tab, .close_design_canvas => {
                 a.view.close_choice = false;
                 if (a.panels.active < a.panels.tabs.items.len) @import("app_panels.zig").closeTab(a, a.panels.active) else a.panels.host_open = false;
                 a.view.strip.menu = null;
@@ -1458,11 +1494,11 @@ pub const App = struct {
                 return a.redraw();
             },
             .noop => return a.redraw(),
-            .ask_choice => {
+            .ask_archive_choice => {
                 a.view.close_choice = true;
                 return a.redraw();
             },
-            .close_pane_tab, .close_split_pane, .close_tab => {
+            .close_pane_tab, .close_split_pane, .close_workspace_tab => {
                 a.closeArchiving(a.settings.get(.archive_sessions_on_close));
             },
         }

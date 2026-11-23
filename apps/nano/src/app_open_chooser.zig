@@ -52,6 +52,7 @@ pub const State = struct {
 };
 
 pub fn open(a: *App, intent: Intent) void {
+    @import("view.zig").closeTransientPopovers(a);
     const s = &a.view.open_chooser;
     const generation = s.generation +% 1;
     const alloc = s.reset(a.gpa);

@@ -339,7 +339,32 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.setup != null or v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
+        v.updates_popover or v.star_menu or v.account_menu or v.theme_menu != null or v.account_usage.open or v.agent_work.pinned or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.theme_import != null or v.dialogs.rename != null or v.dialogs.delete != null or v.search.focus or a.picker != .none or a.actions.menu or a.actions.editor != null or a.actions.command_review != null;
+}
+
+/// Enforces `Nano.OverlayMutex`: clears all Tier-1 popovers before opening a
+/// new popover, palette, or modal sheet so simultaneous menus never stack.
+pub fn closeTransientPopovers(a: *App) void {
+    const v = &a.view;
+    v.account_menu = false;
+    v.updates_popover = false;
+    v.star_menu = false;
+    v.filter_menu = false;
+    v.more_menu = false;
+    v.space_menu = false;
+    v.checkout_menu = false;
+    v.ref_menu = false;
+    v.chat_menu.open = false;
+    v.link_menu.open = false;
+    v.strip.menu = null;
+    v.menus.open = null;
+    v.menus.ctx_at = null;
+    v.account_usage.open = false;
+    v.agent_work.pinned = false;
+    v.context.pinned = false;
+    v.theme_menu = null;
+    a.actions.menu = false;
+    a.picker = .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -499,7 +524,13 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split, widths: *[tab
             // In a vertical split only the parent's row shares its width.
             if (!across and child_parent != null and !owns_child) a.view.chrome.chat_width += a.view.chrome.host_width + ws_gutter;
             defer a.view.chrome.chat_width = saved_width;
-            const pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            const bpct = @import("ux_rules.zig").FocusAndClose.splitPaneBorderPct(@intCast(s.panes.items.len), ix == s.focus);
+            var pane = panel_chrome.bodyFor(c, k, zen).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            if (bpct == 100) {
+                pane = pane.border(k.accent.alpha(0.45));
+            } else if (bpct > 0) {
+                pane = pane.border(k.border.alpha(0.55));
+            }
             defer pane.end();
             @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
             @import("view_attachment_drop.zig").shade(c, a, k, pane.index);
@@ -651,6 +682,11 @@ fn keys(c: *ui.Context, a: *App) void {
         }
         if (a.view.theme_menu != null and c.shortcut(.{ .key = S.escape })) {
             a.view.theme_menu = null;
+            a.redraw();
+            return;
+        }
+        if (c.shortcut(.{ .key = 'f', .cmd = true })) {
+            a.view.settings_search_focus = true;
             a.redraw();
             return;
         }
@@ -824,6 +860,16 @@ fn keys(c: *ui.Context, a: *App) void {
             a.rememberTabs();
         }
     }
+    if (c.shortcut(.{ .key = 'd', .cmd = true, .alt = true })) {
+        if (a.settings.uiMode() == .design) {
+            a.settings.applyUiMode(.zen);
+        } else {
+            a.settings.applyUiMode(.design);
+            @import("app_panels.zig").openDesignCanvas(a);
+        }
+        a.redraw();
+        return;
+    }
     // A session menu or its dialog, over everything, takes Escape first.
     // An unobscured question owns Escape (Back); the no-menu fallback
     // must not consume it before the question's surface can see it.
@@ -835,17 +881,40 @@ fn keys(c: *ui.Context, a: *App) void {
         // The global fallback must not swallow Write's Save/back gesture.
         @import("view_write.zig").close(a);
     } else if ((a.wizard == null or menuKeepsKeys(a) or a.view.account_menu) and c.shortcut(.{ .key = S.escape }) and a.queue_edit == null) {
-        a.picker = .none;
-        a.view.filter_menu = false;
-        a.view.more_menu = false;
-        if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a);
-        a.view.account_menu = false;
-        a.view.account_usage.open = false;
-        a.view.account_usage.card = null;
-        if (a.view.context.pinned) {
-            a.view.context.open = false;
-            a.view.context.pinned = false;
-            a.view.context.card = null;
+        const esc_rules = @import("ux_rules.zig").EscapeTermination;
+        const esc_state: esc_rules.EscState = .{
+            .setup_open = a.view.setup != null,
+            .project_setup_open = a.view.project_setup.open,
+            .open_chooser_open = a.view.open_chooser.open,
+            .palette_open = a.view.palette.open,
+            .picker_open = a.picker != .none,
+            .settings_recording = a.view.recording != null,
+            .close_choice_open = a.view.close_choice,
+            .dialog_open = a.view.custom_theme_open or a.view.theme_import != null or a.view.dialogs.rename != null or a.view.dialogs.delete != null or a.actions.editor != null or a.actions.command_review != null,
+            .popup_menu_open = menuKeepsKeys(a),
+            .write_open = a.view.write_open,
+            .queue_edit_open = a.queue_edit != null,
+            .settings_open = a.view.settings_open,
+            .agent_busy = a.settings.get(.escape_stops_active_agent) and a.selected != null and @import("workspace.zig").statusOf(a.sessions.items, a.selected.?) == .working,
+        };
+        switch (esc_rules.escAction(esc_state)) {
+            .dismiss_popup_menu => closeTransientPopovers(a),
+            .dismiss_dialog => {
+                if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a) else if (a.view.theme_import != null) _ = @import("view_settings_theme_import.zig").escape(c, a) else if (a.view.dialogs.rename != null or a.view.dialogs.delete != null) @import("view_chat_menu.zig").dismiss(a) else if (a.actions.editor != null) @import("app_actions.zig").closeEditor(a) else if (a.actions.command_review != null) @import("app_actions.zig").dismissCommand(a);
+            },
+            .close_settings => {
+                a.view.settings_open = false;
+                a.view.focus_composer = true;
+            },
+            .interrupt_agent => a.interrupt(),
+            else => {
+                closeTransientPopovers(a);
+                if (a.view.context.pinned) {
+                    a.view.context.open = false;
+                    a.view.context.pinned = false;
+                    a.view.context.card = null;
+                }
+            },
         }
     }
 }
@@ -1039,29 +1108,77 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
-/// The title bar's right end, over the panels: the files panel and the
-/// surface pane's toggles (`shell/tabs.rs`); a new chat has none.
+/// The title bar's right end, over the panels (`Nano.UiMode3.trailingReservePx`):
+/// - Settings open: 0 buttons (hidden cleanly)
+/// - Zen: 1 button (`Panel`)
+/// - Design: 2 buttons (`Design Canvas`, `Panel`)
+/// - Developer: 3 buttons (`Actions`, `Files`, `Panel`)
 fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     const vu = @import("view_updates.zig");
+    const ux_m = @import("ux_rules.zig").UiMode3;
+    const mode: ux_m.UiMode = switch (a.settings.uiMode()) {
+        .zen => .zen,
+        .developer => .developer,
+        .design => .design,
+    };
+    const policy = ux_m.profileOf(mode);
+    const tm = vu.trailingMetrics(a);
+    const eff_cnt = ux_m.effectiveTrailingCount(mode, false, tm.avail, tm.last_slot);
     const uw = vu.topbarUpdatesWidth(a);
     if (uw == 0) {
         a.view.updates_anchor = null;
         a.view.updates_popover = false;
     }
-    const show_panel_toggle = !a.view.settings_open;
-    if (uw == 0 and !show_panel_toggle) return;
-    const w = uw + (if (uw > 0 and show_panel_toggle) @as(f32, 6) else 0) + (if (show_panel_toggle) @as(f32, 28) else 0);
+    const show_controls = !a.view.settings_open;
+    if (uw == 0 and !show_controls) return;
+    const controls_w: f32 = if (show_controls) @floatFromInt(ux_m.effectiveTrailingReservePx(mode, false, tm.avail, tm.last_slot) - 8) else 0;
+    const w = uw + (if (uw > 0 and controls_w > 0) @as(f32, 6) else 0) + controls_w;
     const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 10 - w, 4 + (34 - 28) / 2).row().itemsCenter().gap(6).layer(3);
     defer bar.end();
     if (uw > 0) vu.topbarUpdatesButton(c, a, k);
-    if (show_panel_toggle) {
-        ui.key(c, "topbar-right-panel-toggle");
-        if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
+    if (!show_controls) return;
+
+    const sc = @import("shortcuts.zig");
+    var tip_buf: [32]u8 = undefined;
+    if (policy.shows_dev_trailing_toggles and eff_cnt >= 3) {
+        ui.key(c, "topbar-actions-dock-toggle");
+        const act_k = sc.platformBadge(&tip_buf, a.settings.keymap.get("toggleTerminal") orelse "mod-j");
+        if (kit.iconButton(c, k, .terminal, .{
             .size = 28,
-            .on = strip.hasHost(a),
-            .tip = .{ .text = "Toggle side panel" },
-        })) @import("app_panels.zig").toggleHost(a);
+            .on = a.actions.dock_open,
+            .tip = .{ .text = c.print("Toggle terminal & action runs ({s})", .{act_k}) },
+        })) {
+            a.actions.dock_open = !a.actions.dock_open;
+            a.redraw();
+        }
+        ui.key(c, "topbar-files-toggle");
+        var files_buf: [32]u8 = undefined;
+        const files_k = sc.platformBadge(&files_buf, a.settings.keymap.get("toggleFiles") orelse "mod-e");
+        if (kit.iconButton(c, k, .folder, .{
+            .size = 28,
+            .on = a.panels.files_open,
+            .tip = .{ .text = c.print("Toggle file explorer ({s})", .{files_k}) },
+        })) @import("app_panels.zig").toggleFiles(a);
+    } else if (policy.shows_design_canvas_toggle and eff_cnt >= 2) {
+        ui.key(c, "topbar-design-canvas-toggle");
+        const canvas_on = strip.hasHost(a) and if (a.panels.activeTab()) |t| t.kind == .design_canvas else false;
+        const des_k = sc.platformBadge(&tip_buf, "mod-alt-d");
+        if (kit.iconButton(c, k, .@"palette-search", .{
+            .size = 28,
+            .on = canvas_on,
+            .tip = .{ .text = c.print("Open Design Canvas ({s})", .{des_k}) },
+        })) @import("app_panels.zig").openDesignCanvas(a);
     }
+
+    ui.key(c, "topbar-right-panel-toggle");
+    var pan_buf: [32]u8 = undefined;
+    const pan_k = sc.platformBadge(&pan_buf, a.settings.keymap.get("toggleChanges") orelse "mod-r");
+    if (kit.iconButton(c, k, .@"sidebar-minimalistic", .{
+        .size = 28,
+        .on = strip.hasHost(a),
+        .label = "Toggle side panel",
+        .tip = .{ .text = c.print("Toggle side panel ({s})", .{pan_k}) },
+    })) @import("app_panels.zig").toggleHost(a);
 }
 
 /// The chat's identity in the title bar's row: its agent's mark, its title,

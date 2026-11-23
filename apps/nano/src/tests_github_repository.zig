@@ -253,7 +253,7 @@ test "github child description and activity images open a bounded preview withou
         h.t.settle(0.2);
         try testing.expect(h.t.hasText("GitHub image preview"));
         const origin = h.a.panels.github_repository.images.focus_scope.origin;
-        const focus_order = [_][]const u8{ "Close preview", "Zoom out", "Zoom in", "Fit", "Close preview" };
+        const focus_order = [_][]const u8{ "Close preview", "Zoom out", "Zoom in", "Fit", "Copy image", "Close preview" };
         for (focus_order, 0..) |label, step| {
             if (step > 0) h.t.key(.tab);
             const focused_label = for (h.t.ctx.a11y_items.items) |item| {

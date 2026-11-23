@@ -1212,11 +1212,51 @@ pub fn topbarUpdatesWidth(a: *const App) f32 {
     return 5 + stack_w + 6 + 16 + 8;
 }
 
+pub fn trailingMetrics(a: *const App) struct { avail: u32, last_slot: u32 } {
+    const avail_f = @max(0, a.view.chrome.width);
+    var last_f: f32 = avail_f;
+    const strip = @import("view_tab_strip.zig");
+    const chrome = @import("panel_chrome.zig");
+    const github = @import("app_github_repository.zig");
+    if (a.panels.files_open and a.view.chrome.files_width > 0) {
+        last_f = a.view.chrome.files_width;
+    } else if (a.tabs.layout()) |s| {
+        const in_row = s.axis == .horizontal and !s.zoomed;
+        const hp = if (strip.hasHost(a) and github.surface(a)) github.parentPane(a) else null;
+        if (strip.hasHost(a) and hp == null and a.view.chrome.host_width > 0) {
+            last_f = a.view.chrome.host_width;
+        } else if (in_row and s.panes.items.len > 1) {
+            const last_ix = s.panes.items.len - 1;
+            if (strip.hasHost(a) and hp != null and hp.? == last_ix and a.view.chrome.host_width > 0) {
+                last_f = a.view.chrome.host_width;
+            } else {
+                const span = chrome.paneSpanIn(a.view.chrome.chat_width, s.shares.items[last_ix], s.panes.items.len, true, chrome.zen_gutter);
+                last_f = span;
+            }
+        } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+            last_f = a.view.chrome.host_width;
+        }
+    } else if (strip.hasHost(a) and a.view.chrome.host_width > 0) {
+        last_f = a.view.chrome.host_width;
+    }
+    return .{
+        .avail = @intFromFloat(@round(@max(0, avail_f))),
+        .last_slot = @intFromFloat(@round(@max(0, last_f))),
+    };
+}
+
 pub fn topbarTrailingReserve(a: *const App) f32 {
     if (a.view.settings_open) return 0;
+    const ux = @import("ux_rules.zig").UiMode3;
+    const mode: ux.UiMode = switch (a.settings.uiMode()) {
+        .zen => .zen,
+        .developer => .developer,
+        .design => .design,
+    };
+    const m = trailingMetrics(a);
     const uw = topbarUpdatesWidth(a);
-    const total = uw + (if (uw > 0) @as(f32, 6) else 0) + 28;
-    return total + 10;
+    const mode_px: f32 = @floatFromInt(ux.effectiveTrailingReservePx(mode, false, m.avail, m.last_slot));
+    return uw + (if (uw > 0) @as(f32, 6) else 0) + mode_px;
 }
 
 pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -1281,7 +1321,9 @@ pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     if (clicked) {
-        a.view.updates_popover = !a.view.updates_popover;
+        const was_open = a.view.updates_popover;
+        if (!was_open) @import("view.zig").closeTransientPopovers(a);
+        a.view.updates_popover = !was_open;
         a.redraw();
     }
 }

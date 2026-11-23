@@ -307,7 +307,7 @@ test "reply images dialog contains keyboard focus and restores its trigger" {
     }
     try clickPicture(&tester);
     try t.expectEqual(try controlId(&tester, "Close preview"), tester.ctx.focus);
-    const order = [_][]const u8{ "Zoom out", "Zoom in", "Fit", "Close preview", "Zoom out", "Zoom in" };
+    const order = [_][]const u8{ "Zoom out", "Zoom in", "Fit", "Copy image", "Close preview", "Zoom out", "Zoom in" };
     for (order) |label| {
         tester.key(.tab);
         try t.expectEqual(try controlId(&tester, label), tester.ctx.focus);

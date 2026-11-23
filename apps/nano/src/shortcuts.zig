@@ -136,6 +136,39 @@ pub fn badge(buf: []u8, combo: []const u8) []const u8 {
     return w.buffered();
 }
 
+/// Platform-aware compact shortcut badge: Mac uses glyphs (`⇧⌘R`), while
+/// Windows and Linux show readable modifier names (`Ctrl+Shift+R`).
+pub fn platformBadgeFor(os: std.Target.Os.Tag, buf: []u8, combo: []const u8) []const u8 {
+    if (os == .macos) return badge(buf, combo);
+    var w: std.Io.Writer = .fixed(buf);
+    const cut = std.mem.lastIndexOfScalar(u8, combo, '-');
+    const key = if (cut) |i| combo[i + 1 ..] else combo;
+    const mods = if (cut) |i| combo[0..i] else "";
+    const order = [_][2][]const u8{ .{ "ctrl", "Ctrl" }, .{ "mod", "Ctrl" }, .{ "alt", "Alt" }, .{ "shift", "Shift" } };
+    var wrote_ctrl = false;
+    for (order) |o| {
+        var it = std.mem.splitScalar(u8, mods, '-');
+        while (it.next()) |part| if (std.mem.eql(u8, part, o[0])) {
+            if (std.mem.eql(u8, o[1], "Ctrl")) {
+                if (wrote_ctrl) break;
+                wrote_ctrl = true;
+            }
+            w.writeAll(o[1]) catch {};
+            w.writeByte('+') catch {};
+            break;
+        };
+    }
+    if (key.len > 0) {
+        w.writeByte(std.ascii.toUpper(key[0])) catch {};
+        w.writeAll(key[1..]) catch {};
+    }
+    return w.buffered();
+}
+
+pub fn platformBadge(buf: []u8, combo: []const u8) []const u8 {
+    return platformBadgeFor(@import("builtin").os.tag, buf, combo);
+}
+
 /// "mod-shift-r" as the page shows it, "Cmd+Shift+R" (`display_combo`):
 /// the stored order, each part named, a key's first letter upper case.
 pub fn display(buf: []u8, combo: []const u8) []const u8 {
@@ -254,6 +287,9 @@ test "key-caps as the GPUI app's badges on the Mac (`badge_combos_use_mac_glyphs
     try testing.expectEqualStrings("⌃⌥⌘Space", badge(&buf, "mod-alt-ctrl-space"));
     try testing.expectEqualStrings("⌘,", badge(&buf, "mod-,"));
     try testing.expectEqualStrings("⌘K", badge(&buf, "mod-k"));
+    try testing.expectEqualStrings("⌘J", platformBadgeFor(.macos, &buf, "mod-j"));
+    try testing.expectEqualStrings("Ctrl+J", platformBadgeFor(.linux, &buf, "mod-j"));
+    try testing.expectEqualStrings("Ctrl+Alt+D", platformBadgeFor(.windows, &buf, "mod-alt-d"));
 }
 
 /// The command palette's key: fixed, as the GPUI app binds it

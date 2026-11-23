@@ -440,7 +440,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
 /// override included). It blinks at 500 ms and is solid after an edit or
 /// a caret move, as nanoui's caret already does.
 /// GPUI's insertion caret: a hairline on the glyph, not a 3-point block.
-pub const message_caret: ui.TextFieldCaret = .{ .width = 1.5, .inset = 1, .radius = 0.75 };
+pub const message_caret: ui.TextFieldCaret = .{ .width = 3, .inset = 1, .radius = 1.5 };
 
 /// ↑ at the text's start or ↓ at its end steps through the chat's earlier
 /// prompts (`history_step`, `navigate_prompt_history`), unless a question,
@@ -632,7 +632,7 @@ fn chipMaker(a: *App) ?icons.Name {
 fn skeleton(c: *ui.Context) void {
     const phase = @sin(@as(f32, @floatCast(c.time)) * std.math.tau / 2.4) * 0.5 + 0.5;
     kit.loaderFrame(c, 1.0 / 30.0);
-    _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = .{ .r = 1, .g = 1, .b = 1, .a = 0.08 * (0.35 + 0.4 * phase) } }, .none, null);
+    _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = c.theme.text.alpha(0.08 * (0.35 + 0.4 * phase)) }, .none, null);
 }
 
 /// Send (or queue, while a run goes); Stop with nothing typed mid-run.
@@ -641,7 +641,7 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors, pad_left: f32) void {
     const running = a.selectedStatus() == .working;
     const stop = running and empty;
     // Dimmed only when it can't send at all; an empty box just does nothing.
-    const blocked = !stop and (a.engine.state != .connected or !attachments.ready(a));
+    const blocked = !stop and (@import("app_agent.zig").chatSendBlocked(a) or !attachments.ready(a));
     const pad = ui.div(c).row().pl(pad_left);
     defer pad.end();
     // Filled with the primary accent, its glyph contrast-checked on it

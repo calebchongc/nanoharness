@@ -817,6 +817,7 @@ pub const Store = struct {
         if (s.text("uiMode")) |raw| {
             if (std.mem.eql(u8, raw, "zen")) return .zen;
             if (std.mem.eql(u8, raw, "developer")) return .developer;
+            if (std.mem.eql(u8, raw, "design")) return .design;
         }
         return if (s.path != null) rules.UiState.initial.mode else .developer;
     }
@@ -838,9 +839,11 @@ pub const Store = struct {
     pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
         const rules = @import("motion_rules.zig");
         const base = s.baseUiMode();
+        if (base == .design) return .design;
         const opposite: rules.UiMode = switch (base) {
             .zen => .developer,
             .developer => .zen,
+            .design => .zen,
         };
         if (std.meta.eql(s.hierarchyProfile(), rules.HierarchyProfile.ofMode(opposite))) return opposite;
         return base;
@@ -851,7 +854,7 @@ pub const Store = struct {
         for (rules.MovingPart.all) |part| s.clearText(part.key());
         s.setText("uiMode", mode.key());
         switch (mode) {
-            .zen => {
+            .zen, .design => {
                 s.setText("sidebarOrganization", Organization.in_one_list.key());
                 s.set(.sidebar_show_harness, true);
                 s.set(.sidebar_show_project_icon, true);
@@ -883,6 +886,10 @@ pub const Store = struct {
         const rules = @import("motion_rules.zig");
         const next = rules.stepUiState(.{ .mode = s.uiMode() }, .toggle_mode).mode;
         s.applyUiMode(next);
+    }
+
+    pub fn cycleUiMode(s: *Store) void {
+        s.applyUiMode(s.uiMode().cycle());
     }
 
     pub fn organization(s: *const Store) Organization {
