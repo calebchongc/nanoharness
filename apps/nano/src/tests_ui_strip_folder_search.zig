@@ -321,6 +321,56 @@ test "multi-pane project picker anchors to active tab rather than another pane f
     try testing.expect(right_search.y < 120);
 }
 
+test "project picker opens a different project in a new workspace without replacing the split session" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    const projects = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"local-project","deviceId":"local","path":"/synthetic/fieldnotes"},
+        \\  {"id":"other-project","deviceId":"local","path":"/synthetic/workshop"},
+        \\  {"id":"remote-project","deviceId":"remote","path":"/synthetic/remote-project"} ]
+    , .{});
+    defer projects.deinit();
+    try h.a.spaces.replace(projects.value);
+    h.a.splitOpening(.horizontal, "b");
+    strip.focus(&h.a, .{ .chat = 0 });
+    h.a.composer.set("Keep the Alpha reply draft");
+    h.t.settle(2);
+    const source = h.a.tabs.active;
+    const count = h.a.tabs.items.items.len;
+
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expect(h.a.view.strip.menu == .folder);
+    h.t.typeText("fieldnotes");
+    h.t.settle(1);
+    h.t.key(.enter);
+    h.t.settle(2);
+    try testing.expectEqual(count, h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+
+    h.press(.{ .key = 'p', .cmd = true, .shift = true });
+    try testing.expect(h.a.view.strip.menu == .folder);
+    h.t.typeText("workshop");
+    h.t.settle(1);
+    h.t.key(.enter);
+    h.t.settle(2);
+    if (std.c.getenv("NANO_PROJECT_SWITCH_SNAPSHOT")) |path| try h.t.screenshot(std.mem.span(path));
+
+    try testing.expectEqual(count + 1, h.a.tabs.items.items.len);
+    try testing.expectEqual(source + 1, h.a.tabs.active);
+    try testing.expect(h.a.tabs.layout() == null and h.a.selected == null);
+    try testing.expectEqualStrings("other-project", h.a.newChatSpace().?.id);
+    try testing.expectEqualStrings("", h.a.composer.text());
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    h.a.showTab(source);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqualStrings("Keep the Alpha reply draft", h.a.composer.text());
+    try testing.expectEqualStrings("local-project", h.a.findChat("a").?.space_id.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqualStrings("b", h.a.tabs.layout().?.panes.items[1].?);
+}
+
 test "project picker #42: dismisses on outside clicks including top strip, micro-drag, and right-click, and toggles with Cmd+Shift+P" {
     var h: Harness = undefined;
     try h.init(true);

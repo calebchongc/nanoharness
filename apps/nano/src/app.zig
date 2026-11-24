@@ -1211,7 +1211,12 @@ pub const App = struct {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
         @import("app_navigation.zig").parkActiveDraft(a, d);
+        const count = a.tabs.items.items.len;
         a.tabs.newTab();
+        if (a.tabs.items.items.len == count) {
+            var unused = fresh;
+            return unused.deinit(a.gpa);
+        }
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
