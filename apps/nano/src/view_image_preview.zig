@@ -52,7 +52,16 @@ pub fn keys(c: *ui.Context, a: *App) bool {
     }
     if (c.shortcut(.{ .key = ui.Shortcut.escape }) or c.input.key == .escape) {
         c.input.key = null;
-        dismiss(c, a);
+        if (a.attachments.images.annotate.hasFocus(c.focus)) {
+            c.focus = 0;
+            c.changed = true;
+            a.redraw();
+        } else if (a.attachments.images.annotate.active) {
+            a.attachments.images.annotate.active = false;
+            a.redraw();
+        } else {
+            dismiss(c, a);
+        }
     }
     return true;
 }
@@ -115,10 +124,10 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
                 ui.text(c, msg, .{ .size = 10.5, .weight = .medium, .color = color });
             }
         }
-        ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .size = 10.5, .color = k.muted });
+        ui.text(c, c.print("{d:.0}%", .{cache.zoom * 100}), .{ .tabular = true, .size = 10.5, .color = k.muted });
     }
     const hint = if (cache.annotate.active)
-        "Click image to drop callout pins · Click a pin to edit its note · Esc to close"
+        "Click image to drop callout pins · Click a pin to edit its note · Esc to exit annotate"
     else
         "Scroll or pinch to zoom · Drag to inspect · Esc to close";
     ui.text(c, hint, .{ .size = 10.5, .color = k.muted });
@@ -209,7 +218,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
             "No pins yet"
         else
             c.print("{d} {s}", .{ cache.annotate.count, if (cache.annotate.count == 1) "pin" else "pins" });
-        ui.text(c, count_label, .{ .size = 10.5, .color = k.muted });
+        ui.text(c, count_label, .{ .tabular = true, .size = 10.5, .color = k.muted });
         ui.spacer(c);
         if (cache.annotate.count > 0) {
             if (annotateButton(c, k, "Undo", false)) {
@@ -244,7 +253,7 @@ fn drawPinNotes(c: *ui.Context, a: *App, k: theme.Colors, state: *annotate.State
 
         const px: u32 = @intFromFloat(@round(pin.x * 100));
         const py: u32 = @intFromFloat(@round(pin.y * 100));
-        ui.text(c, c.print("({d}%, {d}%)", .{ px, py }), .{ .size = 10.5, .color = k.muted });
+        ui.text(c, c.print("({d}%, {d}%)", .{ px, py }), .{ .tabular = true, .size = 10.5, .color = k.muted });
 
         const field_box = ui.div(c).row().grow().w(0).h(26).px(8).itemsCenter().rounded(6)
             .bg(k.ink(if (k.dark) 0.06 else 0.045)).border(k.border).borderW(1);

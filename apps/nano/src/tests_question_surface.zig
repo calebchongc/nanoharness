@@ -381,3 +381,39 @@ test "question surface long content scrolls while controls stay pinned and next 
     try bounded(&h.t, "Submit", 1000, 360);
     try h.snap("long-content-next-page");
 }
+
+test "question surface Escape cancels auto-advance, clears page-0 picks, and dismisses untouched questions" {
+    const single_payload =
+        \\{"reset":[{"id":"ask","role":"assistant","parts":[{"kind":"input","requestId":"synthetic-single","resolved":false,"questions":[
+        \\{"id":"q0","header":"Mode","question":"Pick one option.","options":["Alpha","Beta"]}]}]}]}
+    ;
+    var h: Harness = undefined;
+    try h.initWithInput(1100, 700, 0, single_payload);
+    defer h.deinit();
+
+    // Picking a single-choice option schedules auto-advance; Escape cancels the timer & pick cleanly.
+    _ = h.t.shortcut(.{ .key = '1' });
+    h.draw();
+    try testing.expect(h.a.wizard.?.advance_at != null);
+    try testing.expect(h.a.wizard.?.picked(0));
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard != null);
+    try testing.expect(h.a.wizard.?.advance_at == null);
+    try testing.expect(!h.a.wizard.?.picked(0));
+
+    // Clicking option manually without active timer -> Escape clears page-0 pick; next Escape dismisses.
+    try h.t.clickText("Beta");
+    h.draw();
+    h.a.wizard.?.advance_at = null;
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard != null);
+    try testing.expect(!h.a.wizard.?.picked(1));
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.draw();
+    try testing.expect(h.a.wizard == null);
+    var sent = try command(&h, "dismissInput");
+    defer sent.deinit();
+    try testing.expectEqualStrings("synthetic-owner", sent.value.object.get("params").?.object.get("chatId").?.string);
+}

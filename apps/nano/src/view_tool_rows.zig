@@ -24,8 +24,8 @@ pub fn counts(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64) v
 pub fn countsCompact(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64, compact: bool) void {
     const box = ui.div(c).row().gap(if (compact) 3 else 6).itemsCenter();
     defer box.end();
-    if (additions > 0) ui.text(c, c.print("+{d}", .{additions}), kit.style(c, 11, 18, .{ .color = k.success }));
-    if (deletions > 0) ui.text(c, c.print("−{d}", .{deletions}), kit.style(c, 11, 18, .{ .color = k.danger }));
+    if (additions > 0) ui.text(c, c.print("+{d}", .{additions}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.success }));
+    if (deletions > 0) ui.text(c, c.print("−{d}", .{deletions}), kit.style(c, 11, 18, .{ .tabular = true, .color = k.danger }));
 }
 
 pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32) void {
@@ -43,7 +43,7 @@ pub fn trailCompact(c: *ui.Context, k: theme.Colors, result: rows.Result, opacit
         .settled, .failed => {},
         .running => |ms| if (ms) |elapsed| {
             const buf = c.alloc().alloc(u8, 32) catch return;
-            ui.text(c, rows.timer(buf, elapsed), kit.style(c, 11, 18, .{ .color = k.muted }));
+            ui.text(c, rows.timer(buf, elapsed), kit.style(c, 11, 18, .{ .tabular = true, .color = k.muted }));
             if (c.reduced_motion) c.frameIn(1) else kit.loaderFrame(c, 0.1);
         },
         .summary => |text| ui.text(c, text, kit.style(c, 11, 18, .{ .color = k.muted })),

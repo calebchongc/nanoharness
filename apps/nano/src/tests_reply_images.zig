@@ -659,3 +659,47 @@ test "image preview Annotate full production desktop handoff works at narrow wid
         try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/composer-after-annotate.png", .{std.mem.span(dir)}));
     }
 }
+
+test "reply images Escape peels pin note focus then annotate mode before closing preview" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    try clickPicture(&tester);
+    try tester.clickText("Annotate");
+    tester.settle(2);
+    var picture: ui.Rect = undefined;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w > 100 and n.rect.h > 100) picture = n.rect;
+    }
+    tester.click(picture.x + picture.w * 0.40, picture.y + picture.h * 0.45);
+    tester.settle(2);
+    const cache = &a.attachments.images;
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+    try t.expect(cache.annotate.hasFocus(tester.ctx.focus));
+
+    // 1st Escape leaves the note field while keeping annotate mode and its pin intact.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(!cache.annotate.hasFocus(tester.ctx.focus));
+    try t.expect(cache.annotate.active);
+    try t.expect(cache.preview != null);
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+
+    // 2nd Escape leaves annotate mode without destroying the open preview or pins.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(!cache.annotate.active);
+    try t.expect(cache.preview != null);
+    try t.expectEqual(@as(usize, 1), cache.annotate.count);
+
+    // 3rd Escape closes the preview itself.
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(cache.preview == null);
+}
