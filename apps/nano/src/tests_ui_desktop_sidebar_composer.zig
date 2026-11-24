@@ -185,9 +185,12 @@ test "desktop parity composer alignment matches the reference and compact width 
     h.t.resize(607, 440);
     h.t.settle(1);
     const pill = h.a.view.composer_anchor orelse return error.NoComposer;
-    const field = h.t.ctx.rects.get(h.a.view.composer_id) orelse return error.NoComposerField;
+    const field = for (h.t.ctx.nodes.items) |node| {
+        if (node.id == h.a.view.composer_id) break node.rect.inset(node.style.padding);
+    } else return error.NoComposerField;
     try testing.expectApproxEqAbs(@as(f32, 340), pill.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 49), pill.h, 0.01);
+    // Measure the writing area, not the outer hitbox that includes the chip gutters.
     try testing.expectApproxEqAbs(@as(f32, 75), field.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 212), field.w, 0.01);
     var controls: [3]ui.Rect = undefined;
@@ -1177,6 +1180,117 @@ test "topbar updates pill disappears automatically once agent or engine updates 
     try testing.expect(h.a.view.updates_anchor != null);
 }
 
+test "failed Codex Xcode license update shows diagnostic, Copy command, and local-only Open Terminal (#125)" {
+    const updates = @import("agent_updates.zig");
+    const vu = @import("view_updates.zig");
+
+    // 1. Local Mac: surfaces Xcode license explanation, Copy command, Open Terminal, and Retry.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Synthetic MacBook","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "synthetic-device", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: Agreeing to the Xcode/iOS license requires admin privileges, please run \"sudo xcodebuild -license\" and then retry this command."}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.a.view.updates_popover);
+        try testing.expect(h.t.hasText("Homebrew can\u{2019}t update Codex until you accept the Xcode license."));
+        try testing.expect(h.t.hasText("Copy command"));
+        try testing.expect(h.t.hasText("Open Terminal"));
+        try testing.expect(h.t.hasText("Retry"));
+        try testing.expect(h.t.hasText("Skip"));
+
+        try h.t.clickText("Copy command");
+        h.t.settle(0.2);
+        try testing.expectEqualStrings(vu.xcode_license_cmd, h.t.clipboard.items);
+
+        try h.t.clickText("Open Terminal");
+        h.t.settle(0.2);
+        try testing.expectEqual(@as(u32, 1), h.a.updates.test_opened_terminal_count);
+        try testing.expect(h.a.agent_updates.last_action == null);
+
+        try h.t.clickText("Retry");
+        h.t.settle(0.2);
+        const retry = h.a.agent_updates.last_action orelse return error.MissingRetryAction;
+        try testing.expectEqualStrings("ApplyHarnessUpdate", retry.method);
+        try testing.expectEqualStrings("codex", retry.harness);
+    }
+
+    // 2. Remote Mac: shows remote device recovery instruction and omits Open Terminal.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Local MacBook","online":true},{"id":"remote-mac","name":"Build Mini","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "remote-mac", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: please run sudo xcodebuild -license"}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.t.hasText("Homebrew can\u{2019}t update Codex until you accept the Xcode license."));
+        try testing.expect(h.t.hasText("Run sudo xcodebuild -license on Build Mini, review and accept the license, then retry."));
+        try testing.expect(h.t.hasText("Copy command"));
+        try testing.expect(!h.t.hasText("Open Terminal"));
+        try testing.expect(h.t.hasText("Retry"));
+    }
+
+    // 3. Generic unrecognized failure: shows wrapped diagnostic alongside Retry and Skip.
+    {
+        var h: Harness = undefined;
+        try h.init(false);
+        defer h.deinit();
+        h.a.settings.applyUiMode(.zen);
+        const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\[{"id":"synthetic-device","name":"Local MacBook","online":true}]
+        , .{});
+        defer devs.deinit();
+        try h.a.devices.replace(devs.value);
+        if (h.a.device_id) |old| h.a.gpa.free(old);
+        h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+        try updates.setTestStatuses(&h.a, "synthetic-device", true,
+            \\[{"harness":"codex","installedVersion":"0.171.0","latestVersion":"0.172.0","phase":"failed","canApply":true,"error":{"kind":"install","message":"Error: SHA256 checksum mismatch for codex bottle"}}]
+        );
+        h.t.settle(1);
+        h.t.frame();
+        const btn = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+        h.t.click(btn.x + btn.w / 2, btn.y + btn.h / 2);
+        h.t.settle(0.4);
+        h.t.frame();
+        try testing.expect(h.t.hasText("Error: SHA256 checksum mismatch for codex bottle"));
+        try testing.expect(!h.t.hasText("Open Terminal"));
+        try testing.expect(!h.t.hasText("Copy command"));
+        try testing.expect(h.t.hasText("Retry"));
+        try testing.expect(h.t.hasText("Skip"));
+    }
+}
+
 test "sidebar star banner, right-click menu, bottom account row, and compact model account popover" {
     var h: Harness = undefined;
     try h.init(true);
@@ -1392,19 +1506,25 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
     h.t.frame();
     h.snap("desktop-3pane-split-fixed");
 
-    // Verify no text node inside the center pane overflows into the right pane.
+    // The transcript chip stays in the center pane; the active question in
+    // this narrow split gets a separate window-bounded answer card.
     const q_label = h.t.findText("Question") orelse return error.MissingQuestionChip;
     const layout_s = h.a.tabs.layout() orelse return error.MissingSplitLayout;
     try testing.expectEqual(@as(usize, 3), layout_s.panes.items.len);
     const pane_each = h.a.view.chrome.chat_width / 3;
     const center_right = sidebar.widthOf(&h.a) + h.a.view.chrome.leading + pane_each * 2;
     try testing.expect(q_label.x + q_label.w < center_right);
+    try testing.expect(@import("view_question.zig").expanded(&h.t.ctx, &h.a));
+    try testing.expect(h.t.hasText("Cancel question"));
+    var question_text_found = false;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
         .text => |tx| if (std.mem.startsWith(u8, tx.str, "This worktree is now")) {
-            try testing.expect(node.rect.x + node.rect.w <= center_right + 1);
+            question_text_found = true;
+            try testing.expect(node.rect.x >= 0 and node.rect.x + node.rect.w <= h.t.ctx.size.w + 1);
         },
         else => {},
     };
+    try testing.expect(question_text_found);
 }
 
 test "session footer renders account usage ring alongside context ring, opens account switcher popover, and optimistically switches accounts" {

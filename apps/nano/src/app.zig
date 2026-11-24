@@ -855,6 +855,7 @@ pub const App = struct {
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_panels.zig").tickFiles(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (a.window != null and !a.offscreen) if (a.browse_conn) |bc| {
             const ux_bc = @import("ux_rules.zig").BrowseConnect;
             const browser_vis = a.panels.host_open and if (a.panels.activeTab()) |tb|
@@ -1086,18 +1087,18 @@ pub const App = struct {
         }
         const chat = a.findChat(chat_id).?;
         const project = chat.space_id;
-        // A blank "New tab" (single tab or split pane with no unsent draft)
-        // opens the chosen conversation in place instead of abandoning the
-        // empty tab and opening a new tab/workspace elsewhere.
-        if (a.isBlankNewTab()) {
+        // Browse history separately, even when the live workspace has an
+        // empty split pane that an unopened live conversation could reuse.
+        if (chat.archived) {
+            a.newWorkspaceSession();
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, project);
             return;
         }
-        // Reading history is not a project-pane replacement. Keep the live
-        // workspace (including its split and drafts) visible in its own tab.
-        if (chat.archived) {
-            a.newWorkspaceSession();
+        // A blank "New tab" (single tab or split pane with no unsent draft)
+        // opens the chosen live conversation in place instead of abandoning
+        // the empty tab and opening a new tab/workspace elsewhere.
+        if (a.isBlankNewTab()) {
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, project);
             return;
@@ -1375,6 +1376,8 @@ pub const App = struct {
         const from = s.focus;
         const d = drafts.canvas(a) catch return;
         a.tabs.focusPane(ix);
+        // Programmatic pane switches must hand input to the selected chat too.
+        a.view.strip.focused = .{ .chat = ix };
         a.tabs.park(a.tabs.active, from, d);
         @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);
