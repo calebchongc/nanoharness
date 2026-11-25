@@ -5,8 +5,7 @@ import {
   importPKCS8,
   jwtDecrypt,
   jwtVerify,
-  type JWTPayload,
-  type KeyLike
+  type JWTPayload
 } from "jose";
 import type { Env } from "./env";
 
@@ -47,7 +46,7 @@ export const personalOrgId = (userId: string): string => `user-${userId}`;
  * only once clients enroll. */
 export const ACCESS_TTL = "15m";
 
-const eddsaKey = async (env: Env): Promise<KeyLike | undefined> => {
+const eddsaKey = async (env: Env) => {
   const pem = env.HARNESS_AUTH_ED25519_PRIVATE;
   if (!pem || !pem.includes("BEGIN")) return undefined;
   try {
