@@ -139,6 +139,8 @@ test "settings navigation keeps search and Back reachable on short windows and r
     h.t.settle(0.1);
     try testing.expectEqual(Section.devices, h.a.settings.section);
     try testing.expect(h.t.hasText("Settings / Devices and data"));
+    try testing.expect(h.t.hasText("Allow remote control"));
+    try snap(&h, "devices-remote-control");
     try h.t.clickText("Back");
     h.t.settle(0.1);
     try testing.expect(!h.a.view.settings_open);

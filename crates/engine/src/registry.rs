@@ -128,6 +128,11 @@ struct HarnessPrefsFile {
     graff_draft_subagents: bool,
     /// Hold off idle sleep while an agent works (see `keep_awake`).
     keep_awake: bool,
+    /// Serve ControlRpc on this computer's device-room host relay. Off until
+    /// the user enables Settings → Devices → Allow remote control. Missing
+    /// from older prefs files is off, so existing synced installs are not a
+    /// remotely driven host until they opt in.
+    remote_control: bool,
     /// graff's automatic compaction point, percent of the context window.
     #[serde(skip_serializing_if = "Option::is_none")]
     graff_compact_at: Option<u8>,
@@ -439,6 +444,20 @@ impl HarnessRegistry {
     pub fn set_keep_awake(&self, enabled: bool) {
         self.prefs().keep_awake = enabled;
         self.keep_awake.send_replace(enabled);
+        self.persist_prefs();
+    }
+
+    /// Whether this computer serves ControlRpc over its device-room host
+    /// relay. Off until the user opts in.
+    pub fn remote_control(&self) -> bool {
+        self.prefs().remote_control
+    }
+
+    /// Persist the host-relay opt-in. Live host sockets pick this up on the
+    /// next RPC; turning it off does not drop the socket (nudges and the
+    /// peer-link probe still need it).
+    pub fn set_remote_control(&self, enabled: bool) {
+        self.prefs().remote_control = enabled;
         self.persist_prefs();
     }
 
@@ -1639,6 +1658,24 @@ mod title_tests {
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
         assert!(reloaded.autonomy_chosen());
+    }
+
+    #[test]
+    fn remote_control_is_off_by_default_and_persists() {
+        let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
+        assert!(!prefs.remote_control);
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(!registry.remote_control());
+        registry.set_remote_control(true);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert!(reloaded.remote_control());
+        registry.set_remote_control(false);
+        let again = HarnessRegistry::new();
+        again.load_prefs(dir.path());
+        assert!(!again.remote_control());
     }
 
     #[test]
