@@ -151,6 +151,8 @@ test {
     _ = @import("view_tab_cycle.zig");
     _ = @import("tests_ui_tab_cycle.zig");
     _ = @import("tests_ui_fullscreen.zig");
+    _ = @import("app_quotes.zig");
+    _ = @import("tests_ui_quotes.zig");
     _ = @import("view_fullscreen_chrome.zig");
     _ = @import("view_chat_header.zig");
     _ = @import("tests_ui_chat_context.zig");
