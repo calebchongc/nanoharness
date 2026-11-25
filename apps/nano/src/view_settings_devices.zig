@@ -33,6 +33,11 @@ pub const Page = struct {
     confirm_remove: std.ArrayList(u8) = .empty,
     /// The strip under the version; a click clears it.
     failure: std.ArrayList(u8) = .empty,
+    /// Settings → Devices → Allow remote control (`GetRemoteControl`).
+    remote_on: bool = false,
+    remote_known: bool = false,
+    remote_saving: bool = false,
+    remote_call: ?u64 = null,
     /// The expanded host's update controls.
     updates: updates_panel.State = .{},
 
@@ -148,7 +153,41 @@ pub fn shortId(buf: []u8, id: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}…{s}", .{ id[0..8], id[id.len - 4 ..] }) catch id;
 }
 
+fn loadRemote(a: *App) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.remote_call != null) return;
+    if (a.engine.call("GetRemoteControl", rpc.empty, .of(App, a, onRemote))) |id| p.remote_call = id;
+}
+
+fn setRemote(a: *App, on: bool) void {
+    const p = &a.view.devices;
+    if (!a.engine.up() or p.remote_saving) return;
+    p.remote_saving = true;
+    p.failure.clearRetainingCapacity();
+    if (a.engine.call("SetRemoteControl", .{ .enabled = on }, .of(App, a, onRemote))) |id| p.remote_call = id;
+}
+
+fn onRemote(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.devices;
+    if (p.remote_call != null and p.remote_call != id) return;
+    p.remote_call = null;
+    p.remote_saving = false;
+    switch (r) {
+        .ok => |v| {
+            p.remote_known = true;
+            p.remote_on = if (v == .object) (if (v.object.get("enabled")) |e| e == .bool and e.bool else false) else false;
+        },
+        .err => |e| {
+            p.remote_known = true;
+            fail(a, "{s}", .{e});
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.view.devices.remote_known) loadRemote(a);
     const devices = a.devices.items;
     set.header(c, k, "Devices", if (devices.len > 0) devices.len else null);
     set.subtitle(c, k, subtitle(a.account.scope), false);
@@ -216,6 +255,28 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer r.end();
         set.tile(c, k, .refresh);
         set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), 0);
+    }
+    {
+        ui.key(c, "allow-remote-control");
+        const live = a.engine.up();
+        const p = &a.view.devices;
+        const rcard = set.card(c, k);
+        defer rcard.end();
+        const r = set.row(c, k, true, !live);
+        defer r.end();
+        if (live) {
+            _ = r.control();
+            _ = kit.focusRing(c, r, k.accent, 2);
+        }
+        set.tile(c, k, .@"remote-server");
+        set.words(
+            c,
+            k,
+            "Allow remote control",
+            "Let your other signed-in devices run commands, terminals and file writes on this computer through the sync relay. Off by default, so a compromised sync server cannot drive this machine unless you turn it on.",
+            40,
+        );
+        if (set.toggle(c, k, p.remote_on, live) or (live and r.clicked())) setRemote(a, !p.remote_on);
     }
     const p = &a.view.devices;
     if (p.failure.items.len > 0) {

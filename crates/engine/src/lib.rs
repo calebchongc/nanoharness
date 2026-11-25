@@ -81,7 +81,7 @@ pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
 pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
 pub use repos::{CheckoutIdentity, Repos, is_own_branch, worktree_branch_from_title};
-pub use rpc::EngineRpc;
+pub use rpc::{EngineRpc, RelayRpc};
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
 pub use source_control::{
@@ -509,9 +509,10 @@ impl EngineCore {
             .map_err(|e| EngineError::Other(e.to_string()))
     }
 
-    /// Start hosting our device room: serve the full RPC surface to relay clients and
-    /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
-    /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
+    /// Start hosting our device room: serve ControlRpc to relay clients (gated
+    /// by Settings → Devices → Allow remote control) and warm-open chat docs
+    /// on nudges (§7 cold-chat command delivery). The token source re-reads
+    /// auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> harness_rpc::HostRelay {
         let auth = self.auth();
         let config =
@@ -541,7 +542,7 @@ impl EngineCore {
                 }
             }
         });
-        harness_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        harness_rpc::HostRelay::spawn(config, self.relay_rpc_service(), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -578,6 +579,14 @@ impl EngineCore {
             .with_external_history(self.external_history.clone())
             .with_harness_updates(self.harness_updates.clone());
         Arc::new(rpc)
+    }
+
+    /// The ControlRpc surface exposed on this computer's device-room host
+    /// socket. Same handlers as [`Self::rpc_service`], gated by Settings →
+    /// Devices → Allow remote control so a compromised edge cannot drive
+    /// commands on a machine that never opted in.
+    pub fn relay_rpc_service(&self) -> std::sync::Arc<dyn harness_rpc::RpcService> {
+        crate::rpc::RelayRpc::wrap(self.rpc_service(), self.registry.clone())
     }
 
     /// Revoke every account-scoped transport before any slower graceful

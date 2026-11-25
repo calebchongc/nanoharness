@@ -24,6 +24,7 @@ pub use git_actions::*;
 pub mod github_repository;
 pub use github_repository::*;
 pub mod device_room;
+mod remote_control;
 mod server;
 mod ws;
 
@@ -33,6 +34,7 @@ pub use device_room::{
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
+pub use remote_control::{RELAY_LOCAL_ONLY, REMOTE_CONTROL_OFF, RelayAdmit, admit_relay_rpc};
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
@@ -70,6 +72,11 @@ pub mod methods {
     /// full-access fallback existing installs keep.
     pub const GET_AUTONOMY: &str = "GetAutonomy";
     pub const SET_AUTONOMY: &str = "SetAutonomy";
+    /// Whether this computer serves ControlRpc over its device-room host
+    /// relay. Off until the user enables it in Settings → Devices. Replies
+    /// `{ enabled }`. `SetRemoteControl` is local IPC only.
+    pub const GET_REMOTE_CONTROL: &str = "GetRemoteControl";
+    pub const SET_REMOTE_CONTROL: &str = "SetRemoteControl";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

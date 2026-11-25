@@ -25,9 +25,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
+use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::{MessageRole, MessageStatus, SessionCommandPayload};
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_proto::{
     AgentEvent, Device, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
@@ -184,7 +184,10 @@ fn registry() -> Arc<HarnessRegistry> {
 fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
-    EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
+    let core =
+        EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles");
+    core.registry.set_remote_control(true);
+    core
 }
 
 fn complete_assistant_count(core: &EngineCore) -> usize {

@@ -143,6 +143,49 @@ fn autonomy_reply(registry: &HarnessRegistry) -> serde_json::Value {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetRemoteControlParams {
+    enabled: bool,
+}
+
+/// `GetRemoteControl` / `SetRemoteControl` reply.
+fn remote_control_reply(registry: &HarnessRegistry) -> serde_json::Value {
+    serde_json::json!({ "enabled": registry.remote_control() })
+}
+
+/// Host-relay wrapper: the same [`EngineRpc`] the local IPC socket serves,
+/// with [`harness_rpc::admit_relay_rpc`] in front. Compromised-edge frames
+/// cannot flip the gate (`SetRemoteControl` is local-only) and cannot run
+/// commands until the user enables Settings → Devices → Allow remote control.
+pub struct RelayRpc {
+    inner: std::sync::Arc<dyn RpcService>,
+    registry: std::sync::Arc<HarnessRegistry>,
+}
+
+impl RelayRpc {
+    pub fn wrap(
+        inner: std::sync::Arc<dyn RpcService>,
+        registry: std::sync::Arc<HarnessRegistry>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { inner, registry })
+    }
+}
+
+#[async_trait]
+impl RpcService for RelayRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        match harness_rpc::admit_relay_rpc(self.registry.remote_control(), method) {
+            harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
+            harness_rpc::RelayAdmit::RemoteControlOff => {
+                Err(RpcError::Failed(harness_rpc::REMOTE_CONTROL_OFF.into()))
+            }
+            harness_rpc::RelayAdmit::LocalOnly => {
+                Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct SetGraffCompactAtParams {
     /// Percent of the context window; `null` restores graff's default.
     pct: Option<u8>,
@@ -1631,6 +1674,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_AUTONOMY
             | methods::SET_AUTONOMY
+            | methods::GET_REMOTE_CONTROL
             | methods::GET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
@@ -2366,6 +2410,17 @@ impl RpcService for EngineRpc {
                 let p: SetAutonomyParams = parse_params(params)?;
                 self.registry.set_autonomy(p.autonomy);
                 RpcReply::value(&autonomy_reply(&self.registry))
+            }
+            methods::GET_REMOTE_CONTROL => RpcReply::value(&remote_control_reply(&self.registry)),
+            methods::SET_REMOTE_CONTROL => {
+                if let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
+                    && target != self.doc_host.device_id()
+                {
+                    return Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()));
+                }
+                let p: SetRemoteControlParams = parse_params(params)?;
+                self.registry.set_remote_control(p.enabled);
+                RpcReply::value(&remote_control_reply(&self.registry))
             }
             methods::GET_GRAFF_DRAFT_SUBAGENTS => {
                 RpcReply::value(&self.registry.graff_draft_subagents())
@@ -5149,6 +5204,11 @@ mod tests {
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
+        assert!(forwardable(methods::GET_REMOTE_CONTROL));
+        assert!(
+            !forwardable(methods::SET_REMOTE_CONTROL),
+            "opting this computer into remote control is local IPC only"
+        );
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

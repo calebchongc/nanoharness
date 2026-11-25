@@ -35,7 +35,7 @@ fn keywords(section: Section) []const u8 {
         .mcp => "integration tools protocol server",
         .extensions => "plugins extensions native panels controls callbacks github runners workers",
         .github_ci => "continuous integration build test runner repository GitHub",
-        .devices => "update release version hourly install automatic background download restart computer host remote desktop",
+        .devices => "update release version hourly install automatic background download restart computer host remote desktop control relay",
         .appshots => "screenshot capture permission",
         .usage => "tokens model usage token counts local usage codex",
         .archived => "archive restore recover sessions chats history",
@@ -64,6 +64,7 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.notifications, "privacy telemetry"));
     try t.expect(matches(.devices, "hourly updates"));
     try t.expect(matches(.devices, "automatic updates"));
+    try t.expect(matches(.devices, "remote control"));
     try t.expect(matches(.appearance, "font motion"));
     try t.expect(matches(.appearance, "before after design"));
     try t.expect(!matches(.files, "GitHub links"));
