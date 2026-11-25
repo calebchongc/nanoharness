@@ -620,6 +620,9 @@ fn harness_mcp_servers(harness: HarnessId, origin: Option<&crate::RunOrigin>) ->
     if let Ok(port) = std::env::var("HARNESS_IPC_PORT") {
         env.push(json!({ "name": "HARNESS_IPC_PORT", "value": port }));
     }
+    if let Some(token) = origin.ipc_token.as_deref() {
+        env.push(json!({ "name": "HARNESS_IPC_TOKEN", "value": token }));
+    }
     json!([{
         "name": "harness",
         "command": program.to_string_lossy(),
@@ -3534,6 +3537,7 @@ fn handle_server_request_live(
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: false,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
@@ -3590,6 +3594,7 @@ fn ask_permission_yes_no(
         prefill: None,
         multiline: false,
         multi_select: false,
+        requires_human_ui: true,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
@@ -6366,6 +6371,21 @@ mod tests {
             session_mcp_servers(json!([harness.clone()]), &stdio_only, &servers),
             json!([harness])
         );
+        // The run's scoped IPC token passes only into harness MCP server env.
+        let origin = crate::RunOrigin {
+            chat_id: "c1".into(),
+            build_wait_dir: None,
+            ipc_token: Some("mcp-secret-tok".into()),
+        };
+        let mcp = harness_mcp_servers(HarnessId::Graff, Some(&origin));
+        if let Some(arr) = mcp.as_array()
+            && !arr.is_empty()
+        {
+            let env = arr[0]["env"].as_array().unwrap();
+            assert!(env.iter().any(|item| {
+                item["name"] == "HARNESS_IPC_TOKEN" && item["value"] == "mcp-secret-tok"
+            }));
+        }
         // The run's token never reaches a log line.
         let logged = format!("{:?}", servers[0]);
         assert!(
@@ -7070,6 +7090,7 @@ mod tests {
             prefill: None,
             multiline: false,
             multi_select: false,
+            requires_human_ui: true,
         };
         let answer = |label: &str| UserInputAnswer {
             question_id: "q".into(),
