@@ -27,12 +27,13 @@ enum DeviceCrypto {
         key: Curve25519.Signing.PrivateKey,
         nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
     ) throws -> Data {
-        var nonceBytes = Data(count: 16)
-        nonceBytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
-        let nonce = b64(nonceBytes)
+        var nonceBytes = [UInt8](repeating: 0, count: 16)
+        let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
+        guard status == errSecSuccess else { throw EnvelopeError.badEnvelope }
+        let nonce = b64(Data(nonceBytes))
         let body = b64(inner)
         let msg = signMessage(deviceId: deviceId, ts: nowMs, nonce: nonce, body: inner)
-        let sig = key.signature(for: msg)
+        let sig = try key.signature(for: msg)
         let env = Envelope(
             deviceId: deviceId,
             ts: nowMs,

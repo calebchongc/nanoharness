@@ -115,10 +115,13 @@ pub fn manifestMessage(arena: Allocator, version: []const u8, files: ?json.Objec
             }
         }.less);
         for (names.items) |name| {
-            const sha = Manifest.sha256From(map, name) orelse continue;
+            const meta = map.get(name) orelse continue;
+            if (meta != .object) continue;
+            const sha_v = meta.object.get("sha256") orelse continue;
+            if (sha_v != .string) continue;
             try buf.appendSlice(arena, name);
             try buf.append(arena, '=');
-            try buf.appendSlice(arena, sha);
+            try buf.appendSlice(arena, sha_v.string);
             try buf.append(arena, '\n');
         }
     }
@@ -2254,7 +2257,7 @@ test "updates: a generated Ed25519 key signs and verifies a manifest message" {
         break :blk o;
     } });
     const msg = try manifestMessage(arena.allocator(), "0.2.300", files);
-    const sig = kp.sign(msg, null);
+    const sig = try kp.sign(msg, null);
     try testing.expect(verifyManifestSig(msg, &sig.toBytes(), kp.public_key.toBytes()));
     var bad = sig.toBytes();
     bad[0] ^= 1;

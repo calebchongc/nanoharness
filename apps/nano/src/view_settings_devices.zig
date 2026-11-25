@@ -61,7 +61,7 @@ pub const Pending = struct {
     id: []u8,
     device_id: []u8,
     summary: []u8,
-};;
+};
 
 fn setTo(gpa: Allocator, list: *std.ArrayList(u8), s: []const u8) void {
     list.clearRetainingCapacity();
