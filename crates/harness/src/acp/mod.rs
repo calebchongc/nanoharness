@@ -2620,6 +2620,10 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
             capabilities["subagents"] = json!({});
             capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
         }
+    } else if harness == HarnessId::Antigravity {
+        // agy (verified 1.5.14) sends ask_question as a form elicitation, and
+        // writes the questions into its reply as text for clients that don't.
+        capabilities["elicitation"] = elicitation::capability();
     }
     json!({
         "protocolVersion": 1,
@@ -6395,7 +6399,7 @@ mod tests {
     }
 
     #[test]
-    fn only_graff_is_offered_form_elicitation() {
+    fn graff_and_antigravity_are_offered_form_elicitation() {
         for subagents in [false, true] {
             let graff = initialize_params_with_subagents(HarnessId::Graff, subagents);
             assert_eq!(
@@ -6403,6 +6407,12 @@ mod tests {
                 json!({ "form": {} })
             );
         }
+        // agy asks ask_question in chat text unless a form is offered.
+        let antigravity = initialize_params(HarnessId::Antigravity);
+        assert_eq!(
+            antigravity["clientCapabilities"]["elicitation"],
+            json!({ "form": {} })
+        );
         for other in [HarnessId::Devin, HarnessId::Grok] {
             let params = initialize_params(other);
             assert!(params["clientCapabilities"].get("elicitation").is_none());
