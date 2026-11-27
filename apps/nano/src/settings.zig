@@ -172,6 +172,31 @@ pub const Flag = enum {
     star_banner_dismissed,
 };
 
+/// Settings › Appearance's "Reduce motion", as saved in `reduceMotion`.
+pub const ReduceMotion = enum {
+    system,
+    on,
+    off,
+
+    pub fn fromKey(k: ?[]const u8) ReduceMotion {
+        return std.meta.stringToEnum(ReduceMotion, k orelse return .system) orelse .system;
+    }
+
+    /// What the choice forces, or null to follow the system.
+    pub fn override(p: ReduceMotion) ?bool {
+        return switch (p) {
+            .system => null,
+            .on => true,
+            .off => false,
+        };
+    }
+
+    /// Whether motion is reduced, given what the system asks for.
+    pub fn resolve(p: ReduceMotion, system_reduces: bool) bool {
+        return p.override() orelse system_reduces;
+    }
+};
+
 pub const sidebar_min: f32 = 224;
 pub const sidebar_max: f32 = 400;
 pub const sidebar_default: f32 = sidebar_min;
@@ -400,6 +425,10 @@ pub const Store = struct {
     /// A number the file holds under `key`, if it holds one.
     pub fn number(s: *const Store, key: []const u8) ?f64 {
         return jsonNumber(s.doc.get(key));
+    }
+
+    pub fn reduceMotion(s: *const Store) ReduceMotion {
+        return ReduceMotion.fromKey(s.text("reduceMotion"));
     }
 
     /// The accent preset's name, or null for the theme's own.

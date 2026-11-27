@@ -273,6 +273,13 @@ pub const Context = struct {
     motion: @import("motion.zig").State = .{},
     /// The system's Reduce Motion: springs and tweens are their target.
     reduce_motion: bool = false,
+    /// What the system itself asks for, before an app's own preference.
+    system_reduce_motion: bool = false,
+    /// An app's own Reduce Motion choice, or null to follow the system. The
+    /// platform applies it to `reduce_motion`/`reduced_motion` before each
+    /// frame (and before that frame's scrolling), with the system's value
+    /// kept in `system_reduce_motion`.
+    reduce_motion_override: ?bool = null,
     /// Horizontal offsets of `scroll_x` boxes, by id.
     scroll_x: std.AutoHashMapUnmanaged(u64, f32) = .empty,
     truncates: std.AutoHashMapUnmanaged(u64, text.Cut) = .empty,
