@@ -456,7 +456,7 @@ pub fn rpcCallWithBearer(gpa: Allocator, io: Io, port: u16, bearer: ?[]const u8,
     // and never upgrades can't hang the command.
     const addr = Io.net.IpAddress.parseIp4("127.0.0.1", port) catch return error.NoEngine;
     const stream = addr.connect(io, .{ .mode = .stream }) catch return error.NoEngine;
-    var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
+    var hs_dog: auth_host.SocketWatchdog = .{ .io = io, .stream = stream, .ms = timeout_ms };
     hs_dog.arm();
     const upgraded = ws.Client.upgradeWithBearer(gpa, io, stream, port, "/", bearer);
     if (hs_dog.disarm()) {

@@ -904,7 +904,7 @@ fn downloadErrorText(e: anyerror) []const u8 {
 /// when it hasn't moved for `idle_ms`, shuts the socket down.
 const IdleWatchdog = struct {
     io: std.Io,
-    handle: std.Io.net.Socket.Handle,
+    stream: std.Io.net.Stream,
     idle_ms: u32,
     progress: std.atomic.Value(u64) = .init(0),
     done: std.atomic.Value(bool) = .init(false),
@@ -929,7 +929,7 @@ const IdleWatchdog = struct {
             still_ms += 20;
             if (still_ms >= self.idle_ms) {
                 self.fired.store(true, .release);
-                @import("auth_host.zig").shutdownSocket(self.handle);
+                @import("auth_host.zig").shutdownSocket(self.io, self.stream);
                 return;
             }
         }
@@ -968,7 +968,7 @@ pub fn fetchInto(gpa: Allocator, io: std.Io, url: []const u8, limits: FetchLimit
             .headers = .{ .user_agent = .{ .override = "harness-engine-zig" } },
         });
         defer req.deinit();
-        var dog: IdleWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .idle_ms = limits.idle_ms };
+        var dog: IdleWatchdog = .{ .io = io, .stream = req.connection.?.stream_reader.stream, .idle_ms = limits.idle_ms };
         dog.arm();
         const step = fetchStep(gpa, &req, limits, sink, hash, &dog);
         const fired = dog.disarm();

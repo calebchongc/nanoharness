@@ -40,7 +40,7 @@ pub fn h1Method(method: []const u8) ?std.http.Method {
 /// the blocked read or write. The socket must not be reused afterwards.
 pub const SocketWatchdog = struct {
     io: std.Io,
-    handle: std.Io.net.Socket.Handle,
+    stream: std.Io.net.Stream,
     ms: u32,
     done: std.Io.Event = .unset,
     fired: std.atomic.Value(bool) = .init(false),
@@ -53,7 +53,7 @@ pub const SocketWatchdog = struct {
     fn run(self: *SocketWatchdog) void {
         self.done.waitTimeout(self.io, .{ .duration = .{ .raw = .fromMilliseconds(self.ms), .clock = .awake } }) catch {
             self.fired.store(true, .release);
-            shutdownSocket(self.handle);
+            shutdownSocket(self.io, self.stream);
         };
     }
 
@@ -66,15 +66,8 @@ pub const SocketWatchdog = struct {
     }
 };
 
-pub fn shutdownSocket(handle: std.Io.net.Socket.Handle) void {
-    if (comptime builtin.os.tag == .windows) {
-        const W = struct {
-            extern "ws2_32" fn shutdown(s: std.Io.net.Socket.Handle, how: c_int) callconv(.winapi) c_int;
-        };
-        _ = W.shutdown(handle, 2); // SD_BOTH
-    } else {
-        _ = std.c.shutdown(handle, std.posix.SHUT.RDWR);
-    }
+pub fn shutdownSocket(io: std.Io, stream: std.Io.net.Stream) void {
+    stream.shutdown(io, .both) catch {};
 }
 
 /// Thread-safe pool of warm `http_zig.Session` (TLS 1.3 + ALPN `h2` + cached Root CA bundle)
@@ -1010,7 +1003,7 @@ pub const AuthManager = struct {
                 hdr_buf[hdr_len] = eh;
                 hdr_len += 1;
             }
-            var dog: SocketWatchdog = .{ .io = io, .handle = sess.stream.socket.handle, .ms = timeout_ms };
+            var dog: SocketWatchdog = .{ .io = io, .stream = sess.stream, .ms = timeout_ms };
             dog.arm();
             const sent = sess.request(.{
                 .method = method,
@@ -1060,7 +1053,7 @@ pub const AuthManager = struct {
         var stream = try ip_addr.connect(io, .{ .mode = .stream });
         setTcpNoDelay(stream);
         defer stream.close(io);
-        var dog: SocketWatchdog = .{ .io = io, .handle = stream.socket.handle, .ms = timeout_ms };
+        var dog: SocketWatchdog = .{ .io = io, .stream = stream, .ms = timeout_ms };
         dog.arm();
         const result = loopbackExchange(gpa, io, stream, method, path, hostport, bearer_token, extra_headers, req_body);
         if (dog.disarm()) {
@@ -1153,7 +1146,7 @@ pub const AuthManager = struct {
             .keep_alive = false,
         });
         defer req.deinit();
-        var dog: SocketWatchdog = .{ .io = io, .handle = req.connection.?.stream_reader.stream.socket.handle, .ms = timeout_ms };
+        var dog: SocketWatchdog = .{ .io = io, .stream = req.connection.?.stream_reader.stream, .ms = timeout_ms };
         dog.arm();
         const status = h1Exchange(client, &req, payload, response_writer);
         if (dog.disarm()) return error.Timeout;
