@@ -36,6 +36,22 @@ handles. WebKit is allocated only when a nonempty Browser tab is actually
 shown; the normal native app's startup does not create browser processes.
 Browser navigation is event driven, not polled.
 
+## Preview consumers
+
+graff stops a background server that is still listening only when
+`~/.codegraff/preview-consumers.json` holds an explicit 0 for its port
+(codegraff #941). Nano writes that file: the number of web tabs that show
+each loopback port (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`), and
+0 once the last of them closes or Nano quits. Each Nano process also keeps
+its own counts in the file, so the next one to start retires the counts of
+a process that crashed. A port Nano handed to a browser it cannot see (a
+transcript link opened in the system browser, **Open externally**, **Open
+in browse**) is never written as 0 while that Nano runs. Zeros expire after
+a day. Updates take a lock beside the file and rename a complete file into
+place. `apps/nano/src/preview_consumers_vectors.json` pins the contract;
+graff runs an identical copy. Hidden, scripted and replayed runs, tests and
+scenes do not write it.
+
 ## Checks
 
 From `apps/nano` (nanoui is the in-tree copy at `apps/nano/nanoui`):
