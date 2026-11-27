@@ -71,10 +71,6 @@ pub fn shutdownSocket(io: std.Io, stream: std.Io.net.Stream) void {
     stream.shutdown(io, .both) catch {};
 }
 
-fn h2Request(sess: *http_zig.Session, request: anytype) @TypeOf(sess.request(request)) {
-    return sess.request(request);
-}
-
 /// Thread-safe pool of warm `http_zig.Session` (TLS 1.3 + ALPN `h2` + cached Root CA bundle)
 /// connections across origins. Eliminates per-request macOS CA bundle rescans, DNS lookups,
 /// TCP 3-way handshakes, TLS 1.3 handshakes, and HTTP/2 SETTINGS prefaces, while allowing
@@ -1008,7 +1004,7 @@ pub const AuthManager = struct {
                 hdr_buf[hdr_len] = eh;
                 hdr_len += 1;
             }
-            const h2_request = .{
+            const h2_request: http_zig.Request = .{
                 .method = method,
                 .scheme = "https",
                 .authority = u.host,
@@ -1017,7 +1013,7 @@ pub const AuthManager = struct {
                 .body = req_body orelse "",
             };
             const sent = if (comptime builtin.os.tag == .windows) blk: {
-                const outcome = try io_deadline.run(io, timeout_ms, null, h2Request, .{ sess, h2_request });
+                const outcome = try io_deadline.run(io, timeout_ms, null, http_zig.Session.request, .{ sess, h2_request });
                 switch (outcome) {
                     .finished => |result| break :blk result,
                     .timed_out => |result| {
@@ -1040,7 +1036,7 @@ pub const AuthManager = struct {
             } else blk: {
                 var dog: SocketWatchdog = .{ .io = io, .stream = sess.stream, .ms = timeout_ms };
                 dog.arm();
-                const result = h2Request(sess, h2_request);
+                const result = sess.request(h2_request);
                 if (dog.disarm()) {
                     timed_out = true;
                     if (result) |r| {
@@ -1089,11 +1085,17 @@ pub const AuthManager = struct {
             switch (outcome) {
                 .finished => |value| break :blk value,
                 .timed_out => |value| {
-                    if (value) |reply| reply.deinit(gpa) else |_| {}
+                    if (value) |reply| {
+                        var late = reply;
+                        late.deinit(gpa);
+                    } else |_| {}
                     return error.Timeout;
                 },
                 .canceled => |value| {
-                    if (value) |reply| reply.deinit(gpa) else |_| {}
+                    if (value) |reply| {
+                        var late = reply;
+                        late.deinit(gpa);
+                    } else |_| {}
                     return error.Canceled;
                 },
             }
@@ -1102,7 +1104,10 @@ pub const AuthManager = struct {
             dog.arm();
             const value = loopbackExchange(gpa, io, stream, method, path, hostport, bearer_token, extra_headers, req_body);
             if (dog.disarm()) {
-                if (value) |reply| reply.deinit(gpa) else |_| {}
+                if (value) |reply| {
+                    var late = reply;
+                    late.deinit(gpa);
+                } else |_| {}
                 return error.Timeout;
             }
             break :blk value;
