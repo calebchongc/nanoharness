@@ -16,6 +16,7 @@ pub const Name = enum {
     @"alt-arrow-down",
     @"alt-arrow-left",
     @"alt-arrow-right",
+    @"alt-arrow-up",
     @"antigravity-mark",
     @"archive-minimalistic",
     @"archive-up-minimalistic",

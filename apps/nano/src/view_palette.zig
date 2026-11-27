@@ -245,10 +245,7 @@ pub fn activate(a: *App, e: Entry) void {
         .tab_overview => @import("view_tab_overview.zig").open(a),
         .toggle_side_panel => @import("app_panels.zig").toggleHost(a),
         .toggle_files => @import("app_files.zig").toggle(a),
-        .toggle_terminal => {
-            a.actions.dock_open = !a.actions.dock_open;
-            a.redraw();
-        },
+        .toggle_terminal => @import("app_actions.zig").toggleDock(a),
         .chat_history => toggle(a, .chat_history),
         .custom_theme_studio => @import("view_custom_theme_studio.zig").open(a),
         .open_design_canvas => {
@@ -1292,7 +1289,7 @@ fn previewActionsBar(
 }
 
 /// A shortcut's combination as the keymap has it, its default when unset.
-fn comboFor(a: *const App, key: []const u8) []const u8 {
+pub fn comboFor(a: *const App, key: []const u8) []const u8 {
     for (shortcuts.all) |sc| if (std.mem.eql(u8, sc.key, key)) {
         const combo = a.settings.combo(sc);
         return if (combo.len > 0) combo else sc.default;

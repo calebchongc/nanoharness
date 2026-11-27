@@ -672,11 +672,20 @@ test "retention custom panel chords reach their actual panel actions (#793)" {
         try h.init(true);
         defer h.deinit();
         try rebind(&h, key);
+        const terminal = std.mem.eql(u8, key, "toggleTerminal");
+        // The dock opens over a run, as its title-bar button does.
+        if (terminal) try h.a.actions.runs.append(testing.allocator, .{
+            .name = try testing.allocator.dupe(u8, "Synthetic build"),
+            .log = .{ .gpa = testing.allocator, .palette = h.a.ansi },
+        });
         h.press(custom);
         if (std.mem.eql(u8, key, "toggleFiles")) {
             try testing.expect(h.a.panels.files_open);
-        } else if (std.mem.eql(u8, key, "toggleChanges") or std.mem.eql(u8, key, "toggleTerminal")) {
+        } else if (std.mem.eql(u8, key, "toggleChanges")) {
             try testing.expect(h.a.panels.host_open);
+        } else if (terminal) {
+            try testing.expect(h.a.actions.dock_open);
+            try testing.expect(!h.a.panels.host_open);
         } else {
             // Keyboard splits inherit the source destination without a picker,
             // including when dispatched through a saved custom binding.
