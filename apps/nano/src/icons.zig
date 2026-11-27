@@ -76,6 +76,7 @@ pub const Name = enum {
     @"maker-qwen",
     @"maker-zai",
     microphone,
+    minus,
     monitor,
     moon,
     @"more-horizontal",

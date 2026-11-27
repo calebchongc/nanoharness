@@ -466,3 +466,92 @@ test "control audit: the paperclip and microphone say what they do" {
     const mic = iconBox(&h, "microphone", 28, 28, 300) orelse return error.MissingMic;
     try testing.expectEqualStrings("Dictate", tipAt(&h, h.t.ctx.nodes.items[mic].rect) orelse return error.MissingMicTooltip);
 }
+
+// ---- Side panels ----
+
+test "control audit: the empty Session pull requests pane has one repository button" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    @import("app_git.zig").open(&h.a, .github);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("No session-linked pull requests"));
+    try testing.expect(h.t.hasText("Browse repository"));
+    try testing.expect(!h.t.hasText("Repository"));
+}
+
+test "control audit: the diffs toolbar's discard and fold icons are named" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    const panels = @import("app_panels.zig");
+    panels.addDiffsTab(&h.a);
+    var d: panels.Diff = .{ .arena = .init(testing.allocator), .additions = 1, .deletions = 1 };
+    d.files = try @import("diff.zig").parse(d.arena.allocator(),
+        \\diff --git a/src/synthetic.rs b/src/synthetic.rs
+        \\--- a/src/synthetic.rs
+        \\+++ b/src/synthetic.rs
+        \\@@ -1,2 +1,2 @@
+        \\ fn parse() {
+        \\-    old();
+        \\+    new();
+        \\
+    );
+    if (h.a.panels.diff) |*old| old.arena.deinit();
+    h.a.panels.diff = d;
+    h.a.panels.diff_loading = false;
+    h.t.settle(1);
+    const trash = button(&h, "Undo all changes") orelse return error.MissingDiscardName;
+    try testing.expectEqual(@as(usize, 1), iconsUnder(&h, trash.node_index, "trash-bin-minimalistic"));
+    try testing.expectEqualStrings("Undo all changes", tipAt(&h, rectOf(&h, trash)) orelse return error.MissingDiscardTooltip);
+    const fold = button(&h, "Collapse all files") orelse return error.MissingFoldName;
+    try testing.expectEqualStrings("Collapse all files", tipAt(&h, rectOf(&h, fold)) orelse return error.MissingFoldTooltip);
+}
+
+test "control audit: Design canvas zoom buttons are not arrows" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.design);
+    @import("app_panels.zig").openDesignCanvas(&h.a);
+    h.t.settle(1);
+    const out = button(&h, "Zoom out") orelse return error.MissingZoomOut;
+    const in = button(&h, "Zoom in") orelse return error.MissingZoomIn;
+    try testing.expectEqual(@as(usize, 0), iconsUnder(&h, out.node_index, "alt-arrow-left"));
+    try testing.expectEqual(@as(usize, 0), iconsUnder(&h, in.node_index, "alt-arrow-right"));
+    try testing.expectEqual(@as(usize, 1), iconsUnder(&h, in.node_index, "plus"));
+}
+
+test "control audit: a generated visual button with no handler is not drawn as a live button" {
+    const clock = @import("visual_luau.zig").TestClock.init();
+    defer clock.deinit();
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"vis-inert","role":"assistant","status":"complete","parts":[
+        \\ {"id":"v-inert","kind":"visual","title":"Synthetic controls","script":"return function() return ui.row { ui.button { label = \"Inert action\" }, ui.button { label = \"Live action\", onClick = function() end } } end"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    var inert: ?bool = null;
+    var live: ?bool = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |t| {
+            const is_inert = std.mem.eql(u8, t.str, "Inert action");
+            if (!is_inert and !std.mem.eql(u8, t.str, "Live action")) continue;
+            var at = node.parent;
+            while (at != none) : (at = h.t.ctx.nodes.items[at].parent) {
+                const box = h.t.ctx.nodes.items[at];
+                if (box.style.min_height == 38) {
+                    if (is_inert) inert = box.style.control else live = box.style.control;
+                    break;
+                }
+            }
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(?bool, true), live);
+    try testing.expectEqual(@as(?bool, false), inert);
+}
