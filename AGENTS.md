@@ -68,6 +68,18 @@ offered in drafts. Update them in the same change and run
   the workflow doesn't keep dSYMs. Rebuild the same commit with the workflow's
   Xcode version and map the offsets with `atos`.
 
+## Agent-driven tests
+
+Every new feature, and every change to behaviour that guards access or stores
+user state, is built by three separate agents in one worktree, one after
+another. A test author writes the test plan and failing tests before any
+implementation; an implementer makes them pass without weakening an
+assertion; a breaker mutates the code and attacks it, and turns each
+surviving mutant or defect into a failing test. The pull request carries the
+plan table and the mutation result. A small fix keeps "Reproduce first" and
+needs one agent.
+The method is in [`docs/agent-driven-tests.md`](docs/agent-driven-tests.md).
+
 ## Commits and pull requests
 
 No Claude or Anthropic attribution anywhere: no `Co-Authored-By` trailers
