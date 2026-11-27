@@ -303,7 +303,10 @@ pub fn derive(
                     "Ready to review"
                 else
                     (lastProgressLine(p.output) orelse "Done"),
-                .failed => lastProgressLine(p.output) orelse "Failed",
+                // A spawn call that succeeded (a detached child's) says
+                // nothing about the failure; the chip's tail holds its reason.
+                .failed => (if (p.is_error) null else lastProgressLine(p.subagent_tail)) orelse
+                    lastProgressLine(p.output) orelse "Failed",
                 .cancelled => "Stopped",
                 .ended => "Ended without reporting an outcome",
             };
@@ -549,6 +552,33 @@ test "a child is completed only when its own status says so" {
     try testing.expectEqual(@as(?S, .done), parts[1].subagent_status);
     try testing.expectEqual(@as(?S, null), parts[2].subagent_status);
     try testing.expectEqual(AgentState.ended, resolveAgentState(null, parts[0].subagent_status, true, false, false));
+}
+
+test "a detached child's failure reason, not its spawn result, details its row" {
+    const testing = std.testing;
+    var t: tr.Transcript = .{ .gpa = testing.allocator };
+    defer t.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[
+        \\  {"id":"u1","role":"user","parts":[{"id":"up","kind":"text","text":"Inspect the example in the background"}]},
+        \\  {"id":"a1","role":"assistant","status":"complete","parts":[
+        \\    {"id":"bg","kind":"tool","resolved":true,"output":"Started background agent sa-001.","subagentStatus":"failed",
+        \\     "subagentTail":"synthetic bad argument [invalid-arguments failure, 1 attempt]","call":{"kind":"unknown","name":"Agent: Inspect example"}},
+        \\    {"id":"fg","kind":"tool","resolved":true,"isError":true,"output":"subagent sa-002 failed before producing a report: synthetic 503","subagentStatus":"failed",
+        \\     "subagentTail":"synthetic 503","call":{"kind":"unknown","name":"Agent: Check fixtures"}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try t.apply(parsed.value);
+    var prog: progress_mod.State = .init(testing.allocator);
+    defer prog.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const w = derive(arena.allocator(), t.entries.items, &prog, false);
+    try testing.expectEqual(@as(usize, 2), w.agents.len);
+    try testing.expectEqual(AgentState.failed, w.agents[0].state);
+    try testing.expectEqualStrings("synthetic bad argument [invalid-arguments failure, 1 attempt]", w.agents[0].detail);
+    // A failed spawn call's own result stays its detail.
+    try testing.expectEqualStrings("subagent sa-002 failed before producing a report: synthetic 503", w.agents[1].detail);
 }
 
 test "809 placeCard clamps within window margins and flips below when top-clipped" {

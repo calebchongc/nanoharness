@@ -11,12 +11,13 @@ use std::collections::{HashMap, HashSet};
 use harness_proto::{AgentEvent, DoneStatus, ToolCall};
 use serde_json::{Value, json};
 
-use super::normalize::map_update;
+use super::normalize::{map_update, subagent_reason};
 
-/// What a failed child says when graff sent no reason. Its terminal frames
-/// carry `state` alone (`acp_subagent_live.zig` `finish` and
-/// `finishBackground`); only a foreground child's parent tool result has
-/// the failure text.
+/// What a failed child says when graff sent no reason. Older engines' terminal
+/// frames carry `state` alone (`acp_subagent_live.zig` `finish` and
+/// `finishBackground`); then only a foreground child's parent tool result
+/// has the failure text. Newer ones add `reason` (and `failureKind`, which
+/// Harness has no place for and ignores).
 pub(crate) const NO_REASON: &str = "The subagent failed. Graff did not report why.";
 
 #[derive(Default)]
@@ -120,11 +121,12 @@ impl GraffTracker {
                     return Vec::new();
                 };
                 // A detached child's spawn call resolved long ago: no
-                // result with a reason follows this frame.
+                // result with a reason follows this frame, only its own.
                 self.map_subagent(
                     &self.parent_session.clone(),
                     &json!({
                         "sessionUpdate": "subagent_update", "subagentSessionId": id, "state": state,
+                        "_meta": { "graff/subagent": { "reason": event.get("reason") } },
                     }),
                     false,
                 )
@@ -294,7 +296,13 @@ impl GraffTracker {
         if let Some(status) = status {
             self.settled.insert(id.to_owned());
             if status == DoneStatus::Errored {
-                if result_follows && tool_backed && parent == self.parent_session {
+                // The frame's own reason wins; then the parent's result is
+                // ordinary tool output and settles nothing a second time.
+                if let Some(reason) =
+                    subagent_reason(update.pointer("/_meta/graff~1subagent/reason"))
+                {
+                    events.extend(self.failed_done(id, &reason));
+                } else if result_follows && tool_backed && parent == self.parent_session {
                     self.awaiting_reason.insert(chip_id, id.to_owned());
                 } else {
                     events.extend(self.failed_done(id, NO_REASON));
@@ -628,9 +636,9 @@ mod tests {
         assert!(tracker.finish_open(DoneStatus::Interrupted).is_empty());
     }
 
-    // graff's background `terminal` event is `{type, state}` and nothing else
-    // (acp_subagent_live.zig `finishBackground`), and a draft child whose
-    // parent result never arrives has no reason either. Say it failed, and
+    // An older graff's background `terminal` event is `{type, state}` and
+    // nothing else (acp_subagent_live.zig `finishBackground`), and a draft
+    // child whose parent result never arrives has no reason either. Say it failed, and
     // that no reason came, rather than inventing one or calling it
     // disconnected.
     #[test]
@@ -672,5 +680,118 @@ mod tests {
             child_done(&open, "call-fg"),
             Some((DoneStatus::Errored, Some(NO_REASON.to_owned())))
         );
+    }
+
+    fn child_dones(events: &[AgentEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, AgentEvent::Subagent { event, .. }
+                if matches!(event.as_ref(), AgentEvent::Done { .. }))
+            })
+            .count()
+    }
+
+    // Newer graff puts the reason on the background terminal event itself.
+    #[test]
+    fn background_terminal_reason_is_the_failure_text() {
+        let mut tracker = GraffTracker::new("parent".into());
+        tracker.map_background(&background(
+            "bg",
+            "call-bg",
+            0,
+            json!({ "type": "spawn", "name": "Explore", "task": "Inspect bg" }),
+        ));
+        let reason = "synthetic quota refusal [quota/rate-limit failure, 3 attempts]";
+        let bg = tracker.map_background(&background(
+            "bg",
+            "call-bg",
+            1,
+            json!({ "type": "terminal", "state": "failed", "reason": reason, "failureKind": "quota" }),
+        ));
+        assert_eq!(
+            child_done(&bg, "call-bg"),
+            Some((DoneStatus::Errored, Some(reason.to_owned())))
+        );
+    }
+
+    // A draft terminal frame with its own reason settles at once; the
+    // parent's later result for the same call must not settle it twice.
+    #[test]
+    fn draft_terminal_reason_is_used_without_waiting_for_the_parent() {
+        let mut tracker = GraffTracker::new("parent".into());
+        tracker.map(
+            Some("parent"),
+            &json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "child",
+                "task": "Inspect example", "_meta": {"graff/parentToolCallId": "call-3"}
+            }),
+        );
+        let reason = "synthetic bad argument [invalid-arguments failure, 1 attempt]";
+        let failed = tracker.map(
+            Some("parent"),
+            &json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "child", "state": "failed",
+                "_meta": {
+                    "graff/parentToolCallId": "call-3",
+                    "graff/subagent": {"reason": reason, "failureKind": "invalid"}
+                }
+            }),
+        );
+        assert_eq!(
+            child_done(&failed, "call-3"),
+            Some((DoneStatus::Errored, Some(reason.to_owned())))
+        );
+        let result = tracker.map(
+            Some("parent"),
+            &json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "call-3", "status": "failed",
+                "content": [{"type": "content", "content": {"type": "text",
+                    "text": "subagent sa-003 failed before producing a report: synthetic bad argument"}}]
+            }),
+        );
+        assert_eq!(child_dones(&result), 0, "{result:?}");
+        assert!(
+            result
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolResult { id, is_error: true, .. } if id == "call-3"))
+        );
+        assert!(tracker.finish_open(DoneStatus::Interrupted).is_empty());
+    }
+
+    // The reason is untrusted display text: one line, no control or
+    // direction-override characters, and bounded however long it arrives.
+    #[test]
+    fn an_unsafe_reason_is_displayed_safely() {
+        let mut tracker = GraffTracker::new("parent".into());
+        tracker.map_background(&background(
+            "bg",
+            "call-bg",
+            0,
+            json!({ "type": "spawn", "name": "Explore", "task": "Inspect bg" }),
+        ));
+        let raw = format!(
+            "bad\u{1b}[31m red\r\nnext\tline\u{202e}reversed\u{0}{}",
+            "é".repeat(2000)
+        );
+        let bg = tracker.map_background(&background(
+            "bg",
+            "call-bg",
+            1,
+            json!({ "type": "terminal", "state": "failed", "reason": raw }),
+        ));
+        let Some((DoneStatus::Errored, Some(text))) = child_done(&bg, "call-bg") else {
+            panic!("{bg:?}");
+        };
+        assert!(
+            text.starts_with("bad [31m red next line reversed"),
+            "{text}"
+        );
+        assert!(
+            !text.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{text}"
+        );
+        assert!(text.len() <= 512, "{}", text.len());
+        assert!(text.ends_with('…'), "{text}");
     }
 }

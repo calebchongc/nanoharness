@@ -4007,6 +4007,17 @@ async fn drive_run(
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
             }
+            // A chip-only Done (no transcript doc: graff's default progress
+            // rows, whose detached child outlives its finished spawn call)
+            // stamps the chip's lifecycle in place, as a sink's Done does.
+            if done_only && !chip_streaming && !nested {
+                let _ = doc_ref.update_subagent_chip(
+                    parent_tool_use_id,
+                    None,
+                    subagent_chip_update(sub_event),
+                    None,
+                );
+            }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
                     // A steer splits ENTRIES, not parts — handled at the
@@ -5512,6 +5523,106 @@ mod tests {
             session_id: None,
         })
         .unwrap();
+        core.shutdown().await;
+    }
+
+    // graff's default progress rows give a detached child no transcript doc;
+    // its spawn call resolved as success long before it failed. The child's
+    // terminal state and reason (as the adapter maps graff's last row) must
+    // land on the chip, or the chip reverts to that success once the live
+    // row is gone.
+    #[tokio::test]
+    async fn detached_child_failure_settles_its_finished_spawn_chip() {
+        use super::{AgentEvent, DoneStatus, MessagePart};
+        use harness_doc::SubagentStatus;
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: true,
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-detached-failed";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(AgentEvent::ToolCall {
+            id: "spawn-1".into(),
+            call: harness_proto::ToolCall::Unknown {
+                name: "Agent: Inspect example".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(AgentEvent::ToolResult {
+            id: "spawn-1".into(),
+            is_error: false,
+            output: Some("Started background agent sa-001.".into()),
+            diff: None,
+        })
+        .unwrap();
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("ses-1".into()),
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let reason = "synthetic bad argument [invalid-arguments failure, 1 attempt]";
+        let tagged = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(event),
+        };
+        feed.send(tagged(AgentEvent::SubagentProgress {
+            summary: reason.into(),
+        }))
+        .unwrap();
+        feed.send(tagged(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some(reason.into()),
+            session_id: None,
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let entries = core
+            .doc_host
+            .open(chat)
+            .unwrap()
+            .doc_arc()
+            .read_entries()
+            .unwrap();
+        let chip = entries
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .find(|p| matches!(p, MessagePart::Tool { id, .. } if id == "spawn-1"))
+            .expect("the spawn chip");
+        let MessagePart::Tool {
+            subagent_status,
+            subagent_tail,
+            subagent_ref,
+            ..
+        } = chip
+        else {
+            unreachable!()
+        };
+        assert_eq!(*subagent_status, Some(SubagentStatus::Failed), "{chip:?}");
+        assert_eq!(subagent_tail.as_deref(), Some(reason), "{chip:?}");
+        // No transcript doc exists for it, so the chip never links to one.
+        assert_eq!(*subagent_ref, None, "{chip:?}");
         core.shutdown().await;
     }
 
