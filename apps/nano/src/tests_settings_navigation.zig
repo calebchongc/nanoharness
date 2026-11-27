@@ -147,6 +147,7 @@ test "settings navigation keeps search and Back reachable on short windows and r
         "pending-1",
         "phone",
         "Run from phone: list the files",
+        true,
     );
     h.t.settle(0.1);
     try testing.expect(h.t.hasText("Approve remote action"));
