@@ -325,10 +325,14 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 _ = kit.focusRing(c, r, k.accent, 2);
             }
             set.tile(c, k, .refresh);
-            set.words(c, k, "Install updates automatically", if (enabled)
-                "Download and install verified updates in the background. Restart when you're ready; your running chats won't be interrupted. Turning this off doesn't cancel an installation already underway."
+            const windows = @import("builtin").os.tag == .windows;
+            set.words(c, k, if (windows) "Download updates automatically" else "Install updates automatically", if (enabled)
+                (if (windows)
+                    "Download verified updates in the background. Choose Restart to update when your local engine is idle."
+                else
+                    "Download and install verified updates in the background. Restart when you're ready; your running chats won't be interrupted. Turning this off doesn't cancel an installation already underway.")
             else
-                "Automatic installation is available in the installed macOS app. This build still checks hourly; update it manually.", 40);
+                "This installation still checks hourly; install updates manually.", 40);
             if (set.toggle(c, k, a.settings.get(.automatically_install_updates), enabled) or (enabled and r.clicked())) {
                 a.settings.toggle(.automatically_install_updates);
                 if (a.settings.get(.automatically_install_updates)) upd.checkForUpdates(a);
@@ -558,21 +562,22 @@ test "native updater settings describe hourly checks without an inert restart to
     try t.init(std.testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780 });
     defer t.deinit();
     t.settle(1);
+    const label = if (@import("builtin").os.tag == .windows) "Download updates automatically" else "Install updates automatically";
     try std.testing.expect(t.hasText("Automatic update checks"));
-    try std.testing.expect(t.hasText("Install updates automatically"));
+    try std.testing.expect(t.hasText(label));
     try std.testing.expect(a.settings.get(.automatically_install_updates));
     try std.testing.expect(!t.hasText("Restart automatically to install updates"));
     try std.testing.expect(a.settings.get(.restart_to_install_updates));
-    try t.clickText("Install updates automatically");
+    try t.clickText(label);
     t.settle(0.1);
     try std.testing.expect(a.settings.get(.automatically_install_updates)); // Unsupported builds cannot change the default.
     a.updates.app_install_checked = true;
     a.updates.app_can_install = true;
     t.settle(0.1);
-    try t.clickText("Install updates automatically");
+    try t.clickText(label);
     t.settle(0.1);
     try std.testing.expect(!a.settings.get(.automatically_install_updates));
-    try t.clickText("Install updates automatically");
+    try t.clickText(label);
     t.settle(0.1);
     try std.testing.expect(a.settings.get(.automatically_install_updates));
     try std.testing.expect(!a.updates.app_downloading);
