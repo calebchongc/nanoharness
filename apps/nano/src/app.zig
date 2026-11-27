@@ -2289,7 +2289,7 @@ pub const App = struct {
                 model = c.model;
                 reasoning = agent_mod.sendReasoning(a, harness orelse "graff", model, c.reasoning);
                 orchestrator = c.orchestrator;
-                service_tier = c.service_tier;
+                service_tier = agent_mod.sendServiceTier(a, harness orelse "graff", model, c.service_tier);
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;

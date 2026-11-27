@@ -1057,8 +1057,8 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
 
     // 2c. Optional Service Tier / Speed row (`Standard · Fast · Ultra Fast`) when supported.
     if (has_speed) {
-        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default orelse "default";
-        const cur_tier = if (std.mem.eql(u8, raw_tier, "ultrafast") and !m.service_tier_ultrafast) "fast" else raw_tier;
+        const raw_tier = st.service_tier orelse a.target().service_tier orelse m.service_tier_default;
+        const cur_tier = m.compatibleServiceTier(raw_tier) orelse "default";
         ui.key(c, "compact-service-tier-row");
         const tier_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter();
         {

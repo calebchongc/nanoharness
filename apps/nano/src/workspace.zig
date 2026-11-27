@@ -193,6 +193,13 @@ pub const Model = struct {
     service_tier_default: ?[]const u8 = null,
     /// Its context window in tokens, when the catalog says (`Model::context`).
     context: ?u64 = null,
+
+    pub fn compatibleServiceTier(model: Model, saved: ?[]const u8) ?[]const u8 {
+        if (!model.service_tier_supported) return null;
+        const tier = saved orelse return null;
+        if (std.mem.eql(u8, tier, "ultrafast") and !model.service_tier_ultrafast) return "fast";
+        return tier;
+    }
 };
 
 pub const Spaces = List(Space, parseSpace);
