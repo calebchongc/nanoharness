@@ -1668,7 +1668,8 @@ test "session footer renders account usage ring alongside context ring, opens ac
     try testing.expect(h.t.hasText("Context"));
 }
 
-test "zen topbar session pill left edge aligns flush with the right rounded-12 card in both chat and settings" {
+test "zen topbar right-aligns a lone chat caption while two tabs and settings stay flush with the right rounded-12 card" {
+    const rendering = @import("view_tab_strip.zig").rendering;
     const Find = struct {
         fn rightCard(ctx: *ui.Context, side_w: f32) ?ui.Rect {
             for (ctx.nodes.items) |n| {
@@ -1678,7 +1679,8 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
-        fn activePill(ctx: *ui.Context) ?ui.Rect {
+        /// The first title-bar pill in node order: the lone chat caption, or the strip's leftmost tab.
+        fn firstPill(ctx: *ui.Context) ?ui.Rect {
             for (ctx.nodes.items) |n| {
                 if (n.rect.y < 38 and @abs(n.rect.h - 28) < 0.5 and n.style.radius == 7 and n.style.control) {
                     return n.rect;
@@ -1686,52 +1688,103 @@ test "zen topbar session pill left edge aligns flush with the right rounded-12 c
             }
             return null;
         }
+        /// Where #225 ends a lone windowed Zen caption: beside the device picker and the
+        /// trailing controls (the anchor of `tests_ui_tab_strip.zig`'s single-chat test).
+        fn captionEnd(a: *const App, ctx: *ui.Context) f32 {
+            const utilities = @import("view_tab_strip.zig").rendering.utilityWidth(a);
+            return ctx.size.w - @import("window_chrome.zig").trailing - utilities - 10 - @import("panel_chrome.zig").device_room - 12;
+        }
     };
 
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
+    // Two synthetic devices show the device picker the caption ends beside, and a
+    // second conversation in the same project lets the strip hold two tabs later.
+    const devices = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic studio"},{"id":"synthetic-remote","name":"Synthetic build box"}]
+    , .{});
+    defer devices.deinit();
+    try h.a.devices.replace(devices.value);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-chat","deviceId":"synthetic-device","title":"Synthetic navigation conversation","spaceId":"synthetic-project","archived":false},
+        \\ {"id":"synthetic-second","deviceId":"synthetic-device","title":"Synthetic follow-up conversation","spaceId":"synthetic-project","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
     h.a.settings.applyUiMode(.zen);
     h.a.openChatInTab("synthetic-chat");
     h.t.settle(1);
 
-    // Default sidebarWidth (224): pill left edge is flush with right card (sidebar_width + 3 = 227) and clears [⋯].
+    // Default sidebarWidth (224), one chat: the lone windowed caption ends beside the
+    // device picker and trailing controls (#225) and still clears [⋯] and the traffic lights.
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
+    {
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+        try testing.expect(pill.x >= @import("window_chrome.zig").leading);
+    }
+
+    // Wider sidebar (300), one chat: the right card follows (303) but the caption keeps its right-hand anchor.
+    h.a.settings.setNumber("sidebarWidth", 300);
+    h.t.settle(0.5);
+    try testing.expect(rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
-        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
+        try testing.expectApproxEqAbs(Find.captionEnd(&h.a, &h.t.ctx), pill.x + pill.w, 1);
         try testing.expect(more.x + more.w + 12 <= pill.x);
     }
 
-    // Wider sidebar (300): pill follows right card edge (303) instead of pinning near left sidebar controls.
-    h.a.settings.setNumber("sidebarWidth", 300);
-    h.t.settle(0.5);
+    // Settings open: no lone caption; the pill is flush with the Zen Settings right rounded-12 card.
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Settings open: pill stays flush with the Zen Settings right rounded-12 card.
-    try h.t.clickText("Sign in");
+    // Back in chats with a second tab: no lone caption; the strip's first tab is flush with the right card (303).
+    try h.t.clickText("Back to chats");
     h.t.settle(0.4);
-    try testing.expect(h.a.view.settings_open);
+    h.a.openChatInTab("synthetic-second");
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), rendering.singleSpec(&h.a).n);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
         const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
         try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
     }
 
-    // Return to chats and collapse sidebar: pill clears traffic lights, toggle, history, and mode controls.
-    try h.t.clickText("Back to chats");
-    h.t.settle(0.4);
+    // Two tabs at the default sidebarWidth (224): the first tab follows the card back to 227 and clears [⋯].
+    h.a.settings.setNumber("sidebarWidth", 224);
+    h.t.settle(0.5);
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(@as(f32, 227), card.x, 0.5);
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+    }
+
+    // Two tabs, sidebar collapsed: the strip starts after the traffic lights, toggle, history, and mode controls.
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
     h.t.settle(0.5);
     try testing.expect(h.a.view.sidebar_width < 0.5);
+    try testing.expect(!rendering.usesWindowedChatCaption(&h.a));
     {
-        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const pill = Find.firstPill(&h.t.ctx) orelse return error.MissingActivePill;
         const min_x = @import("window_chrome.zig").leading + 24 + 56 + 14;
         try testing.expect(pill.x >= min_x - 0.5);
     }
