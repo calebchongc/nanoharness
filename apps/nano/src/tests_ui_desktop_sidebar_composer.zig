@@ -1420,7 +1420,8 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     try testing.expect(settings_left_card and settings_right_card);
     try testing.expect(!duplicate_back_row);
     try testing.expect(!topbar_nav_control);
-    try testing.expect(esc_badge_count >= 2);
+    // One way out of Settings, Back to chats with its esc hint; no second Close pill.
+    try testing.expectEqual(@as(usize, 1), esc_badge_count);
 
     // Pressing Escape exits Zen Settings cleanly; reopening and clicking "Back to chats" also exits.
     _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });

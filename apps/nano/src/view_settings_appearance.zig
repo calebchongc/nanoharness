@@ -117,8 +117,8 @@ fn customThemeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         const r = set.row(c, k, false, false);
         defer r.end();
         set.tile(c, k, .@"magic-stick-3");
-        words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 108);
-        if (compactAction(c, k, "Open studio", true)) @import("view_custom_theme_studio.zig").open(a);
+        // The studio is right below; no second copy of it in a dialog.
+        words(c, k, "Backdrop studio", "Synthesize a custom palette + animated canvas from a prompt, or pick from 20 curated scenes.", 0);
     }
     ui.div(c).wFull().h(1).bg(k.border.alpha(0.55)).end();
     {
