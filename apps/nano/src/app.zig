@@ -1096,13 +1096,13 @@ pub const App = struct {
         if (a.findChat(chat_id) == null) return;
         a.view.settings_open = false;
         if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) {
-            a.view.focus_composer = true;
-            return a.redraw();
+            return a.revealSelectedChat();
         };
         if (a.tabs.find(chat_id)) |at| {
             if (at.tab != a.tabs.active) a.showTab(at.tab);
             if (at.pane) |ix| a.focusPane(ix);
             if (at.panel_tab) |ix| a.showPaneTab(ix);
+            if (a.selected) |s| if (std.mem.eql(u8, s, chat_id)) a.revealSelectedChat();
             return;
         }
         const chat = a.findChat(chat_id).?;
@@ -1124,9 +1124,9 @@ pub const App = struct {
             return;
         }
         const destination: ?usize = if (project != null) blk: {
-            if (sameProject(a.workspaceProject(a.tabs.active), project)) break :blk a.tabs.active;
+            if (a.canGroupLiveSession(a.tabs.active, project)) break :blk a.tabs.active;
             for (0..a.tabs.items.items.len) |ix| {
-                if (sameProject(a.workspaceProject(ix), project)) break :blk ix;
+                if (a.canGroupLiveSession(ix, project)) break :blk ix;
             }
             break :blk null;
         } else if ((if (a.tabs.layout()) |s| s.panes.items.len > 1 else false) and a.workspaceProject(a.tabs.active) == null)
@@ -1145,14 +1145,40 @@ pub const App = struct {
         a.select(chat_id, project);
     }
 
+    /// Selection can stay on the chat while another surface owns input.
+    /// A reveal returns to the chat without reselecting it or resetting its draft.
+    fn revealSelectedChat(a: *App) void {
+        const pane: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+        a.view.write_open = false;
+        a.bots.page = .none;
+        a.view.strip.focused = pane;
+        if (a.view.strip.expanded != null) a.view.strip.expanded = pane;
+        a.view.focus_composer = true;
+        a.redraw();
+    }
+
     fn isBlankNewTab(a: *const App) bool {
-        if (a.selected != null) return false;
+        if (a.selected != null or a.tabs.current() != null) return false;
         if (std.mem.trim(u8, a.composer.text(), " \t\r\n").len > 0) return false;
-        if (a.attachments.items.items.len > 0) return false;
+        if (@import("app_attachments.zig").count(a) > 0) return false;
         for (a.panels.tabs.items) |tab| {
-            if (tab.editor) |e| if (e.target.chatId == null and e.dirty()) return false;
+            if (tab.editor) |e| if (e.matchesCurrent(a) and e.dirty()) return false;
         }
         return true;
+    }
+
+    fn canGroupLiveSession(a: *const App, ix: usize, project: ?[]const u8) bool {
+        // A standalone archive view is for reading, not a live project workspace.
+        const standalone = if (a.tabs.splits.items[ix]) |s|
+            s.panes.items.len == 1 and s.groups[0].count() == 1
+        else
+            true;
+        if (standalone) {
+            if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| {
+                if (chat.archived) return false;
+            };
+        }
+        return sameProject(a.workspaceProject(ix), project);
     }
 
     /// The workspace's selected conversation or parked draft owns its project.
@@ -1160,6 +1186,7 @@ pub const App = struct {
     pub fn workspaceProject(a: *const App, ix: usize) ?[]const u8 {
         if (ix >= a.tabs.items.items.len) return null;
         if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| return chat.space_id;
+        if (a.tabs.splits.items[ix]) |s| if (s.drafts.items[s.focus]) |d| return if (d.no_project) null else d.space;
         if (a.tabs.drafts.items[ix]) |d| return if (d.no_project) null else d.space;
         if (ix == a.tabs.active) if (a.newChatSpace()) |space| return space.id;
         return null;
@@ -1180,12 +1207,6 @@ pub const App = struct {
         a.view.settings_open = false;
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, null);
-    }
-
-    /// The active tab's new-chat draft, parked with it.
-    fn park(a: *App) void {
-        const d = drafts.canvas(a) catch return;
-        a.tabs.park(a.tabs.active, null, d);
     }
 
     fn freshPanelDraft(a: *App, draft: tabs_mod.Draft) !tabs_mod.Draft {
@@ -1210,9 +1231,13 @@ pub const App = struct {
     pub fn newTab(a: *App) void {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
-        a.tabs.park(a.tabs.active, focus_pane, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
+        const count = a.tabs.items.items.len;
         a.tabs.newTab();
+        if (a.tabs.items.items.len == count) {
+            var unused = fresh;
+            return unused.deinit(a.gpa);
+        }
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1249,7 +1274,7 @@ pub const App = struct {
         a.tabs.isolateWorkspace() catch return;
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        a.tabs.park(a.tabs.active, null, d);
+        @import("app_navigation.zig").parkActiveDraft(a, d);
         if (at_end) a.tabs.appendTab() else a.tabs.newTab();
         a.view.strip.focused = .{ .chat = 0 };
         a.view.strip.expanded = null;
@@ -1281,7 +1306,8 @@ pub const App = struct {
     /// draft back as it was left (`load_chat_tab`).
     pub fn showTab(a: *App, i: usize) void {
         if (i >= a.tabs.items.items.len or i == a.tabs.active) return;
-        a.park();
+        const outgoing = drafts.canvas(a) catch return;
+        @import("app_navigation.zig").parkActiveDraft(a, outgoing);
         a.tabs.active = i;
         a.tabs.noteShown();
         @import("app_navigation.zig").validateCurrent(a);
@@ -1294,17 +1320,9 @@ pub const App = struct {
         const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
         a.view.strip.focused = .{ .chat = focus_pane orelse 0 };
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(i, focus_pane)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        } else if (a.tabs.unpark(i, null)) |d| {
-            if (a.selected == null) drafts.adopt(a, d) else {
-                var unused = d;
-                unused.deinit(a.gpa);
-            }
-        }
+        // A populated chat has its own prompt. The pane still owns its canvas
+        // picks, which adopt restores without touching that chat's prompt.
+        if (a.tabs.unpark(i, focus_pane) orelse a.tabs.unpark(i, null)) |d| drafts.adopt(a, d);
     }
 
     pub fn isOnlyNewChat(a: *const App) bool {
@@ -1403,10 +1421,7 @@ pub const App = struct {
         @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);
         a.select(a.tabs.current(), null);
-        if (back) |b| {
-            var x = b;
-            if (a.selected == null) drafts.adopt(a, b) else x.deinit(a.gpa);
-        }
+        if (back) |incoming| drafts.adopt(a, incoming);
     }
 
     /// ⌘] / ⌘[: the next pane in a split, else the next tab.

@@ -1727,10 +1727,7 @@ fn sessionRowWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, 
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !drag.dragging(a)) {
-        // A Bots page sits in the chat's place: its own row brings it back.
-        if (selected) @import("bots.zig").close(a) else a.openChatInTab(ch.id);
-    }
+    if (r.clicked() and !drag.dragging(a)) a.openChatInTab(ch.id);
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {

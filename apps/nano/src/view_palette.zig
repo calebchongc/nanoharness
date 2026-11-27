@@ -277,7 +277,7 @@ pub fn activate(a: *App, e: Entry) void {
             importExternal(a, &.{.{ .source = x.source, .id = x.id }});
         },
         .import_all => importExternal(a, null),
-        .pane => |ix| a.focusPane(ix),
+        .pane => |ix| @import("view_tab_strip.zig").focus(a, .{ .chat = ix }),
         .open_tab => |t| {
             a.view.settings_open = false;
             if (t.pane_tab) |pt| a.showPaneTab(pt) else a.showTab(t.ws);
