@@ -191,3 +191,41 @@ test "issue 199: Open file routes media and PDF to the viewer and other workspac
         try testing.expect(artifacts.route(arena.allocator(), "/w", path) == .none);
     }
 }
+
+test "issue 200: a file reference offers Copy file path and copies the decoded plain path" {
+    const cases = [_]struct { destination: []const u8, path: []const u8 }{
+        .{ .destination = "file:///synthetic/fieldnotes/Example%20Notes.md", .path = "/synthetic/fieldnotes/Example Notes.md" },
+        .{ .destination = "Example%20Notes.md", .path = "Example Notes.md" },
+    };
+    for (cases) |case| {
+        var h: Harness = undefined;
+        const text = try std.fmt.allocPrint(testing.allocator, "Saved for review:\n\n- **[Example Notes.md]({s})**\n", .{case.destination});
+        defer testing.allocator.free(text);
+        try chatWithReply(&h, text, true);
+        defer h.deinit();
+        try rightClickLabel(&h, "Example Notes.md");
+        try testing.expect(h.t.hasText("Open file"));
+        if (!h.t.hasText("Copy file path")) {
+            std.debug.print("issue 200: file reference {s} menu has Copy link={}, Copy file path=false\n", .{ case.destination, h.t.hasText("Copy link") });
+            return error.MissingCopyFilePath;
+        }
+        try testing.expect(!h.t.hasText("Copy link"));
+        try h.t.clickText("Copy file path");
+        h.t.settle(0.2);
+        try testing.expectEqualStrings(case.path, h.t.clipboard.items);
+    }
+}
+
+test "issue 200: a web URL ending in .md keeps Copy link and copies the URL verbatim" {
+    // Control for #200: holds on main and must keep holding after the fix.
+    const url = "https://example.com/notes.md?view=1";
+    var h: Harness = undefined;
+    try chatWithReply(&h, "Read first:\n\n- **[Web page](" ++ url ++ ")**\n", true);
+    defer h.deinit();
+    try rightClickLabel(&h, "Web page");
+    try testing.expect(h.t.hasText("Open in browser"));
+    try testing.expect(!h.t.hasText("Copy file path"));
+    try h.t.clickText("Copy link");
+    h.t.settle(0.2);
+    try testing.expectEqualStrings(url, h.t.clipboard.items);
+}

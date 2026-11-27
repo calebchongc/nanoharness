@@ -10,7 +10,7 @@ const rpc = @import("rpc.zig");
 pub const max_bytes = 32 * 1024 * 1024;
 pub const chunk_bytes = 45_000;
 pub const max_chunks = 1000;
-const max_path = 4096;
+pub const max_path = 4096;
 const max_cached = 8;
 
 pub const State = struct {
@@ -117,7 +117,9 @@ fn hex(c: u8) ?u8 {
 /// Decode once into a fixed buffer, then validate the decoded path as well.
 /// Encoded schemes, UNC paths, controls, query/fragment and malformed escapes
 /// cannot bypass this gate. file:// accepts ONLY an empty authority.
-fn localPath(raw: []const u8, buf: *[max_path]u8) ![]const u8 {
+/// The result is the plain path "Copy file path" copies: decoded, without
+/// `file://`, and relative when the reference is.
+pub fn localPath(raw: []const u8, buf: *[max_path]u8) ![]const u8 {
     if (raw.len == 0 or raw.len > max_path * 3) return error.InvalidLocalPath;
     var input = raw;
     var file_url = false;
