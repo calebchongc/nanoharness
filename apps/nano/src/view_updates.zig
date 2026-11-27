@@ -734,6 +734,7 @@ fn restartIntoUpdate(a: *App, target: []const u8) void {
         })) |child| {
             var c = child;
             _ = &c;
+            a.flushRememberedTabs();
             @import("engine_start.zig").stopForUpdate(a);
             std.process.exit(0);
         } else |_| {
