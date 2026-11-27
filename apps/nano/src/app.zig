@@ -136,9 +136,9 @@ pub const View = struct {
     /// Settings › Shortcuts: the shortcut whose chip waits for keys, and
     /// why the last combination was refused.
     recording: ?usize = null,
-    /// Settings › Appshots asked for Screen Recording or Accessibility once.
-    capture_asked: bool = false,
-    text_asked: bool = false,
+    /// Settings › Appearance forced reduced motion on or off last frame
+    /// (view_settings_appearance.zig `applyReduceMotion`).
+    motion_forced: bool = false,
     /// A session row being dragged toward a split target (view_drag.zig).
     drag: @import("view_drag.zig").Drag = .{},
     /// A session row's menu and the dialogs it leads to.

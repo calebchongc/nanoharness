@@ -144,6 +144,14 @@ commits `66b9741`, `0c71af4`, `ac97477`, `ac8dfb1`):
 - `src/ui/{gpu,paint,raster,shader.metal,shader.glsl,tests_raster}.zig`
   preserve negative circular radii through rounded clip packing (`clipRound` /
   `clipCorners`).
+Harness-local reduce-motion preference support adds
+`Context.system_reduce_motion` and `Context.reduce_motion_override` in
+`src/ui/context.zig`. `src/ui/a11y.zig` (macOS), `src/ios/surface.zig` and
+`src/android/{app,surface}.zig` record what the system asks for and apply an
+app's override before each frame, so Settings › Appearance's System/On/Off
+choice also governs the frame's scrolling. Harness's `settings controls:
+reduce motion` tests cover it.
+
 All Harness-local patches above (including `scroll_fade`, `d3d11_texture`,
 `d3d11_device`, `color_text`, `text_selection`, `should_terminate`, and
 `after_frame`) are retained, and HDR files (`d3d11_hdr.zig`, `hdr.hlsl`,

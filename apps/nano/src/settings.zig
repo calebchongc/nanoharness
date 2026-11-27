@@ -11,6 +11,9 @@ const icons = @import("icons.zig");
 const shortcuts = @import("shortcuts.zig");
 const Allocator = std.mem.Allocator;
 
+/// The GPUI app's Appshots section is left out: Nano has no capture path,
+/// so its switches would promise captures nothing takes. A file that saved
+/// it as the open section opens on the default one.
 pub const Section = enum {
     account,
     appearance,
@@ -24,7 +27,6 @@ pub const Section = enum {
     extensions,
     github_ci,
     devices,
-    appshots,
     usage,
     archived,
 
@@ -42,7 +44,6 @@ pub const Section = enum {
             .browsing => "Links & browsing",
             .notifications => "Notifications",
             .shortcuts => "Shortcuts",
-            .appshots => "Appshots",
             .usage => "Usage",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
@@ -57,14 +58,14 @@ pub const Section = enum {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
-            .devices, .appshots, .usage, .archived => "Devices and data",
+            .devices, .usage, .archived => "Devices and data",
         };
     }
 
     pub fn icon(s: Section) icons.Name {
         return switch (s) {
             .account => .@"user-rounded",
-            .devices, .appshots => .monitor,
+            .devices => .monitor,
             .usage => .widget,
             .harnesses => .widget,
             .agents => .@"key-minimalistic",
@@ -128,7 +129,8 @@ pub const Prefs = struct {
     sidebar_show_branch: bool = true,
     sidebar_show_project_label: bool = false,
     sidebar_show_archived: bool = true,
-    // Settings › Appshots.
+    // The GPUI app's Appshots choices. Nano has no capture path and shows no
+    // Appshots page; the file keeps them as they were.
     appshots_enabled: bool = false,
     appshot_sound_enabled: bool = true,
     // Settings › Devices. Installation defaults on, independently of the legacy restart switch.
@@ -172,6 +174,31 @@ pub const Flag = enum {
     automatically_install_updates,
     restart_to_install_updates,
     star_banner_dismissed,
+};
+
+/// Settings › Appearance's "Reduce motion", as saved in `reduceMotion`.
+pub const ReduceMotion = enum {
+    system,
+    on,
+    off,
+
+    pub fn fromKey(k: ?[]const u8) ReduceMotion {
+        return std.meta.stringToEnum(ReduceMotion, k orelse return .system) orelse .system;
+    }
+
+    /// What the choice forces, or null to follow the system.
+    pub fn override(p: ReduceMotion) ?bool {
+        return switch (p) {
+            .system => null,
+            .on => true,
+            .off => false,
+        };
+    }
+
+    /// Whether motion is reduced, given what the system asks for.
+    pub fn resolve(p: ReduceMotion, system_reduces: bool) bool {
+        return p.override() orelse system_reduces;
+    }
 };
 
 pub const sidebar_min: f32 = 224;
@@ -402,6 +429,10 @@ pub const Store = struct {
     /// A number the file holds under `key`, if it holds one.
     pub fn number(s: *const Store, key: []const u8) ?f64 {
         return jsonNumber(s.doc.get(key));
+    }
+
+    pub fn reduceMotion(s: *const Store) ReduceMotion {
+        return ReduceMotion.fromKey(s.text("reduceMotion"));
     }
 
     /// The accent preset's name, or null for the theme's own.

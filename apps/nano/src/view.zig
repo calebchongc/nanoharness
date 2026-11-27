@@ -55,6 +55,8 @@ const cluster_x: f32 = @import("window_chrome.zig").leading;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    // Settings › Appearance's Reduce motion before anything reads it.
+    @import("view_settings_appearance.zig").applyReduceMotion(c, a);
     @import("performance.zig").begin(a, c);
     a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
