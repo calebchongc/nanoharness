@@ -1,4 +1,4 @@
-# ADR 0006: TUI resume keeps the agent's native session identity
+# ADR 0010: TUI resume keeps the agent's native session identity
 
 - Status: Accepted
 
