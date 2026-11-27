@@ -16,6 +16,11 @@
 # "<lock>.queue/<sequence>.<pid>", numbered under a short mutex, and a waiter
 # may take a free slot only when fewer live tickets are ahead of it than there
 # are free slots. A ticket or slot whose pid has exited is stale.
+#
+# The queue is bookkeeping and never stops a build. If the queue, its mutex,
+# a ticket or a slot n > 1 cannot be created or written, that call warns once
+# on stderr and falls back to the old behaviour: it takes slot 1 (the lock
+# directory) when free, in no particular order, still excluding every holder.
 
 set -uo pipefail
 shopt -s nullglob
@@ -56,6 +61,23 @@ is_number() {
 # Like the engine's check, another user's live process (EPERM) counts as alive.
 alive() {
   is_number "$1" && { kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
+}
+
+# A queue path that exists but cannot hold the queue.
+queue_unusable() {
+  [[ -e "$1" || -L "$1" ]] && ! [[ -d "$1" && -w "$1" && -x "$1" ]]
+}
+
+# make_dir <path>: 0 if this call created it, 1 if it is a directory someone
+# else holds, 2 if it cannot be created. A holder may release it between the
+# failed mkdir and the check, so only repeated failures count as 2.
+make_dir() {
+  local _
+  for _ in 1 2 3; do
+    mkdir "$1" 2>/dev/null && return 0
+    [[ -d "$1" ]] && return 1
+  done
+  return 2
 }
 
 read_line() { # read_line <var> <file>: the file's first line, or empty
@@ -120,13 +142,18 @@ print_lane() {
     queued=$((queued + 1))
     rows+="  queued #$queued pid $tpid for $dur: $cmd"$'\n'
   done
+  # A queued holder creates the queue first and nothing removes it, so a
+  # holder without one runs without it (or is an older copy of this script).
+  if queue_unusable "$lock.queue" || { ((holding > 0)) && [[ ! -e "$lock.queue" ]]; }; then
+    rows+="  queue unavailable at $lock.queue; builds run without it"$'\n'
+  fi
   lane_label "$lock"
   if ((holding + queued == 0)); then
     echo "lane $label: idle"
   else
     echo "lane $label: $holding holding, $queued queued"
-    printf '%s' "$rows"
   fi
+  printf '%s' "$rows"
 }
 
 status() {
@@ -183,7 +210,11 @@ if ! is_number "$slots" || ((10#$slots < 1)); then
 fi
 slots=$((10#$slots))
 warn_after="${HARNESS_HEAVY_BUILD_WARN_AFTER:-900}"
-is_number "$warn_after" || die "HARNESS_HEAVY_BUILD_WARN_AFTER must be whole seconds: $warn_after"
+if ! is_number "$warn_after"; then
+  # Reporting is optional; a bad value must not stop the build.
+  echo "heavy-build: ignoring HARNESS_HEAVY_BUILD_WARN_AFTER=$warn_after (not whole seconds)" >&2
+  warn_after=900
+fi
 warn_after=$((10#$warn_after))
 queue="$lock.queue"
 
@@ -213,15 +244,7 @@ cleanup() {
     kill "$poll_pid" 2>/dev/null || true
     wait "$poll_pid" 2>/dev/null || true
   fi
-  if "$mutex_owned"; then
-    rm -rf "$queue/.mutex"
-  fi
-  if [[ -n "$ticket_tmp" ]]; then
-    rm -f "$ticket_tmp"
-  fi
-  if [[ -n "$ticket" ]]; then
-    rm -f "$ticket"
-  fi
+  leave_queue
   if [[ -n "$wait_marker" ]]; then
     rm -f "$wait_marker"
   fi
@@ -245,25 +268,49 @@ if ((${#cmdline} > 160)); then
   cmdline="${cmdline:0:157}..."
 fi
 
-# Takes the next ticket. The mutex makes "one more than the last ticket" and
-# creating it one step; it is held for a directory listing and a rename.
+# Releases whatever this process has in the queue; errors are ignored.
+leave_queue() {
+  if "$mutex_owned"; then
+    rm -rf "$queue/.mutex" 2>/dev/null
+    mutex_owned=false
+  fi
+  if [[ -n "$ticket_tmp" ]]; then
+    rm -f "$ticket_tmp" 2>/dev/null
+    ticket_tmp=""
+  fi
+  if [[ -n "$ticket" ]]; then
+    rm -f "$ticket" 2>/dev/null
+    ticket=""
+  fi
+}
+
+# Takes the next ticket, or fails if the queue cannot be used. The mutex makes
+# "one more than the last ticket" and creating it one step; it is held for a
+# directory listing and a rename.
 enqueue() {
-  local holder last=0 name spins=0
+  local holder last=0 name spins=0 clear_failures=0
   mkdir -p "$queue" 2>/dev/null
-  until mkdir "$queue/.mutex" 2>/dev/null; do
-    [[ -d "$queue" ]] || die "cannot create $queue"
+  [[ -d "$queue" ]] || return 1
+  while :; do
+    make_dir "$queue/.mutex"
+    case $? in
+      0) break ;;
+      2) return 1 ;;
+    esac
     read_line holder "$queue/.mutex/pid"
     if [[ -n "$holder" ]]; then
       spins=0
       if ! alive "$holder"; then
-        rm -rf "$queue/.mutex"
+        # Another waiter may clear it at the same moment; only repeated
+        # failures mean it cannot be removed.
+        rm -rf "$queue/.mutex" 2>/dev/null || ((++clear_failures < 3)) || return 1
         continue
       fi
     else
       # Its taker died between creating it and naming itself (about 5 s).
       spins=$((spins + 1))
       if ((spins > 100)); then
-        rm -rf "$queue/.mutex"
+        rm -rf "$queue/.mutex" 2>/dev/null || ((++clear_failures < 3)) || return 1
         spins=0
         continue
       fi
@@ -271,24 +318,28 @@ enqueue() {
     sleep 0.05
   done
   mutex_owned=true
-  echo $$ >"$queue/.mutex/pid"
-  for name in "$queue"/*; do
-    name="${name##*/}"
-    name="${name%%.*}"
-    is_number "$name" && last=$((10#$name))
-  done
-  now
-  ticket_tmp="$queue/.ticket.$$"
-  printf '%s\n%s\n' "$epoch" "$cmdline" >"$ticket_tmp"
-  printf -v name '%012d.%010d' $((last + 1)) $$
-  mv -f "$ticket_tmp" "$queue/$name" && ticket="$queue/$name"
-  ticket_tmp=""
-  rm -rf "$queue/.mutex"
+  if { echo $$ >"$queue/.mutex/pid"; } 2>/dev/null; then
+    for name in "$queue"/*; do
+      name="${name##*/}"
+      name="${name%%.*}"
+      is_number "$name" && last=$((10#$name))
+    done
+    now
+    ticket_tmp="$queue/.ticket.$$"
+    printf -v name '%012d.%010d' $((last + 1)) $$
+    if { printf '%s\n%s\n' "$epoch" "$cmdline" >"$ticket_tmp"; } 2>/dev/null &&
+      mv -f "$ticket_tmp" "$queue/$name" 2>/dev/null; then
+      ticket="$queue/$name"
+      ticket_tmp=""
+    fi
+  fi
+  rm -rf "$queue/.mutex" 2>/dev/null
   mutex_owned=false
+  [[ -n "$ticket" ]] || { leave_queue; return 1; }
 }
 
-# Sets ahead to the live tickets before ours, removing dead ones on the way;
-# fails if ours is gone.
+# Sets ahead to the live tickets before ours, removing dead ones on the way.
+# Returns 1 if ours is gone, 2 if it exists but the queue cannot be listed.
 queue_position() {
   local t
   ahead=0
@@ -301,10 +352,20 @@ queue_position() {
     if alive "$tpid"; then
       ahead=$((ahead + 1))
     else
-      rm -f "$t"
+      rm -f "$t" 2>/dev/null
     fi
   done
+  [[ -e "$ticket" ]] && return 2
   return 1
+}
+
+# Leaves the queue for the rest of this call: slot 1 only, as before the queue.
+queued=true
+fall_back() {
+  leave_queue
+  queued=false
+  slots=1
+  echo "heavy-build: queue unavailable at $queue; running this build without it" >&2
 }
 
 # Sets free_slots to the lane's free slot paths, clearing exited holders.
@@ -316,7 +377,7 @@ find_free_slots() {
     ((i > 1)) && s="$lock.slot$i"
     if [[ -d "$s" ]]; then
       read_line pid "$s/pid"
-      [[ -n "$pid" ]] && ! alive "$pid" && rm -rf "$s"
+      [[ -n "$pid" ]] && ! alive "$pid" && rm -rf "$s" 2>/dev/null
     fi
     [[ -d "$s" ]] || free_slots+=("$s")
   done
@@ -348,21 +409,37 @@ report_long_holds() {
   fi
 }
 
-enqueue
+enqueue || fall_back
 while :; do
-  if ! queue_position; then
-    enqueue
-  elif ((ahead < slots)); then
-    # Only waiters that could be served touch the slots.
-    find_free_slots
-    if ((ahead < ${#free_slots[@]})); then
-      for s in "${free_slots[@]}"; do
-        if mkdir "$s" 2>/dev/null; then
-          slot="$s"
-          break
+  if "$queued"; then
+    queue_position
+    case $? in
+      1) enqueue || fall_back ;;
+      2) fall_back ;;
+      *)
+        if ((ahead < slots)); then
+          # Only waiters that could be served touch the slots.
+          find_free_slots
+          if ((ahead < ${#free_slots[@]})); then
+            for s in "${free_slots[@]}"; do
+              make_dir "$s"
+              case $? in
+                0) slot="$s" && break ;;
+                2) [[ "$s" == "$lock" ]] || { fall_back && break; } ;;
+              esac
+            done
+            [[ -n "$slot" ]] && break
+          fi
         fi
-      done
-      [[ -n "$slot" ]] && break
+        ;;
+    esac
+  fi
+  if ! "$queued"; then
+    # As before the queue: slot 1 when free, clearing a holder that has exited.
+    find_free_slots
+    if ((${#free_slots[@]} > 0)) && mkdir "$lock" 2>/dev/null; then
+      slot="$lock"
+      break
     fi
   fi
   if [[ -z "$wait_marker" && -n "${HARNESS_BUILD_WAIT_DIR:-}" ]]; then
@@ -379,12 +456,14 @@ while :; do
   wait "$poll_pid"
   poll_pid=""
 done
-echo $$ >"$slot/pid"
-now
-echo "$epoch" >"$slot/since"
-printf '%s\n' "$cmdline" >"$slot/cmd"
-rm -f "$ticket"
-ticket=""
+# A slot is ours once created; what it records is for status and stale checks.
+{
+  echo $$ >"$slot/pid"
+  now
+  echo "$epoch" >"$slot/since"
+  printf '%s\n' "$cmdline" >"$slot/cmd"
+} 2>/dev/null
+leave_queue
 if [[ -n "$wait_marker" ]]; then
   rm -f "$wait_marker"
   wait_marker=""

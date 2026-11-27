@@ -291,7 +291,9 @@ holds the queue for all of them. Separate repositories or toolchains may use
 their own lane (`HARNESS_HEAVY_BUILD_LANE=zig`), and a lane may run n builds at
 once (`HARNESS_HEAVY_BUILD_SLOTS=n`) only while memory allows, under the ~40 GB
 rule above. `scripts/heavy-build.sh --status` shows who holds and who waits in
-each lane.
+each lane. If the queue (`<lock>.queue`) cannot be created or written, the
+build still runs, one at a time in no particular order, with one warning on
+stderr.
 
 ## Imported conversations continue in graff
 

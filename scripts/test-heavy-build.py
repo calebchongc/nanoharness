@@ -531,6 +531,160 @@ class HeavyBuildTests(unittest.TestCase):
             self.assertRegex(notice, rf"^heavy-build: pid {owner.pid} has held a slot in lane {re.escape(str(self.lock))} for \d+s: \S*python")
             self.assertLessEqual(len(notice), 300, "the command line is truncated")
 
+    # The queue is bookkeeping: if it cannot be set up, the build still runs,
+    # one at a time on slot 1, as before the queue existed.
+
+    def queue_is_a_file(self):
+        queue = Path(f"{self.lock}.queue")
+        queue.write_text("not a directory\n")
+        return queue
+
+    def read_only_queue(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        queue = Path(f"{self.lock}.queue")
+        queue.mkdir(exist_ok=True)
+        queue.chmod(0o555)
+        # Runs after tearDown, which removes the (empty) directory.
+        self.addCleanup(lambda: queue.is_dir() and queue.chmod(0o755))
+        return queue
+
+    def finish_without_queue(self, process, expected=0):
+        """The command's exit code, no stdout, and exactly one warning naming the queue."""
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual((process.returncode, stdout), (expected, b""), stderr)
+        queue = re.escape(f"{self.lock}.queue")
+        self.assertRegex(stderr.decode(), rf"\Aheavy-build: queue unavailable at {queue}; running this build without it\n\Z")
+
+    def check_runs_without_queue(self):
+        started = self.root / "started"
+        process = self.start(
+            "from pathlib import Path; import sys; Path(sys.argv[1]).touch(); raise SystemExit(23)", started)
+        self.finish_without_queue(process, 23)
+        self.assertTrue(started.exists(), "the command never ran")
+        self.assertFalse(self.lock.exists(), "the lock was not released")
+        self.assertEqual(list(self.wait_dir.iterdir()), [])
+
+    def test_queue_path_that_is_a_file_runs_the_build_without_the_queue(self):
+        queue = self.queue_is_a_file()
+        self.check_runs_without_queue()
+        self.assertEqual(queue.read_text(), "not a directory\n")
+
+    def test_queue_that_cannot_be_written_runs_the_build_without_the_queue(self):
+        queue = self.read_only_queue()
+        self.check_runs_without_queue()
+        self.assertEqual(list(queue.iterdir()), [])
+
+    def test_more_slots_without_a_queue_use_slot_one_only(self):
+        self.queue_is_a_file()
+        log = self.root / "slots.log"
+        env = self.env.copy()
+        env["HARNESS_HEAVY_BUILD_SLOTS"] = "3"
+        jobs = [self.append(f"job-{i}", log, env, hold="0.1") for i in range(4)]
+        for job in jobs:
+            self.finish_without_queue(job)
+        running = peak = 0
+        for line in lines(log):
+            running += 1 if line.startswith("start ") else -1
+            peak = max(peak, running)
+        self.assertEqual(len(lines(log)), 8)
+        self.assertEqual(peak, 1, lines(log))
+        self.assertEqual(list(self.root.glob("slot.lock.slot*")), [])
+        self.assertFalse(self.lock.exists())
+
+    def test_callers_without_a_queue_exclude_each_other(self):
+        self.queue_is_a_file()
+        log = self.root / "fallback.log"
+        jobs = [self.append(f"job-{i}", log, hold="0.1") for i in range(4)]
+        for job in jobs:
+            self.finish_without_queue(job)
+        running = peak = 0
+        for line in lines(log):
+            running += 1 if line.startswith("start ") else -1
+            peak = max(peak, running)
+        self.assertEqual(len(lines(log)), 8)
+        self.assertEqual(peak, 1, lines(log))
+        self.assertFalse(self.lock.exists())
+
+    def test_caller_without_a_queue_waits_for_a_queued_holder(self):
+        owner, release = self.hold_slot()
+        self.read_only_queue()
+        started = self.root / "fallback-started"
+        waiter = self.start("from pathlib import Path; import sys; Path(sys.argv[1]).touch()", started)
+        self.wait_marker(waiter)
+        time.sleep(0.15)
+        self.assertFalse(started.exists(), "ran while a queued holder had slot 1")
+        self.assertEqual((self.lock / "pid").read_text().strip(), str(owner.pid))
+        release.touch()
+        self.finish(owner)
+        self.finish_without_queue(waiter)
+        self.assertTrue(started.exists())
+        self.assertFalse(self.lock.exists())
+
+    def test_queued_caller_waits_for_a_holder_without_a_queue(self):
+        queue = self.read_only_queue()
+        started = self.root / "owner-started"
+        release = self.root / "owner-release"
+        owner = self.start(HOLD_COMMAND, started, release)
+        self.wait_for(started.exists, "the caller without a queue never took slot 1")
+        self.assertEqual((self.lock / "pid").read_text().strip(), str(owner.pid))
+        queue.chmod(0o755)
+        log = self.root / "queued.log"
+        waiter = self.append("queued", log)
+        self.wait_marker(waiter)
+        time.sleep(0.15)
+        self.assertEqual(lines(log), [], "ran while a holder without a queue had slot 1")
+        release.touch()
+        self.finish_without_queue(owner)
+        self.finish(waiter)
+        self.assertEqual(lines(log), ["queued"])
+        self.assertFalse(self.lock.exists())
+
+    def test_cancelled_caller_without_a_queue_keeps_owners_lock(self):
+        owner, release = self.hold_slot()
+        self.read_only_queue()
+        waiter = self.start("raise SystemExit(97)")
+        marker = self.wait_marker(waiter)
+        waiter.send_signal(signal.SIGTERM)
+        stdout, stderr = waiter.communicate(timeout=3)
+        self.assertEqual((waiter.returncode, stdout), (143, b""), stderr)
+        self.assertFalse(marker.exists(), "cancelled wait marker survived")
+        self.assertIsNone(owner.poll())
+        self.assertEqual((self.lock / "pid").read_text().strip(), str(owner.pid))
+        release.touch()
+        self.finish(owner)
+        self.assertFalse(self.lock.exists())
+
+    def test_stale_lock_is_cleared_without_a_queue(self):
+        self.queue_is_a_file()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait(timeout=3)
+        self.lock.mkdir()
+        (self.lock / "pid").write_text(f"{dead.pid}\n")
+        self.check_runs_without_queue()
+
+    def test_status_reports_the_holder_when_the_queue_is_unusable(self):
+        queue = self.queue_is_a_file()
+        owner, release = self.hold_slot()
+        status = self.status()
+        self.assertTrue(status.startswith(f"lane {self.lock}: 1 holding, 0 queued\n"), status)
+        self.assertEqual(self.status_pids(status, "holding"), [owner.pid])
+        self.assertIn(f"  queue unavailable at {queue}; builds run without it\n", status)
+        release.touch()
+        self.finish_without_queue(owner)
+        self.assertEqual(self.status(), f"lane {self.lock}: idle\n  queue unavailable at {queue}; builds run without it\n")
+        queue.unlink()
+        self.read_only_queue()
+        self.assertIn("queue unavailable at", self.status())
+
+    def test_status_reports_a_holder_that_never_had_a_queue(self):
+        # As when a sandbox denies creating the queue: the lock exists, the queue never did.
+        self.lock.mkdir()
+        (self.lock / "pid").write_text(f"{os.getpid()}\n")
+        status = self.status()
+        self.assertEqual(self.status_pids(status, "holding"), [os.getpid()])
+        self.assertIn(f"  queue unavailable at {self.lock}.queue; builds run without it\n", status)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
