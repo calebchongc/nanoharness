@@ -115,6 +115,14 @@ fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_su
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
 
+    // The feed's error, in the transcript's error style, while it retries.
+    if (s.error_text) |message| {
+        ui.key(c, "subagent-feed-error");
+        const pad = ui.div(c).column().wFull().px(14).pt(12);
+        defer pad.end();
+        @import("view_transcript.zig").noticeChip(c, &a.view.copy_feedback, k, "Couldn't load this subagent's transcript", message).end();
+    }
+
     // 2. Scrollable subagent transcript.
     _ = @import("view_transcript.zig").entries(
         c,
