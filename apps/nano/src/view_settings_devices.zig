@@ -583,6 +583,43 @@ test "native updater settings describe hourly checks without an inert restart to
     try std.testing.expect(!a.updates.app_downloading);
 }
 
+test "Windows updater settings offer restart only after staging" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    theme.registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.settings.setSection(.devices);
+    set.open(&a);
+    a.updates.app_install_checked = true;
+    const version = "99.0.1";
+    @memcpy(a.release.latest[0..version.len], version);
+    a.release.latest_len = version.len;
+    a.release.succeeded = true;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780 });
+    defer t.deinit();
+    t.settle(1);
+    try testing.expect(t.hasText("v99.0.1 is available. Update this installation manually; checks run hourly."));
+    try testing.expect(!t.hasText("Restart to update"));
+    try snapshotUpdaterSettings(&t, "windows-update-before.png");
+
+    a.updates.app_can_install = true;
+    t.settle(0.1);
+    try testing.expect(t.hasText("Update to v99.0.1"));
+    try testing.expect(!t.hasText("Restart to update"));
+    a.updates.setAppInstalled(version);
+    t.settle(0.1);
+    try testing.expect(t.hasText("Harness v99.0.1 is ready. Restart to update."));
+    try testing.expect(t.hasText("Restart to update"));
+    try snapshotUpdaterSettings(&t, "windows-update-after.png");
+}
+
+fn snapshotUpdaterSettings(t: *ui.Tester, name: []const u8) !void {
+    const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+    var buf: [1024]u8 = undefined;
+    try t.screenshot(try std.fmt.bufPrint(&buf, "{s}/{s}", .{ std.mem.span(dir), name }));
+}
+
 test "presence, last seen, the subtitle and the id chip as the GPUI app's" {
     try testing.expect(online(1_000_000, 1_000_000 + 70_000));
     try testing.expect(!online(1_000_000, 1_000_000 + 71_000));
