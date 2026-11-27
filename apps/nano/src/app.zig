@@ -2137,7 +2137,12 @@ pub const App = struct {
             const studio = @import("view_custom_theme_studio.zig");
             if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
         }
-        if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (prompt.len == 0) return;
+        if (a.engine.state != .connected) {
+            // The Send button is dimmed for this; a click or Return says why.
+            a.setNotice("The engine isn't connected yet, so nothing was sent. Your message is kept; send it once Harness reconnects.");
+            return a.redraw();
+        }
         if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
             a.space != null and a.newChatSpace() == null)
         {

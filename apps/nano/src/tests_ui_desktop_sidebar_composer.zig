@@ -215,7 +215,9 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expectApproxEqAbs(@as(f32, 10), model.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(pill.y + pill.h + 8, model.y, 0.01);
     try testing.expectApproxEqAbs(model.y + 12, mode.y + mode.h / 2, 0.01);
-    try testing.expectApproxEqAbs(model.y + 12, project.y + project.h / 2, 0.01);
+    // Too narrow for its words, the project chip is drawn once, centred in
+    // the targets' own row under the first (24 + 2 gap + 22 / 2).
+    try testing.expectApproxEqAbs(model.y + 37, project.y + project.h / 2, 0.01);
     const last = textNode(&h.t, "Tour this project") orelse return error.NoStarter;
     const chip = h.t.ctx.node(h.t.ctx.node(last).parent).rect;
     try testing.expectApproxEqAbs(@as(f32, 24), pill.y - chip.y - chip.h, 0.01);
@@ -229,11 +231,11 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expect(h.a.view.composer_anchor.?.h >= composer.expanded_min);
 }
 
-test "desktop parity sidebar history has a six point trailing gap and a 350ms tooltip" {
+test "desktop parity sidebar history is the footer's last control and has a 350ms tooltip" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    var controls: [2]ui.Rect = undefined;
+    var controls: [1]ui.Rect = undefined;
     var count: usize = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
@@ -243,8 +245,8 @@ test "desktop parity sidebar history has a six point trailing gap and a 350ms to
             count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 2), count);
-    try testing.expectApproxEqAbs(@as(f32, 6), controls[1].x - controls[0].x - controls[0].w, 0.01);
+    // The title row's "New session" is the only "+"; none repeats it here.
+    try testing.expectEqual(@as(usize, 1), count);
     h.t.moveTo(controls[0].x + 13, controls[0].y + 13);
     h.t.advance(0.3);
     try testing.expect(h.t.tooltipText() == null);
@@ -610,19 +612,19 @@ test "retention 794 New workspace remains distinct from the pane New tab action"
     try testing.expectEqual(workspaces, h.a.tabs.items.items.len);
     @import("app_open_chooser.zig").close(&h.a);
     h.t.settle(1);
+    // The sidebar title row's "+" ("New session") makes a workspace; the
+    // footer no longer repeats it.
     var create: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        const r = node.rect;
-        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar.widthOf(&h.a)) {
-            if (create == null or r.x > create.?.x) create = r;
-        }
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.nodes.items[item.node_index].rect;
+        if (std.mem.eql(u8, item.label, "New session") and r.x < sidebar.widthOf(&h.a)) create = r;
     }
     const button = create orelse return error.NoWorkspaceCreate;
-    h.t.moveTo(button.x + 13, button.y + 13);
+    h.t.moveTo(button.x + button.w / 2, button.y + button.h / 2);
     h.t.advance(0.4);
-    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
+    try testing.expectEqualStrings("New session", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
     h.snap("retention-794-new-workspace-label");
-    h.t.click(button.x + 13, button.y + 13);
+    h.t.click(button.x + button.w / 2, button.y + button.h / 2);
     h.t.settle(1);
     try testing.expectEqual(workspaces + 1, h.a.tabs.items.items.len);
     try testing.expectEqual(old_panes, h.a.tabs.splits.items[0].?.panes.items.len);
@@ -721,6 +723,22 @@ fn gitDraft(h: *Harness) !void {
     h.t.frame();
 }
 
+/// The draft's target chips moved to their own row under the footer's
+/// first when they had no room for their words.
+fn targetRowControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
+    const model = h.a.view.chip_anchor orelse return error.NoModelChip;
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.h != 20 or r.w <= 0 or r.x < pill.x or r.y < model.y + 24 or r.y + r.h > model.y + 50) continue;
+        if (n >= out.len) return error.ExtraFooterControl;
+        out[n] = r;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// The footer's controls after the model chip: every 20-point box in its
 /// 24-point row.
 fn footerControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
@@ -759,9 +777,13 @@ test "draft footer controls end inside the composer in split panes" {
         if (window_w == 1200) h.snap("draft-footer-split-pane");
         const pill = h.a.view.composer_anchor orelse return error.NoComposer;
         const controls = try footerControls(&h, &buf);
-        // Mode, computer, project, checkout and ref: none left out, none
-        // past the row's 10-point inset, each whole or its 28-point glyph.
-        try testing.expectEqual(@as(usize, 5), controls.len);
+        var row2_buf: [4]ui.Rect = undefined;
+        const targets = try targetRowControls(&h, &row2_buf);
+        // Mode, computer, project, checkout and ref, across the two rows:
+        // none left out or drawn twice, none past the row's 10-point inset,
+        // each whole or its 28-point glyph.
+        try testing.expectEqual(@as(usize, 5), controls.len + targets.len);
+        for (targets) |r| try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
         for (controls, 0..) |r, i| {
             try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
             try testing.expect(r.w >= 28);

@@ -110,9 +110,9 @@ test "single Zen chat ends beside the device and controls with or without its si
         try testing.expectApproxEqAbs(@as(f32, 21), sidebar.y + sidebar.h / 2, 0.01);
         if (sidebar_x) |x| try testing.expectApproxEqAbs(x, sidebar.x, 1) else sidebar_x = sidebar.x;
         if (sidebar_open) {
-            try testing.expectError(error.MissingTitlebarButton, h.button("clock-circle"));
+            try testing.expectError(error.MissingTitlebarButton, h.button("list"));
         } else {
-            const history = try h.button("clock-circle");
+            const history = try h.button("list");
             const mode = try h.button("magic-stick-3");
             try testing.expect(history.x < mode.x and mode.x < sidebar.x);
             try testing.expect(history.x >= cap.rect.x + cap.rect.w);
