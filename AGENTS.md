@@ -224,9 +224,16 @@ growing past ~40 GB. Never use Zig's self-hosted backend for large builds
 
 When several agents work in parallel worktrees on one machine, wrap every
 `cargo`, `xcodebuild` and `zig build` in `scripts/heavy-build.sh <command>`,
-which runs them one at a time across processes. Each worktree builds into its
-own `CARGO_TARGET_DIR`. A shared target directory reuses crates built from
-another checkout's sources.
+which queues them first come, first served across processes. Each worktree
+builds into its own `CARGO_TARGET_DIR`. A shared target directory reuses crates
+built from another checkout's sources.
+
+Put one build in each call; a script that runs several builds inside one call
+holds the queue for all of them. Separate repositories or toolchains may use
+their own lane (`HARNESS_HEAVY_BUILD_LANE=zig`), and a lane may run n builds at
+once (`HARNESS_HEAVY_BUILD_SLOTS=n`) only while memory allows, under the ~40 GB
+rule above. `scripts/heavy-build.sh --status` shows who holds and who waits in
+each lane.
 
 ## Imported conversations continue in graff
 
