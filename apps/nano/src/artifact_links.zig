@@ -205,6 +205,53 @@ fn fail(a: *App, message: []const u8) void {
     a.redraw();
 }
 
+/// Where Open file sends a local reference. `path` is the reference resolved
+/// against the chat's `cwd` by `resolve`.
+pub const Route = union(enum) {
+    /// Media or PDF: read by the owner's jailed engine, shown by the
+    /// default viewer (`open`).
+    viewer,
+    /// Any other file inside the chat's workspace, as the Files pane names
+    /// it (workspace-relative). Its tab shows text, Markdown as Preview, and
+    /// says itself when the host reports a file binary or too large.
+    files: []const u8,
+    /// Neither: outside the workspace, or a path Files doesn't open.
+    none,
+};
+
+pub fn route(arena: std.mem.Allocator, cwd: []const u8, path: []const u8) Route {
+    if (kind(path) != null) return .viewer;
+    const relative = @import("tool_rows.zig").workspacePath(arena, cwd, path) orelse return .none;
+    if (!@import("app_file_editor.zig").validPath(relative)) return .none;
+    return .{ .files = relative };
+}
+
+/// Open file, or a click, on a chat's local file reference: a document in
+/// the chat's workspace opens in a Files tab on the chat's host; media and
+/// PDF download through `open`.
+pub fn openReference(a: *App, parent: []const u8, raw: []const u8) void {
+    const owner = browser.sourceOwner(a, parent) orelse return a.setNotice("This artifact's conversation is no longer visible.");
+    const chat = a.findChat(parent) orelse return a.setNotice("The artifact's conversation is not available.");
+    const cwd = chat.cwd orelse return a.setNotice("The artifact's working folder is not known yet.");
+    const path = resolve(a.gpa, cwd, raw) catch return a.setNotice("This artifact link is not a supported local path.");
+    defer a.gpa.free(path);
+    var arena: std.heap.ArenaAllocator = .init(a.gpa);
+    defer arena.deinit();
+    switch (route(arena.allocator(), cwd, path)) {
+        .viewer, .none => open(a, parent, raw),
+        .files => |relative| {
+            if (!a.engine.up()) return a.setNotice("Connect to the artifact's host before opening it.");
+            // Files opens for the selected chat: select the pane holding
+            // this one, so the tab reads from this chat's host.
+            if (owner.pane_index) |ix| a.focusPane(ix);
+            const selected = a.selected orelse return a.setNotice("This artifact's conversation is no longer visible.");
+            if (!std.mem.eql(u8, selected, parent)) return a.setNotice("This artifact's conversation is no longer visible.");
+            @import("app_files.zig").openFile(a, relative);
+            a.redraw();
+        },
+    }
+}
+
 /// No render-time/prefetch entrypoint exists: only the explicit click calls
 /// this function. A second click is rejected rather than creating more tasks.
 pub fn open(a: *App, parent: []const u8, raw: []const u8) void {

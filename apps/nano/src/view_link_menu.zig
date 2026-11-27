@@ -86,7 +86,7 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (row.clicked() or (m.selected == action and c.shortcut(.{ .key = ui.Shortcut.enter }))) {
             m.open = false;
             if (local) {
-                if (action == 0) @import("artifact_links.zig").open(a, m.parent.items, m.url.items) else c.clipboard.write(c.clipboard.ctx, m.url.items);
+                if (action == 0) @import("artifact_links.zig").openReference(a, m.parent.items, m.url.items) else c.clipboard.write(c.clipboard.ctx, m.url.items);
             } else switch (action) {
                 0 => browser.openInternalLink(a, m.parent.items, m.url.items),
                 1 => browser.openExternalLink(a, m.parent.items, m.url.items),

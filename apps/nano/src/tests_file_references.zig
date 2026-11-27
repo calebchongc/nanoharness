@@ -1,0 +1,193 @@
+//! Chat file references (#199, #200, #201): where Open file sends them,
+//! what their link menu copies, and what a failed open says. Synthetic
+//! chats, paths and host replies only; nothing reads this computer's files.
+const std = @import("std");
+const testing = std.testing;
+const artifacts = @import("artifact_links.zig");
+const Harness = @import("tests_ui_tab_strip.zig").Harness;
+
+/// Alpha's chat on `device` in `space`'s `cwd`, showing one assistant reply with
+/// `markdown` as its text, against a scripted host.
+fn chatOnHost(h: *Harness, device: []const u8, space: []const u8, cwd: []const u8, markdown: []const u8, connected: bool) !void {
+    try h.init(false);
+    errdefer h.deinit();
+    const list = try std.json.Stringify.valueAlloc(testing.allocator, .{.{ .id = "a", .deviceId = device, .cwd = cwd, .spaceId = space, .archived = false }}, .{});
+    defer testing.allocator.free(list);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator, list, .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"ReadAttachmentChunk":{"$err":"Synthetic host could not read the file"},
+        \\ "ReadWorkspaceFile":{"text":"# Example Notes\n\nSynthetic notes.\n","encoding":"utf-8"}}
+    , .{});
+    if (connected) h.a.engine.state = .connected;
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = .{.{ .id = "reply", .role = "assistant", .status = "complete", .parts = .{.{ .id = "p", .kind = "text", .text = markdown }} }} }, .{});
+    defer testing.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(0.3);
+}
+
+fn chatWithReply(h: *Harness, markdown: []const u8, connected: bool) !void {
+    return chatOnHost(h, "local", "local-project", "/synthetic/fieldnotes", markdown, connected);
+}
+
+fn rightClickLabel(h: *Harness, label: []const u8) !void {
+    const rect = h.t.findText(label) orelse return error.MissingSyntheticLink;
+    h.t.rightClick(rect.x + 8, rect.y + rect.h / 2);
+    h.t.settle(0.2);
+}
+
+fn openFromMenu(h: *Harness, label: []const u8) !void {
+    try rightClickLabel(h, label);
+    try h.t.clickText("Open file");
+    h.t.settle(0.3);
+}
+
+fn fileTab(h: *Harness) ?[]const u8 {
+    for (h.a.panels.tabs.items) |tab| if (tab.kind == .file) return tab.path;
+    return null;
+}
+
+/// The `params` of each request for `method`, as sent.
+fn sentParams(h: *Harness, method: []const u8, out: *std.ArrayList(std.json.Parsed(std.json.Value))) !void {
+    for (h.a.engine.sent.items) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        if (!std.mem.eql(u8, parsed.value.object.get("method").?.string, method)) {
+            parsed.deinit();
+            continue;
+        }
+        try out.append(testing.allocator, parsed);
+    }
+}
+
+fn countSent(h: *Harness, method: []const u8) !usize {
+    var list: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+    defer {
+        for (list.items) |p| p.deinit();
+        list.deinit(testing.allocator);
+    }
+    try sentParams(h, method, &list);
+    return list.items.len;
+}
+
+const media_hint = "Use a video, image, GIF or PDF link";
+
+test "issue 199: Open file on a workspace Markdown reference opens it in Files Preview" {
+    for ([_][]const u8{ "Example%20Notes.md", "/synthetic/fieldnotes/Example%20Notes.md", "file:///synthetic/fieldnotes/Example%20Notes.md" }) |destination| {
+        var h: Harness = undefined;
+        const text = try std.fmt.allocPrint(testing.allocator, "Saved for review:\n\n- **[Example Notes.md]({s})**\n", .{destination});
+        defer testing.allocator.free(text);
+        try chatWithReply(&h, text, true);
+        defer h.deinit();
+        try rightClickLabel(&h, "Example Notes.md");
+        try testing.expect(h.t.hasText("Open file"));
+        try h.t.clickText("Open file");
+        h.t.settle(0.3);
+        if (h.a.noticeText()) |notice| {
+            if (std.mem.indexOf(u8, notice, media_hint) != null) {
+                std.debug.print("issue 199: Open file on {s} showed: {s}\n", .{ destination, notice });
+                return error.MarkdownRejectedAsMedia;
+            }
+        }
+        const path = fileTab(&h) orelse return error.NoFilesPreviewTab;
+        try testing.expect(std.mem.endsWith(u8, path, "Example Notes.md"));
+        try testing.expect(h.a.panels.host_open);
+    }
+}
+
+test "issue 199: Open file reads a workspace document from the chat's own host by its workspace path" {
+    var h: Harness = undefined;
+    try chatOnHost(&h, "remote", "remote-project", "/synthetic/remote-project", "Saved for review:\n\n- **[Example Notes.md](docs/Example%20Notes.md)**\n", true);
+    defer h.deinit();
+    try openFromMenu(&h, "Example Notes.md");
+    try testing.expectEqualStrings("docs/Example Notes.md", fileTab(&h) orelse return error.NoFilesPreviewTab);
+    try testing.expect(h.a.panels.activeTab().?.editor.?.preview);
+    var reads: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+    defer {
+        for (reads.items) |p| p.deinit();
+        reads.deinit(testing.allocator);
+    }
+    try sentParams(&h, "ReadWorkspaceFile", &reads);
+    try testing.expect(reads.items.len > 0);
+    for (reads.items) |read| {
+        const params = read.value.object.get("params").?.object;
+        try testing.expectEqualStrings("docs/Example Notes.md", params.get("path").?.string);
+        try testing.expectEqualStrings("a", params.get("chatId").?.string);
+        try testing.expectEqualStrings("remote", params.get("targetDeviceId").?.string);
+    }
+    try testing.expectEqual(@as(usize, 0), try countSent(&h, "ReadAttachmentChunk"));
+}
+
+test "issue 199: Open file from a chat in an unfocused split pane opens the document for that chat" {
+    const App = @import("app.zig").App;
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.device_id = try a.gpa.dupe(u8, "viewer-device");
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"notes-chat","deviceId":"notes-host","spaceId":"notes-project","cwd":"/synthetic/project","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    a.openChat("notes-chat", null);
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, a.gpa, "{}", .{});
+    a.engine.state = .connected;
+    a.splitPane(.horizontal);
+    // The new pane has focus; the chat holding the reference is its peer.
+    try testing.expect(a.selected == null or !std.mem.eql(u8, a.selected.?, "notes-chat"));
+    artifacts.openReference(&a, "notes-chat", "docs/Example%20Notes.md");
+    try testing.expectEqualStrings("notes-chat", a.selected orelse return error.ChatNotSelected);
+    const tab = a.panels.tabs.items[a.panels.active];
+    try testing.expectEqualStrings("docs/Example Notes.md", tab.path);
+    try testing.expectEqualStrings("notes-chat", tab.editor.?.target.chatId.?);
+    try testing.expectEqualStrings("notes-host", tab.editor.?.target.targetDeviceId.?);
+}
+
+test "issue 199: a click on a workspace Markdown reference opens it as Open file does" {
+    var h: Harness = undefined;
+    try chatWithReply(&h, "Saved for review:\n\n- **[Example Notes.md](Example%20Notes.md)**\n", true);
+    defer h.deinit();
+    const rect = h.t.findText("Example Notes.md") orelse return error.MissingSyntheticLink;
+    h.t.click(rect.x + 8, rect.y + rect.h / 2);
+    h.t.settle(0.3);
+    try testing.expectEqualStrings("Example Notes.md", fileTab(&h) orelse return error.NoFilesPreviewTab);
+}
+
+test "issue 199: a document outside the chat's workspace is not opened in Files" {
+    for ([_][]const u8{ "../elsewhere/Example%20Notes.md", "/synthetic/elsewhere/Example%20Notes.md", "/synthetic/fieldnotes-copy/Example%20Notes.md" }) |destination| {
+        var h: Harness = undefined;
+        const text = try std.fmt.allocPrint(testing.allocator, "Saved for review:\n\n- **[Example Notes.md]({s})**\n", .{destination});
+        defer testing.allocator.free(text);
+        try chatWithReply(&h, text, true);
+        defer h.deinit();
+        try openFromMenu(&h, "Example Notes.md");
+        try testing.expect(fileTab(&h) == null);
+        try testing.expectEqual(@as(usize, 0), try countSent(&h, "ReadWorkspaceFile"));
+        try testing.expect(h.a.noticeText() != null);
+    }
+}
+
+test "issue 199: Open file routes media and PDF to the viewer and other workspace files to Files" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const files = [_][2][]const u8{
+        .{ "/w/Example Notes.md", "Example Notes.md" },
+        .{ "/w/docs/notes.markdown", "docs/notes.markdown" },
+        .{ "/w/src/main.zig", "src/main.zig" },
+        .{ "/w/Example Notes.xyz", "Example Notes.xyz" },
+    };
+    for (files) |case| {
+        switch (artifacts.route(arena.allocator(), "/w", case[0])) {
+            .files => |relative| try testing.expectEqualStrings(case[1], relative),
+            else => return error.NotRoutedToFiles,
+        }
+    }
+    for ([_][]const u8{ "/w/clip.mp4", "/w/report.PDF", "/uploads/frame.png" }) |path| {
+        try testing.expect(artifacts.route(arena.allocator(), "/w", path) == .viewer);
+    }
+    for ([_][]const u8{ "/elsewhere/notes.md", "/wx/notes.md", "/w/.git/config", "/w" }) |path| {
+        try testing.expect(artifacts.route(arena.allocator(), "/w", path) == .none);
+    }
+}
