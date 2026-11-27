@@ -96,9 +96,10 @@ const SilentPeer = struct {
     }
 };
 
-fn blockedRead(io: Io, socket: *const Io.net.Socket) anyerror!Io.net.IncomingMessage {
+fn blockedRead(io: Io, stream: *const Io.net.Stream) Io.net.Stream.Reader.Error!Io.net.Stream.ReadResult {
     var bytes: [1]u8 = undefined;
-    return socket.receive(io, &bytes);
+    var buffers: [1][]u8 = .{&bytes};
+    return stream.readWithControl(io, &buffers, &.{});
 }
 
 fn returnValue(value: u32) anyerror!u32 {
@@ -138,7 +139,7 @@ test "deadline cancels and joins a blocked socket task" {
     const stream = try client_addr.connect(testing.io, .{ .mode = .stream });
     defer stream.close(testing.io);
     const started = Io.Clock.awake.now(testing.io);
-    const outcome = try run(testing.io, 2_000, null, blockedRead, .{ testing.io, &stream.socket });
+    const outcome = try run(testing.io, 2_000, null, blockedRead, .{ testing.io, &stream });
     const elapsed_ms = started.durationTo(Io.Clock.awake.now(testing.io)).toMilliseconds();
     switch (outcome) {
         .timed_out => |result| try testing.expectError(error.Canceled, result),
