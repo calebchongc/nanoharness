@@ -425,24 +425,19 @@ pub fn sessionOf(sessions: []const Session, chat_id: []const u8) ?Session {
 /// What a session row's status slot shows (`display_status`,
 /// crates/proto/src/view.rs): a working or waiting session counts while it
 /// is fresh (updated in the last 45 s); an error shows only until it is
-/// seen; otherwise an unseen reply reads as completed.
+/// seen; a settled session with an unseen reply reads as completed.
 pub const Mark = enum { working, completed, awaiting_input, errored, idle };
 
 pub const stale_ms = 45_000;
 
 pub fn markOf(chat: Chat, session: ?Session, now_ms: i64) Mark {
-    const live: ?Status = if (session) |s| switch (s.status) {
-        .idle => null,
-        .errored => .errored,
-        .working, .awaiting_input => if (now_ms - s.updated_ms > stale_ms) null else s.status,
-    } else null;
-    if (live) |st| switch (st) {
-        .working => return .working,
-        .awaiting_input => return .awaiting_input,
-        .errored => if (unseen(chat)) return .errored,
-        .idle => {},
+    const row = session orelse return .idle;
+    return switch (row.status) {
+        .working => if (now_ms - row.updated_ms > stale_ms) .idle else .working,
+        .awaiting_input => if (now_ms - row.updated_ms > stale_ms) .idle else .awaiting_input,
+        .errored => if (unseen(chat)) .errored else .idle,
+        .idle => if (unseen(chat)) .completed else .idle,
     };
-    return if (unseen(chat)) .completed else .idle;
 }
 
 pub fn unseen(chat: Chat) bool {
@@ -543,7 +538,7 @@ test "the sidebar orders by last called, and marks what finished unseen" {
     };
     sortChats(&chats);
     try testing.expectEqualStrings("a", chats[0].id);
-    try testing.expectEqual(Mark.completed, markOf(chats[0], null, 100));
+    try testing.expectEqual(Mark.idle, markOf(chats[0], null, 100));
     try testing.expectEqual(Mark.idle, markOf(chats[1], null, 100));
     const working: Session = .{ .chat_id = "b", .status = .working, .updated_ms = 100 };
     try testing.expectEqual(Mark.working, markOf(chats[1], working, 30_000));

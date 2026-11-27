@@ -271,10 +271,14 @@ test "generated-page chips open only their local host's validated page and lock 
     defer chats.deinit();
     try h.a.chats.replace(chats.value);
     h.a.device_id = try testing.allocator.dupe(u8, "synthetic-remote");
+    h.a.settings.set(.transcript_compact_mode, true);
     try h.transcript(
-        \\{"reset":[{"id":"answer","role":"assistant","parts":[{"id":"page","kind":"tool","resolved":true,
+        \\{"reset":[{"id":"answer","role":"assistant","parts":[
+        \\ {"id":"work","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"ordinary background step"}},
+        \\ {"id":"page","kind":"tool","resolved":true,
         \\ "call":{"kind":"unknown","name":"render_html"},"view":{"kind":"html","id":"0123456789abcdef0123456789abcdef"}}]}]}
     );
+    try testing.expect(!h.t.hasText("ordinary background step"));
     try h.t.clickText("render_html");
     h.t.settle(0.1);
     try testing.expect(h.a.panels.pending_browser == null);
