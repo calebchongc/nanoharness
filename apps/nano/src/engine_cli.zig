@@ -123,7 +123,13 @@ pub fn dataDirCandidates(gpa: Allocator, env: *const Map, windows: bool) ![][]u8
 
 /// The data folder (owned): the first candidate that exists, else the first.
 pub fn resolveDataDir(gpa: Allocator, io: Io, env: *const Map) ![]u8 {
-    const list = try dataDirCandidates(gpa, env, builtin.os.tag == .windows);
+    return resolveDataDirFor(gpa, io, env, builtin.os.tag == .windows);
+}
+
+/// `resolveDataDir` for the given platform, so a test on any OS can check the
+/// Windows answer.
+pub fn resolveDataDirFor(gpa: Allocator, io: Io, env: *const Map, windows: bool) ![]u8 {
+    const list = try dataDirCandidates(gpa, env, windows);
     defer gpa.free(list);
     var chosen: usize = 0;
     for (list, 0..) |p, i| {
