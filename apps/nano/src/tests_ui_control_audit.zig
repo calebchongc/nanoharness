@@ -323,3 +323,146 @@ test "control audit: New project from the palette and Shift Cmd N opens the proj
         try testing.expectEqual(tabs, h.a.tabs.items.items.len);
     }
 }
+
+// ---- Composer ----
+
+fn sendButton(h: *Harness) ?@TypeOf(h.t.ctx.nodes.items[0]) {
+    const i = iconBox(h, "arrow-up", 28, 28, 300) orelse return null;
+    return h.t.ctx.nodes.items[i];
+}
+
+test "control audit: Send is dimmed with nothing to send or no engine, and a send while disconnected says so" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.engine.state = .connected;
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+    try testing.expect((sendButton(&h) orelse return error.MissingSend).style.opacity < 0.5);
+    h.a.composer.set("Synthetic message");
+    h.t.settle(1);
+    try testing.expect((sendButton(&h) orelse return error.MissingSend).style.opacity > 0.8);
+    h.a.engine.state = .disconnected;
+    h.t.settle(1);
+    const send = sendButton(&h) orelse return error.MissingSend;
+    try testing.expect(send.style.opacity < 0.5);
+    h.a.clearNotice();
+    h.t.click(center(send.rect)[0], center(send.rect)[1]);
+    h.t.settle(1);
+    const notice = h.a.noticeText() orelse return error.SilentSend;
+    try testing.expect(std.mem.indexOf(u8, notice, "engine") != null);
+    try testing.expectEqualStrings("Synthetic message", h.a.composer.text());
+}
+
+test "control audit: the queue row has no drag handle" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"q0","text":"Synthetic queued message"},{"id":"q1","text":"Another synthetic message"}]
+    , .{});
+    defer parsed.deinit();
+    try h.a.queue.replace(parsed.value);
+    h.t.settle(1);
+    // (The Steer/Queue chip uses the same glyph; only the queue rows count.)
+    for ([_][]const u8{ "Synthetic queued message", "Another synthetic message" }) |text| {
+        const row = h.t.findText(text) orelse return error.MissingQueueRow;
+        for (h.t.ctx.nodes.items) |node| if (isIcon(node, "queue-drag-handle")) {
+            try testing.expect(node.rect.y + node.rect.h < row.y - 4 or node.rect.y > row.y + row.h + 4);
+        };
+    }
+}
+
+test "control audit: a plain Chat draft's model picker has no Starred or agent tabs" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.newTab();
+    h.a.new_chat_mode = true;
+    h.t.settle(1);
+    h.a.picker = .model;
+    @import("view_picker.zig").opened(&h.a);
+    h.t.settle(1);
+    try testing.expect(!h.a.view.model_picker.starred);
+    try testing.expect(!h.t.hasText("Starred"));
+    try testing.expect(!h.t.containsText("Ctrl+Tab agents"));
+    // A coding draft keeps them.
+    h.a.picker = .none;
+    h.a.new_chat_mode = false;
+    h.t.settle(1);
+    h.a.picker = .model;
+    @import("view_picker.zig").opened(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Starred"));
+}
+
+test "control audit: a narrow new-chat footer draws the Project chip once" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.view.sidebar_open = false;
+    h.a.newTab();
+    h.a.splitPane(.horizontal);
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+    var width: f32 = 360;
+    var second_row = false;
+    while (width <= 1600) : (width += 20) {
+        h.t.resize(width, 780);
+        h.t.settle(1);
+        // Row one holds the Chat | Code switch; a second row only the targets.
+        var mode_y: ?f32 = null;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |t| if (node.rect.y > 560 and std.mem.eql(u8, t.str, "Code")) {
+                mode_y = node.rect.y + node.rect.h / 2;
+            },
+            else => {},
+        };
+        var projects: usize = 0;
+        for (h.t.ctx.nodes.items) |node| if (node.rect.y > 560 and isIcon(node, "folder")) {
+            projects += 1;
+            if (mode_y) |y| if (node.rect.y > y + 8) {
+                second_row = true;
+            };
+        };
+        try testing.expect(projects <= 1);
+    }
+    try testing.expect(second_row);
+}
+
+test "control audit: /stop is offered only while a run is active" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.completion.commands_done = true;
+    const completion = @import("composer_completion.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tok = @import("completion_rules.zig").token("/stop", 5).?;
+    const offered = struct {
+        fn f(rows: []const completion.Entry) bool {
+            for (rows) |e| if (e.action) |act| if (act == .stop) return true;
+            return false;
+        }
+    }.f;
+    try testing.expect(!offered(try completion.entries(&h.a, arena.allocator(), tok)));
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"a","status":"working","updatedAt":"2099-01-01T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    try testing.expect(offered(try completion.entries(&h.a, arena.allocator(), tok)));
+}
+
+test "control audit: the paperclip and microphone say what they do" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.dictation.probed.store(1, .release);
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+    const clip = button(&h, "Attach") orelse return error.MissingAttachButton;
+    try testing.expect(std.mem.indexOf(u8, tipAt(&h, rectOf(&h, clip)) orelse "", "Attach") != null);
+    const mic = iconBox(&h, "microphone", 28, 28, 300) orelse return error.MissingMic;
+    try testing.expectEqualStrings("Dictate", tipAt(&h, h.t.ctx.nodes.items[mic].rect) orelse return error.MissingMicTooltip);
+}

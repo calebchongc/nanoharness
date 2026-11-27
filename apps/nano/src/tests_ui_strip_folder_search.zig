@@ -822,7 +822,8 @@ test "project picker #15: after Cmd+W closes a Files tab it opens for the focuse
     try testing.expect(strip.same(h.a.view.strip.target, .{ .chat = 2 }));
 }
 
-/// The project chips in a narrow draft's footer, top row first.
+/// The project chips in a narrow draft's footer (one: a crushed chip moves
+/// to the second row rather than being drawn twice).
 fn footerProjects(h: *Harness, out: *[2]ui.Rect) []ui.Rect {
     var n: usize = 0;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
@@ -836,7 +837,7 @@ fn footerProjects(h: *Harness, out: *[2]ui.Rect) []ui.Rect {
 }
 
 test "project picker #15: a narrow draft has the picker above the project chip that opened it, also after a resize" {
-    const Via = enum { keyboard, first_row, second_row };
+    const Via = enum { keyboard, chip };
     var seen: std.EnumArray(Via, usize) = .initFill(0);
     for ([_]@import("motion_rules.zig").UiMode{ .zen, .developer }) |mode| for ([_]usize{ 1, 2, 3 }) |n| for (std.enums.values(Via)) |via| {
         var h: Harness = undefined;
@@ -854,23 +855,23 @@ test "project picker #15: a narrow draft has the picker above the project chip t
         errdefer std.debug.print("mode={t} n={d} via={t}\n", .{ mode, n, via });
         var buf: [2]ui.Rect = undefined;
         const before = footerProjects(&h, &buf);
+        try testing.expect(before.len <= 1);
         // In a split, the keyboard's picker is the strip's.
         if (via == .keyboard and n > 1) continue;
-        if (before.len < @as(usize, if (via == .keyboard) 1 else 2)) continue;
+        if (before.len < 1) continue;
         seen.getPtr(via).* += 1;
         switch (via) {
             .keyboard => h.press(picker_chord),
-            .first_row => clickRect(&h, before[0]),
-            .second_row => clickRect(&h, before[1]),
+            .chip => clickRect(&h, before[0]),
         }
         try testing.expect(h.a.view.strip.footer_folder);
         for ([_]f32{ 780, 660, 900 }) |height| {
             h.t.resize(width, height);
             h.t.settle(2);
-            if (mode == .zen and n == 2 and via == .second_row and height == 660) snap(&h, "picker-narrow-draft");
+            if (mode == .zen and n == 2 and via == .chip and height == 660) snap(&h, "picker-narrow-draft");
             const now = footerProjects(&h, &buf);
             if (now.len != before.len) return error.FooterChanged;
-            const chip = now[@intFromBool(via == .second_row)];
+            const chip = now[0];
             const card = try pickerCard(&h);
             errdefer std.debug.print("height={d}: card y={d:.0} h={d:.0}, chip y={d:.0}\n", .{ height, card.y, card.h, chip.y });
             try expectBeside(&h, chip);

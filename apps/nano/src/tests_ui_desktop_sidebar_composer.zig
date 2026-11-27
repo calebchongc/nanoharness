@@ -215,7 +215,9 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expectApproxEqAbs(@as(f32, 10), model.x - pill.x, 0.01);
     try testing.expectApproxEqAbs(pill.y + pill.h + 8, model.y, 0.01);
     try testing.expectApproxEqAbs(model.y + 12, mode.y + mode.h / 2, 0.01);
-    try testing.expectApproxEqAbs(model.y + 12, project.y + project.h / 2, 0.01);
+    // Too narrow for its words, the project chip is drawn once, centred in
+    // the targets' own row under the first (24 + 2 gap + 22 / 2).
+    try testing.expectApproxEqAbs(model.y + 37, project.y + project.h / 2, 0.01);
     const last = textNode(&h.t, "Tour this project") orelse return error.NoStarter;
     const chip = h.t.ctx.node(h.t.ctx.node(last).parent).rect;
     try testing.expectApproxEqAbs(@as(f32, 24), pill.y - chip.y - chip.h, 0.01);
@@ -721,6 +723,22 @@ fn gitDraft(h: *Harness) !void {
     h.t.frame();
 }
 
+/// The draft's target chips moved to their own row under the footer's
+/// first when they had no room for their words.
+fn targetRowControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
+    const model = h.a.view.chip_anchor orelse return error.NoModelChip;
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.h != 20 or r.w <= 0 or r.x < pill.x or r.y < model.y + 24 or r.y + r.h > model.y + 50) continue;
+        if (n >= out.len) return error.ExtraFooterControl;
+        out[n] = r;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// The footer's controls after the model chip: every 20-point box in its
 /// 24-point row.
 fn footerControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
@@ -759,9 +777,13 @@ test "draft footer controls end inside the composer in split panes" {
         if (window_w == 1200) h.snap("draft-footer-split-pane");
         const pill = h.a.view.composer_anchor orelse return error.NoComposer;
         const controls = try footerControls(&h, &buf);
-        // Mode, computer, project, checkout and ref: none left out, none
-        // past the row's 10-point inset, each whole or its 28-point glyph.
-        try testing.expectEqual(@as(usize, 5), controls.len);
+        var row2_buf: [4]ui.Rect = undefined;
+        const targets = try targetRowControls(&h, &row2_buf);
+        // Mode, computer, project, checkout and ref, across the two rows:
+        // none left out or drawn twice, none past the row's 10-point inset,
+        // each whole or its 28-point glyph.
+        try testing.expectEqual(@as(usize, 5), controls.len + targets.len);
+        for (targets) |r| try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
         for (controls, 0..) |r, i| {
             try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
             try testing.expect(r.w >= 28);
