@@ -217,15 +217,66 @@ pub const Route = union(enum) {
     /// it (workspace-relative). Its tab shows text, Markdown as Preview, and
     /// says itself when the host reports a file binary or too large.
     files: []const u8,
-    /// Neither: outside the workspace, or a path Files doesn't open.
-    none,
+    /// Neither: why it can't open.
+    failure: Failure,
 };
 
 pub fn route(arena: std.mem.Allocator, cwd: []const u8, path: []const u8) Route {
     if (kind(path) != null) return .viewer;
-    const relative = @import("tool_rows.zig").workspacePath(arena, cwd, path) orelse return .none;
-    if (!@import("app_file_editor.zig").validPath(relative)) return .none;
+    const relative = @import("tool_rows.zig").workspacePath(arena, cwd, path) orelse return .{ .failure = .outside_workspace };
+    if (!@import("app_file_editor.zig").validPath(relative)) return .{ .failure = .unsupported };
     return .{ .files = relative };
+}
+
+/// Why a chat file reference didn't open.
+pub const Failure = enum {
+    /// Neither the viewer nor Files opens this kind of file from a chat.
+    unsupported,
+    /// Not media or PDF, and not inside the chat's workspace.
+    outside_workspace,
+    /// The app isn't connected, so the host can't be asked.
+    offline,
+    /// The host answered with an error instead of the file.
+    unreadable,
+};
+
+pub const max_notice = 200;
+
+/// The notice for a reference that didn't open: the file's base name
+/// `name`, why, and a remedy only where one applies. `host` is the owning
+/// host's name if the app knows it. Long names are shortened to fit.
+pub fn failureText(buf: *[max_notice]u8, failure: Failure, name: []const u8, host: ?[]const u8) []const u8 {
+    const n = shorten(name, 72);
+    const h = shorten(host orelse "its host", 40);
+    return switch (failure) {
+        .unsupported => std.fmt.bufPrint(buf, "Couldn't open “{s}{s}”: this kind of file can't be opened from a chat.", .{ n[0], n[1] }),
+        .outside_workspace => std.fmt.bufPrint(buf, "Couldn't open “{s}{s}”: it's outside this chat's workspace.", .{ n[0], n[1] }),
+        .offline => std.fmt.bufPrint(buf, "Couldn't open “{s}{s}”: not connected to {s}{s}. Reconnect and try again.", .{ n[0], n[1], h[0], h[1] }),
+        .unreadable => std.fmt.bufPrint(buf, "Couldn't read “{s}{s}” on {s}{s}.", .{ n[0], n[1], h[0], h[1] }),
+    } catch unreachable; // 72 + 40 bytes of names leave room in every template.
+}
+
+/// `text` cut to at most `max` bytes on a character boundary, and the
+/// ellipsis to follow it when it was cut.
+fn shorten(text: []const u8, max: usize) [2][]const u8 {
+    if (text.len <= max) return .{ text, "" };
+    var end = max;
+    while (end > 0 and (text[end] & 0xc0) == 0x80) end -= 1;
+    return .{ text[0..end], "…" };
+}
+
+/// The owning host's name for a notice, when it is another computer the
+/// app knows by name.
+fn hostName(a: *const App, device: ?[]const u8) ?[]const u8 {
+    const id = device orelse return null;
+    if (a.device_id) |mine| if (std.mem.eql(u8, mine, id)) return null;
+    const name = @import("strip_device.zig").label(id, a.device_id, a.devices.items, a.cloud_sandboxes.list);
+    return if (std.mem.eql(u8, name, "Unknown device")) null else name;
+}
+
+fn notify(a: *App, failure: Failure, path: []const u8, device: ?[]const u8) void {
+    var buf: [max_notice]u8 = undefined;
+    a.setNotice(failureText(&buf, failure, std.fs.path.basenamePosix(path), hostName(a, device)));
 }
 
 /// Open file, or a click, on a chat's local file reference: a document in
@@ -240,9 +291,10 @@ pub fn openReference(a: *App, parent: []const u8, raw: []const u8) void {
     var arena: std.heap.ArenaAllocator = .init(a.gpa);
     defer arena.deinit();
     switch (route(arena.allocator(), cwd, path)) {
-        .viewer, .none => open(a, parent, raw),
+        .viewer => open(a, parent, raw),
+        .failure => |failure| notify(a, failure, path, chat.device_id),
         .files => |relative| {
-            if (!a.engine.up()) return a.setNotice("Connect to the artifact's host before opening it.");
+            if (!a.engine.up()) return notify(a, .offline, path, chat.device_id);
             // Files opens for the selected chat: select the pane holding
             // this one, so the tab reads from this chat's host.
             if (owner.pane_index) |ix| a.focusPane(ix);
@@ -264,12 +316,12 @@ pub fn open(a: *App, parent: []const u8, raw: []const u8) void {
     const cwd = chat.cwd orelse return a.setNotice("The artifact's working folder is not known yet.");
     const path = resolve(a.gpa, cwd, raw) catch return a.setNotice("This artifact link is not a supported local path.");
     const file_kind = kind(path) orelse {
-        a.gpa.free(path);
-        return a.setNotice("This artifact type cannot be opened. Use a video, image, GIF or PDF link.");
+        defer a.gpa.free(path);
+        return notify(a, .unsupported, path, device);
     };
     if (!a.engine.up()) {
-        a.gpa.free(path);
-        return a.setNotice("Connect to the artifact's host before opening it.");
+        defer a.gpa.free(path);
+        return notify(a, .offline, path, device);
     }
     const t = createTransfer(a.gpa, parent, device, cwd, path, owner, file_kind) catch {
         a.gpa.free(path);
@@ -324,7 +376,11 @@ fn onChunk(a: *App, id: u64, reply: rpc.Reply) void {
     if (!t.owned(a)) return fail(a, "The artifact's conversation or host changed. Click its link again.");
     const value = switch (reply) {
         .ok => |v| v,
-        else => return fail(a, "The host could not read this artifact. It may be unavailable, outside its allowed folders, or unsupported by this engine."),
+        else => {
+            // Written before `fail` frees the transfer that owns the path.
+            var buf: [max_notice]u8 = undefined;
+            return fail(a, failureText(&buf, .unreadable, std.fs.path.basenamePosix(t.path), hostName(a, t.device)));
+        },
     };
     if (value != .object) return fail(a, "The host returned an invalid artifact chunk.");
     const o = value.object;

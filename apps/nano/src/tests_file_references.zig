@@ -187,9 +187,16 @@ test "issue 199: Open file routes media and PDF to the viewer and other workspac
     for ([_][]const u8{ "/w/clip.mp4", "/w/report.PDF", "/uploads/frame.png" }) |path| {
         try testing.expect(artifacts.route(arena.allocator(), "/w", path) == .viewer);
     }
-    for ([_][]const u8{ "/elsewhere/notes.md", "/wx/notes.md", "/w/.git/config", "/w" }) |path| {
-        try testing.expect(artifacts.route(arena.allocator(), "/w", path) == .none);
-    }
+    const failures = [_]struct { []const u8, artifacts.Failure }{
+        .{ "/elsewhere/notes.md", .outside_workspace },
+        .{ "/wx/notes.md", .outside_workspace },
+        .{ "/w", .outside_workspace },
+        .{ "/w/.git/config", .unsupported },
+    };
+    for (failures) |case| switch (artifacts.route(arena.allocator(), "/w", case[0])) {
+        .failure => |failure| try testing.expectEqual(case[1], failure),
+        else => return error.ExpectedFailure,
+    };
 }
 
 test "issue 200: a file reference offers Copy file path and copies the decoded plain path" {
@@ -228,4 +235,87 @@ test "issue 200: a web URL ending in .md keeps Copy link and copies the URL verb
     try h.t.clickText("Copy link");
     h.t.settle(0.2);
     try testing.expectEqualStrings(url, h.t.clipboard.items);
+}
+
+fn expectNoticeNames(h: *Harness, basename: []const u8) !void {
+    const notice = h.a.noticeText() orelse return error.NoNotice;
+    if (std.mem.indexOf(u8, notice, basename) == null or std.mem.indexOf(u8, notice, media_hint) != null) {
+        std.debug.print("issue 201: notice for {s} was: {s}\n", .{ basename, notice });
+        return error.NoticeDoesNotExplainTheFile;
+    }
+}
+
+test "issue 201: an unsupported file's open notice names the file and suggests no media types" {
+    var h: Harness = undefined;
+    try chatWithReply(&h, "Saved for review:\n\n- **[Example Notes.xyz](Example%20Notes.xyz)**\n", true);
+    defer h.deinit();
+    try rightClickLabel(&h, "Example Notes.xyz");
+    try h.t.clickText("Open file");
+    h.t.settle(0.3);
+    // Either Files opens it, or the notice says which file and why.
+    if (fileTab(&h) == null) try expectNoticeNames(&h, "Example Notes.xyz");
+}
+
+test "issue 201: an offline host's open notice names the file" {
+    var h: Harness = undefined;
+    try chatWithReply(&h, "Rendered for review:\n\n- **[clip.mp4](artifacts/clip.mp4)**\n", false);
+    defer h.deinit();
+    try rightClickLabel(&h, "clip.mp4");
+    try h.t.clickText("Open file");
+    h.t.settle(0.3);
+    try expectNoticeNames(&h, "clip.mp4");
+}
+
+test "issue 201: a host read failure's notice names the file" {
+    var h: Harness = undefined;
+    try chatWithReply(&h, "Rendered for review:\n\n- **[clip.mp4](artifacts/clip.mp4)**\n", true);
+    defer h.deinit();
+    try rightClickLabel(&h, "clip.mp4");
+    try h.t.clickText("Open file");
+    h.t.settle(0.3);
+    try expectNoticeNames(&h, "clip.mp4");
+}
+
+test "issue 201: notices name another computer that owns the chat, and a document outside the workspace says so" {
+    var h: Harness = undefined;
+    try chatOnHost(&h, "remote", "remote-project", "/synthetic/remote-project", "Saved for review:\n\n- **[Example Notes.md](Example%20Notes.md)**\n- **[clip.mp4](clip.mp4)**\n- **[Draft.md](/synthetic/elsewhere/Draft.md)**\n", false);
+    defer h.deinit();
+    try openFromMenu(&h, "Example Notes.md");
+    try testing.expectEqualStrings("Couldn't open “Example Notes.md”: not connected to Build box. Reconnect and try again.", h.a.noticeText().?);
+    try testing.expect(fileTab(&h) == null);
+    try openFromMenu(&h, "clip.mp4");
+    try testing.expectEqualStrings("Couldn't open “clip.mp4”: not connected to Build box. Reconnect and try again.", h.a.noticeText().?);
+    h.a.engine.state = .connected;
+    try openFromMenu(&h, "Draft.md");
+    try testing.expectEqualStrings("Couldn't open “Draft.md”: it's outside this chat's workspace.", h.a.noticeText().?);
+    try openFromMenu(&h, "clip.mp4");
+    for (0..20) |_| if (!h.a.engine.pump()) break;
+    h.t.settle(0.2);
+    try testing.expectEqualStrings("Couldn't read “clip.mp4” on Build box.", h.a.noticeText().?);
+}
+
+test "issue 201: each open failure names the file, says why, and offers only a remedy that applies" {
+    const cases = [_]struct { failure: artifacts.Failure, name: []const u8, host: ?[]const u8, text: []const u8 }{
+        .{ .failure = .unsupported, .name = "Example Notes.xyz", .host = null, .text = "Couldn't open “Example Notes.xyz”: this kind of file can't be opened from a chat." },
+        .{ .failure = .outside_workspace, .name = "Example Notes.md", .host = null, .text = "Couldn't open “Example Notes.md”: it's outside this chat's workspace." },
+        .{ .failure = .offline, .name = "Example Notes.md", .host = null, .text = "Couldn't open “Example Notes.md”: not connected to its host. Reconnect and try again." },
+        .{ .failure = .offline, .name = "clip.mp4", .host = "Build box", .text = "Couldn't open “clip.mp4”: not connected to Build box. Reconnect and try again." },
+        .{ .failure = .unreadable, .name = "clip.mp4", .host = null, .text = "Couldn't read “clip.mp4” on its host." },
+        .{ .failure = .unreadable, .name = "clip.mp4", .host = "Build box", .text = "Couldn't read “clip.mp4” on Build box." },
+    };
+    var buf: [artifacts.max_notice]u8 = undefined;
+    for (cases) |case| {
+        const text = artifacts.failureText(&buf, case.failure, case.name, case.host);
+        try testing.expectEqualStrings(case.text, text);
+        try testing.expect(std.mem.indexOf(u8, text, media_hint) == null);
+    }
+    // A long name or host is shortened on a character boundary, never cut
+    // off the end of the notice.
+    const long = "éééééééééééééééééééééééééééééééééééééééé.md";
+    for (std.enums.values(artifacts.Failure)) |failure| {
+        const text = artifacts.failureText(&buf, failure, long, "Studio of a synthetic workshop with a very long name");
+        try testing.expect(std.unicode.utf8ValidateSlice(text));
+        try testing.expect(std.mem.indexOf(u8, text, "…") != null);
+        try testing.expect(std.mem.endsWith(u8, text, "."));
+    }
 }
