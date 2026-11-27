@@ -897,7 +897,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (boundShortcut(c, a, "newProject")) {
-        @import("app_open_chooser.zig").open(a, .new_project);
+        a.addFolder();
         return;
     }
     if (!a.view.settings_open and boundShortcut(c, a, "openProjectPicker")) {

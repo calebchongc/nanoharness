@@ -224,3 +224,102 @@ test "control audit: the tab overview shows the user's split binding and the pla
     try testing.expect(!h.t.hasText("⌘D"));
     try testing.expect(!h.t.hasText("⌘Del"));
 }
+
+// ---- Sidebar and palette ----
+
+test "control audit: Developer sidebar has one new-session plus, in its title row" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.developer);
+    h.a.view.sidebar_open = true;
+    h.t.settle(1);
+    const sidebar_w = @import("view_sidebar.zig").widthOf(&h.a);
+    var footer_controls: usize = 0;
+    var last: ui.Rect = .{};
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar_w) {
+            footer_controls += 1;
+            last = r;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), footer_controls);
+    try testing.expectEqualStrings("Chat history", tipAt(&h, last) orelse return error.MissingHistoryTooltip);
+    _ = button(&h, "New session") orelse return error.MissingTitlebarPlus;
+}
+
+test "control audit: the palette offers one Design command, with one key" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    const list = try palette.entries(&h.a, testing.allocator, "design");
+    defer testing.allocator.free(list);
+    var design: usize = 0;
+    for (list) |e| if (e.label()) |l| {
+        if (std.mem.indexOf(u8, l, "Design") != null) design += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), design);
+}
+
+test "control audit: Zen's palette leaves out the filter toggle it can't show" {
+    for ([_]@import("motion_rules.zig").UiMode{ .zen, .developer }) |mode| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.settings.applyUiMode(mode);
+        const list = try palette.entries(&h.a, testing.allocator, "filters");
+        defer testing.allocator.free(list);
+        var listed = false;
+        for (list) |e| if (e == .toggle_part and e.toggle_part == .multi_axis_filters) {
+            listed = true;
+        };
+        try testing.expectEqual(mode != .zen, listed);
+    }
+}
+
+test "control audit: Zen's New chat hint shows the rebindable new-session key" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.view.sidebar_open = true;
+    try bind(&h, "newSession", "mod-alt-y");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("New chat"));
+    try testing.expect(h.t.hasText(if (mac) "⌥⌘Y" else "Ctrl+Alt+Y"));
+    try testing.expect(!h.t.hasText(if (mac) "⌘N" else "Ctrl+N"));
+}
+
+test "control audit: Zen's account row tooltip says a click opens settings" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.view.sidebar_open = true;
+    h.t.settle(1);
+    const r = h.a.view.account_anchor orelse return error.MissingAccountRow;
+    const tip = tipAt(&h, r) orelse return error.MissingAccountTooltip;
+    try testing.expect(std.mem.indexOf(u8, tip, "click for card") == null);
+    try testing.expect(std.mem.indexOf(u8, tip, "click for settings") != null);
+    h.t.click(center(r)[0], center(r)[1]);
+    h.t.settle(1);
+    try testing.expect(h.a.view.settings_open);
+}
+
+test "control audit: New project from the palette and Shift Cmd N opens the project form, not the destination sheet" {
+    for ([_]bool{ false, true }) |from_palette| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        const tabs = h.a.tabs.items.items.len;
+        if (from_palette) {
+            palette.activate(&h.a, .new_project);
+            h.t.settle(1);
+        } else h.press(.{ .key = 'n', .cmd = true, .shift = true });
+        try testing.expect(h.a.view.project_setup.open);
+        try testing.expect(!h.a.view.open_chooser.open);
+        try testing.expect(!h.t.hasText("Open a project"));
+        try testing.expectEqual(tabs, h.a.tabs.items.items.len);
+    }
+}

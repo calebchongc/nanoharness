@@ -229,11 +229,11 @@ test "desktop parity composer alignment matches the reference and compact width 
     try testing.expect(h.a.view.composer_anchor.?.h >= composer.expanded_min);
 }
 
-test "desktop parity sidebar history has a six point trailing gap and a 350ms tooltip" {
+test "desktop parity sidebar history is the footer's last control and has a 350ms tooltip" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    var controls: [2]ui.Rect = undefined;
+    var controls: [1]ui.Rect = undefined;
     var count: usize = 0;
     for (h.t.ctx.nodes.items) |node| {
         const r = node.rect;
@@ -243,8 +243,8 @@ test "desktop parity sidebar history has a six point trailing gap and a 350ms to
             count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 2), count);
-    try testing.expectApproxEqAbs(@as(f32, 6), controls[1].x - controls[0].x - controls[0].w, 0.01);
+    // The title row's "New session" is the only "+"; none repeats it here.
+    try testing.expectEqual(@as(usize, 1), count);
     h.t.moveTo(controls[0].x + 13, controls[0].y + 13);
     h.t.advance(0.3);
     try testing.expect(h.t.tooltipText() == null);
@@ -610,19 +610,19 @@ test "retention 794 New workspace remains distinct from the pane New tab action"
     try testing.expectEqual(workspaces, h.a.tabs.items.items.len);
     @import("app_open_chooser.zig").close(&h.a);
     h.t.settle(1);
+    // The sidebar title row's "+" ("New session") makes a workspace; the
+    // footer no longer repeats it.
     var create: ?ui.Rect = null;
-    for (h.t.ctx.nodes.items) |node| {
-        const r = node.rect;
-        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar.widthOf(&h.a)) {
-            if (create == null or r.x > create.?.x) create = r;
-        }
+    for (h.t.ctx.a11y_items.items) |item| {
+        const r = h.t.ctx.nodes.items[item.node_index].rect;
+        if (std.mem.eql(u8, item.label, "New session") and r.x < sidebar.widthOf(&h.a)) create = r;
     }
     const button = create orelse return error.NoWorkspaceCreate;
-    h.t.moveTo(button.x + 13, button.y + 13);
+    h.t.moveTo(button.x + button.w / 2, button.y + button.h / 2);
     h.t.advance(0.4);
-    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
+    try testing.expectEqualStrings("New session", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
     h.snap("retention-794-new-workspace-label");
-    h.t.click(button.x + 13, button.y + 13);
+    h.t.click(button.x + button.w / 2, button.y + button.h / 2);
     h.t.settle(1);
     try testing.expectEqual(workspaces + 1, h.a.tabs.items.items.len);
     try testing.expectEqual(old_panes, h.a.tabs.splits.items[0].?.panes.items.len);

@@ -377,12 +377,12 @@ test "deep shortcuts destination sheet harmless title clicks stay inside the mod
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    @import("app_open_chooser.zig").open(&h.a, .new_project);
+    @import("app_open_chooser.zig").open(&h.a, .new_tab);
     h.t.settle(1);
-    try h.t.clickText("Pick a computer and the folder to work in.");
+    try h.t.clickText("The new session starts where you choose.");
     h.t.settle(0.1);
     try testing.expect(h.a.view.open_chooser.open);
-    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_tab, h.a.view.open_chooser.intent);
     // Outside remains a real dismissal, not a blanket no-op workaround.
     h.t.click(20, 300);
     h.t.settle(0.1);
@@ -658,8 +658,9 @@ test "retention custom new chat and project chords dispatch their saved bindings
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else if (std.mem.eql(u8, key, "newProject")) {
-            try testing.expect(h.a.view.open_chooser.open);
-            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+            // The New project form, not the new-tab destination sheet.
+            try testing.expect(h.a.view.project_setup.open);
+            try testing.expect(!h.a.view.open_chooser.open);
         } else if (std.mem.eql(u8, key, "openProjectPicker")) {
             try testing.expectEqual(@import("view_tab_strip.zig").Menu.folder, h.a.view.strip.menu.?);
         } else try testing.expect(h.a.picker == .model);
