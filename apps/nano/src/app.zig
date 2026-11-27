@@ -563,6 +563,8 @@ pub const App = struct {
     nav_restoring: bool = false,
     /// `justrach/browse` Connected Apps (`v1-p256-sig`) client, lazily created.
     browse_conn: ?*@import("browse_connect.zig").Client = null,
+    /// codegraff #941: tells graff when a preview's last browser tab closed.
+    preview_consumers: @import("preview_consumers_file.zig").Sink = .{},
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -658,6 +660,9 @@ pub const App = struct {
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();
+        // Its tabs are gone with it: graff may stop what only they showed.
+        a.preview_consumers.leave(a.gpa, a.io);
+        a.preview_consumers.deinit(a.gpa);
         if (a.browse_conn) |bc| {
             bc.deinit();
             a.gpa.destroy(bc);

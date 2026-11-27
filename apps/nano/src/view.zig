@@ -138,6 +138,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
     @import("app_subagents.zig").settleFrame(a);
     @import("app_browser.zig").settleFrame(a);
+    @import("app_browser.zig").syncPreviewConsumers(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
     @import("view_settings_devices_updates.zig").settleFrame(a);
     @import("view_setup.zig").ensureChecked(a);
