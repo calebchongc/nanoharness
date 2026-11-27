@@ -38,12 +38,12 @@ pub const Shortcut = struct {
 
 const jump_description = "Open the session at this place in the sidebar list.";
 
-/// The Appshot capture's, recorded on the Appshots page (Control-Option-Space
-/// on the Mac, `ShortcutId::CaptureAppshot`).
+/// The GPUI app's Appshot capture key (Control-Option-Space on the Mac,
+/// `ShortcutId::CaptureAppshot`). Nano has no capture and shows no row for
+/// it; the file keeps it as saved.
 pub const appshot: Shortcut = .{ .key = "captureAppshot", .group = .sessions, .title = "Capture Appshot", .description = "", .default = "ctrl-alt-space" };
 
-/// In the page's order (`ShortcutId::ALL`, Appshots' left out: it has a
-/// page of its own).
+/// In the page's order (`ShortcutId::ALL`, Appshots' left out).
 pub const all = [_]Shortcut{
     .{ .key = "saveFile", .group = .files, .title = "Save file", .description = "Save the active workspace file.", .default = "mod-s" },
     .{ .key = "browserReload", .group = .browser, .title = "Reload browser page", .description = "Reload the focused browser tab.", .default = "mod-shift-r" },

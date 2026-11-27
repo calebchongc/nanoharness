@@ -136,9 +136,6 @@ pub const View = struct {
     /// Settings › Shortcuts: the shortcut whose chip waits for keys, and
     /// why the last combination was refused.
     recording: ?usize = null,
-    /// Settings › Appshots asked for Screen Recording or Accessibility once.
-    capture_asked: bool = false,
-    text_asked: bool = false,
     /// Settings › Appearance forced reduced motion on or off last frame
     /// (view_settings_appearance.zig `applyReduceMotion`).
     motion_forced: bool = false,

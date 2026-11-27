@@ -631,11 +631,10 @@ fn motionCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
     }
-    const r = set.row(c, k, false, false);
-    defer r.end();
-    set.tile(c, k, .@"action-play");
-    words(c, k, "Pause animations in background", "Hold animations still while Harness isn't the focused window. Saves CPU and battery.", 42);
-    if (switch_(c, k, a.settings.get(.pause_animations_in_background), 10)) a.settings.toggle(.pause_animations_in_background);
+    // No "Pause animations in background" switch: nothing read it, and the
+    // ambient backdrop and sandbox sprite already stop ticking, and loaders
+    // slow to a third, whenever the window isn't focused (view_backdrop.zig,
+    // view_sandbox_strip.zig, view_kit.zig `background_tick_divisor`).
 }
 
 // Fonts and the conversation's width.
