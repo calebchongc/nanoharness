@@ -149,6 +149,19 @@ All Harness-local patches above (including `scroll_fade`, `d3d11_texture`,
 `after_frame`) are retained, and HDR files (`d3d11_hdr.zig`, `hdr.hlsl`,
 `hdr_output.zig`) remain excluded.
 
+NanoHarness-local layout reuse in `src/ui/{layout,context}.zig`: `measure`
+returns a box's size without working it out again when it is asked for the
+width it was last measured at in the same layout (`Node.measured_at`, reset
+when the root is measured). `fitRow` and `arrange` measure a flexible child
+again at its share; without the reuse, rows nested in growing rows cost
+2^depth. `Context.layout_measures` counts the measures done and
+`Context.layout_reuse = false` restores measuring every request; the layout
+tests `nested flexible rows measure a box at most once per row around it` and
+`layout reusing measured boxes places every box as measuring each again does`
+check the cost and that every rect, size and line count is unchanged.
+`Node` and `Context` gained fields, so rebuild the native runtime through the
+package graph rather than reusing one compiled against the older layout.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
