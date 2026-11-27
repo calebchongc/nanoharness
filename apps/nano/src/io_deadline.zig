@@ -118,7 +118,9 @@ test "idle deadline follows the latest progress timestamp" {
     try testing.expect(idleDeadlineMs(1_100, 300) > idleDeadlineMs(1_000, 300));
 }
 
-test "deadline cancels and joins a blocked Windows socket task" {
+// The red 13687daf run was the caller-level WebSocket, HTTP, and update tests;
+// this direct worker-cancellation regression was added after that run.
+test "deadline cancels and joins a blocked socket task" {
     const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var peer: SilentPeer = .{ .server = try addr.listen(testing.io, .{ .reuse_address = true }) };
     peer.thread = try std.Thread.spawn(.{}, SilentPeer.serve, .{&peer});
