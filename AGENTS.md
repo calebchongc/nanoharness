@@ -57,6 +57,13 @@ same change and run `zig build test -Dtest-filter="completion"`.
   `ConcurrentImportCostTests` asserts that a batched import is at least 5×
   faster than importing row by row.
 
+### A change that adds or alters a control
+
+- Check it against "What every control and surface owes the user" in
+  `DESIGN.md`, one rule at a time, and say in the PR how each applies.
+- Its Before and After screenshots show it in a normal window and in
+  fullscreen, in Codegraff Light and Dark.
+
 ### iOS tests
 
 - `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`: the
@@ -157,8 +164,6 @@ The expected behavior, or the proposed change.
   For the latest release, run `gh release view --repo justrach/nanoharness --json tagName`.
 - **graff:** Harness runs its managed copy, not the `graff` on `PATH`:
   `~/.harness/bin/graff --version` (macOS and Linux).
-- **Engine bugs go to `justrach/codegraff`.** That covers tools, compaction,
-  sessions, and model replies, and its issues use the same header.
 - **If either version is older than the latest release**, check whether the
   release notes or a closed issue already cover the bug. Reproduce it on the
   latest release before filing, or say plainly in the header that it wasn't
@@ -167,6 +172,34 @@ The expected behavior, or the proposed change.
   Comment on an existing issue only when you have a new repro or diagnostic.
 - **What the header must not contain:** account details, private repository
   names, local paths, session ids, or transcript excerpts.
+
+### Where an issue goes
+
+"Engine" means two things here: `graff`, the agent engine in
+`justrach/codegraff`, and `harness-engine`, this repository's local engine in
+`crates/engine`. Say which one you mean.
+
+- File in `justrach/codegraff` when graff misbehaves on its own (`graff acp`,
+  `graff -p`, the terminal): the agent loop, tools, compaction, model and
+  provider routing, graff's session store, graff worktrees, peers, and what
+  graff puts on the ACP wire. Its issues use the same header.
+- File in `justrach/nanoharness` when it is the app: rendering, the composer
+  and prompt queue, chat and session records, sync, devices, the iOS app,
+  installers and updaters, the picker UI, and how the app launches an agent or
+  maps its output.
+- The app speaks ACP only to graff, Grok, Devin, Hermes, Antigravity and Exo
+  (`crates/harness/src/acp/`). Claude, Codex, Cursor, OpenCode and Pi use
+  native drivers in `crates/harness/src/`, so file their problems here unless
+  the upstream tool misbehaves by itself.
+- For an ACP problem, look at the wire. If graff didn't send the update,
+  method or `_meta`, it's codegraff. If graff sent the right frame and the app
+  shows the wrong thing, it's here. If you can't tell, file here.
+- When both sides must change, file the primary issue where the wrong
+  behaviour starts and link a counterpart in the other repository.
+- Move an issue filed in the wrong repository with `gh issue transfer`; don't
+  file it again, so its author and history stay with it.
+- `justrach/harness` holds the previous desktop client. New issues don't go
+  there.
 
 ### Every issue carries an image
 
