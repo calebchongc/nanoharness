@@ -230,8 +230,18 @@ pub fn relay_first_action_method(method: &str) -> bool {
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
             | methods::WRITE_WORKSPACE_FILE
+            | methods::ADD_REPO
+            | methods::CLONE_REPO
+            | methods::CREATE_REPO
+            | methods::FETCH_ALL
+            | methods::SWITCH_REF
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
+            | methods::GRAFF_WORKTREE_ACTION
+            | methods::UPSERT_PROJECT_ACTION
+            | methods::DELETE_PROJECT_ACTION
+            | methods::RUN_PROJECT_ACTION
+            | methods::MERGE_CHANGE_REQUEST
             | methods::MCP_SERVER_ACTION
             | methods::INVOKE_NATIVE_EXTENSION
             | methods::BOT_ACTION
@@ -358,6 +368,33 @@ mod tests {
                 "{method}"
             );
             assert_eq!(admit_relay_rpc(true, method), RelayAdmit::Allow, "{method}");
+        }
+    }
+
+    #[test]
+    fn repo_mutations_and_project_actions_require_first_action_approval() {
+        for method in [
+            methods::ADD_REPO,
+            methods::CLONE_REPO,
+            methods::CREATE_REPO,
+            methods::FETCH_ALL,
+            methods::SWITCH_REF,
+            methods::GRAFF_WORKTREE_ACTION,
+            methods::UPSERT_PROJECT_ACTION,
+            methods::DELETE_PROJECT_ACTION,
+            methods::RUN_PROJECT_ACTION,
+            methods::MERGE_CHANGE_REQUEST,
+        ] {
+            assert_eq!(
+                admit_relay_action(true, method, false),
+                RelayAdmit::NeedsApproval,
+                "{method} must require first-action approval over the relay"
+            );
+            assert_eq!(
+                admit_relay_action(true, method, true),
+                RelayAdmit::Allow,
+                "{method} should be allowed once caller is approved"
+            );
         }
     }
 
