@@ -152,14 +152,20 @@ fn remote_control_reply(registry: &HarnessRegistry) -> serde_json::Value {
     serde_json::json!({ "enabled": registry.remote_control() })
 }
 
+/// Device-row name for an id, for refusal texts; `None` when unnamed.
+pub type DeviceNames = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Host-relay wrapper: the same [`EngineRpc`] the local IPC socket serves,
-/// with [`harness_rpc::admit_relay_action`] in front. Compromised-edge frames
+/// with [`harness_rpc::admit_relay_caller`] in front. Compromised-edge frames
 /// cannot flip the gate (`SetRemoteControl` is local-only), cannot apply
 /// updates or autonomy, and first execution / file write / terminal from a
 /// remote caller parks until a person on this computer approves.
 pub struct RelayRpc {
     inner: std::sync::Arc<dyn RpcService>,
     registry: std::sync::Arc<HarnessRegistry>,
+    /// This computer's device id, and the names refusals read from.
+    host_device_id: String,
+    names: Option<DeviceNames>,
 }
 
 impl RelayRpc {
@@ -167,7 +173,38 @@ impl RelayRpc {
         inner: std::sync::Arc<dyn RpcService>,
         registry: std::sync::Arc<HarnessRegistry>,
     ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self { inner, registry })
+        std::sync::Arc::new(Self {
+            inner,
+            registry,
+            host_device_id: String::new(),
+            names: None,
+        })
+    }
+
+    /// [`Self::wrap`], naming this computer and the caller in refusals.
+    pub fn wrap_named(
+        inner: std::sync::Arc<dyn RpcService>,
+        registry: std::sync::Arc<HarnessRegistry>,
+        host_device_id: impl Into<String>,
+        names: DeviceNames,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner,
+            registry,
+            host_device_id: host_device_id.into(),
+            names: Some(names),
+        })
+    }
+
+    fn name_of(&self, device_id: &str) -> Option<String> {
+        if device_id.is_empty() {
+            return None;
+        }
+        self.names
+            .as_ref()
+            .and_then(|names| names(device_id))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     }
 }
 
@@ -189,6 +226,48 @@ fn relay_caller_device(params: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// SHA-256 over a relayed request's params with object keys sorted, so the
+/// same request digests the same however its sender ordered them. Called
+/// after `relayDeviceId` is stripped: the caller is bound separately.
+pub fn relay_request_digest(params: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (ix, key) in keys.into_iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                    out.push(':');
+                    canonical(&map[key], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (ix, item) in items.iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    canonical(item, out);
+                }
+                out.push(']');
+            }
+            scalar => out.push_str(&scalar.to_string()),
+        }
+    }
+    use sha2::Digest as _;
+    let mut text = String::new();
+    canonical(params, &mut text);
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[async_trait]
 impl RpcService for RelayRpc {
     async fn handle(
@@ -200,42 +279,90 @@ impl RpcService for RelayRpc {
         if let Some(obj) = params.as_object_mut() {
             obj.remove("relayDeviceId");
         }
+        let identified = harness_rpc::relay_caller_identified(&caller);
         let approved = self.registry.is_sandbox_host()
-            || (!caller.is_empty() && self.registry.remote_device_approved(&caller));
-        match harness_rpc::admit_relay_action(self.registry.remote_control(), method, approved) {
-            harness_rpc::RelayAdmit::Allow => self.inner.handle(method, params).await,
-            harness_rpc::RelayAdmit::RemoteControlOff => {
-                Err(RpcError::Failed(harness_rpc::REMOTE_CONTROL_OFF.into()))
-            }
-            harness_rpc::RelayAdmit::LocalOnly => {
-                Err(RpcError::Failed(harness_rpc::RELAY_LOCAL_ONLY.into()))
-            }
-            harness_rpc::RelayAdmit::NeedsApproval => {
-                let device_id = if caller.is_empty() {
-                    "unknown".into()
-                } else {
-                    caller.clone()
-                };
-                self.registry
-                    .park_remote_approval(harness_rpc::RemoteApproval {
-                        id: crate::new_id(),
-                        kind: "rpc".into(),
-                        device_id,
-                        chat_id: params
-                            .get("chatId")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        command_id: None,
-                        method: Some(method.to_string()),
-                        summary: if caller.is_empty() {
-                            format!("{method} from another device")
-                        } else {
-                            format!("{method} from {caller}")
-                        },
-                    });
-                Err(RpcError::Failed(harness_rpc::RELAY_NEEDS_APPROVAL.into()))
+            || (identified && self.registry.remote_device_approved(&caller));
+        let mut verdict = harness_rpc::admit_relay_caller(
+            self.registry.remote_control(),
+            method,
+            &caller,
+            approved,
+        );
+        let allow_once = harness_rpc::relay_allow_once_method(method);
+        let mut request_digest = None;
+        if verdict == harness_rpc::RelayAdmit::NeedsApproval && allow_once {
+            // Remote control is on, the method is gated and not local-only,
+            // and the caller is identified but unapproved: only here may an
+            // "Allow once" for this exact request stand in for approval.
+            let digest = relay_request_digest(&params);
+            if self.registry.take_relay_once_grant(
+                &caller,
+                method,
+                &digest,
+                std::time::Instant::now(),
+            ) {
+                tracing::info!(method, device = %caller, "relay: remote action admitted by Allow once");
+                verdict = harness_rpc::RelayAdmit::Allow;
+            } else {
+                request_digest = Some(digest);
             }
         }
+        if verdict == harness_rpc::RelayAdmit::Allow {
+            return self.inner.handle(method, params).await;
+        }
+        let caller_class = if !identified {
+            "unidentified"
+        } else if approved {
+            "approved"
+        } else {
+            "unapproved"
+        };
+        let logged_device = if identified { caller.as_str() } else { "-" };
+        tracing::info!(
+            method,
+            reason = harness_rpc::relay_refusal_reason(verdict),
+            caller = caller_class,
+            device = %logged_device,
+            "relay: remote action refused"
+        );
+        let device_name = if identified {
+            self.name_of(&caller)
+        } else {
+            None
+        };
+        if verdict == harness_rpc::RelayAdmit::NeedsApproval {
+            // A name is the peer's own to set, so the owner also sees the id
+            // it asserted (its first 8 characters, as Settings shows ids).
+            let short_id: String = caller.chars().take(8).collect();
+            let label = match &device_name {
+                Some(name) => format!("{name} ({short_id})"),
+                None => caller.clone(),
+            };
+            self.registry
+                .park_remote_approval(harness_rpc::RemoteApproval {
+                    id: crate::new_id(),
+                    kind: "rpc".into(),
+                    device_id: caller.clone(),
+                    chat_id: params
+                        .get("chatId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    command_id: None,
+                    method: Some(method.to_string()),
+                    summary: format!("{method} from {label}"),
+                    allow_once,
+                    request_digest,
+                });
+        }
+        let host_name = self.name_of(&self.host_device_id);
+        let text = harness_rpc::relay_refusal_text(
+            verdict,
+            allow_once,
+            host_name.as_deref(),
+            device_name.as_deref(),
+        )
+        .unwrap_or_default();
+        Err(RpcError::Failed(text))
     }
 }
 
