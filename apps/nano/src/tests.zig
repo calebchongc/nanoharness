@@ -65,6 +65,7 @@ test {
     _ = @import("tests_ui_prompt_history.zig");
     _ = @import("tests_ui_caret.zig");
     _ = @import("app_drafts.zig");
+    _ = @import("app_attachment_images.zig");
     _ = @import("composer_defaults.zig");
     _ = @import("snap.zig");
     _ = @import("app_account.zig");
